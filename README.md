@@ -1,15 +1,45 @@
 ### IfxAlchemy
-The InformixAlchemy adapter provides a SQLAlchemy (Ref: https://www.sqlalchemy.org/) interface to Informix database
+The InformixAlchemy adapter provides a SQLAlchemy 2.0 (Ref: https://www.sqlalchemy.org/) interface to Informix database
 
 Please note that this project is still under active development. Please report any bugs in the issue tracker
 
 ### Current state 
-Ready for use
+Not Ready for use
+
+### Runtime contract
+
+- Default dialect: `informix+pyodbc`
+- Statement cache: disabled for `IfxDialect`, `IfxDialect_IfxPy` and
+  `IfxDialect_pyodbc` until the official SQLAlchemy suite is green for the
+  selected backend.
+- External schema contract: the selected Informix backend is gated as
+  `supports_schemas = False`; owner-qualified cross-schema DDL/reflection is
+  not part of the supported SQLAlchemy 2.0 surface for this package.
+- Integer autoincrement contract: implicit integer primary keys compile to
+  `SERIAL`; implicit bigint primary keys compile to `SERIAL8`. Explicit
+  `Identity()` on integer columns is normalized to the same `SERIAL` /
+  `SERIAL8` contract because the target Informix backend rejects the SQL
+  standard `GENERATED ... AS IDENTITY` DDL emitted by SQLAlchemy.
+- `BIGSERIAL`: compiles to `BIGSERIAL`, insertions without an explicit PK fetch
+  the generated identifier through `DBINFO('bigserial')`, and reflected columns
+  report `autoincrement=True`.
+- Temporary object introspection:
+  `Inspector.has_table()` supports temp tables on the same connection.
+  `Inspector.get_temp_table_names()` and `Inspector.get_temp_view_names()`
+  intentionally return `[]` because the Informix ODBC metadata exposed to this
+  dialect does not provide a reliable connection-local listing, and Informix
+  temp views are not supported.
+- Official SQLAlchemy suite runner:
+  `run_tests.py` prefers `INFORMIX_SQLALCHEMY_SUITE_URL` over the generic
+  package test URL. Use that variable to point the official suite at an
+  isolated Informix database; running multi-reflection tests against a shared
+  application database will produce false failures because SQLAlchemy expects
+  the database under test to contain only the suite's own fixtures.
 
 ### To install Informix Alchemy from source
 ```bash
 # Standard Infomrix Python setup should be used (Ref: https://github.com/OpenInformix/IfxPy/blob/master/README.md )
-git clone https://github.com/OpenInformix/InformixAlchemy.git
+git clone https://github.com/amontilla/InformixAlchemy.git
 cd InformixAlchemy
 # rm -rf build 
 python  setup.py  build
@@ -38,24 +68,22 @@ from sqlalchemy import MetaData, Table, Column, Integer
 
 ConStr = 'informix://<username>:<password>@<machine name>:<port number>/<database name>;SERVER=<server name>'
 engine = create_engine(ConStr)
-connection = engine.connect()
 
-connection.execute("drop table if exists employee")
-connection.execute("create table employee (id int, fname varchar(20), lname varchar(20), salary money, purchase DATE )")
-connection.execute("insert into employee values(1, 'Sheetal', 'J',  20100.19, 2019-02-02 )")
-connection.execute("insert into employee values(2, 'Joe', 'T',  20111.19, 2019-11-023 )")
-connection.execute("update employee set id=200 where id=2 ")
-result = connection.execute("select * from employee")
+with engine.begin() as connection:
+    connection.exec_driver_sql("drop table if exists employee")
+    connection.exec_driver_sql("create table employee (id int, fname varchar(20), lname varchar(20), salary money, purchase DATE )")
+    connection.exec_driver_sql("insert into employee values(1, 'Sheetal', 'J',  20100.19, 2019-02-02 )")
+    connection.exec_driver_sql("insert into employee values(2, 'Joe', 'T',  20111.19, 2019-11-023 )")
+    connection.exec_driver_sql("update employee set id=200 where id=2 ")
+    result = connection.exec_driver_sql("select * from employee")
 
+    for row in result:
+         print("id:", row[0])
+         print("fName:", row[1])
+         print("lname:", row[2])
+         print("Salary:", row[3])
+         print("Purchase:", row[4])
 
-for row in result:
-     print("id:", row[0])
-     print("fName:", row[1])
-     print("lname:", row[2])
-     print("Salary:", row[3])
-     print("Purchase:", row[4])
-
-connection.close()
 print( "Done2" )
 ```
 

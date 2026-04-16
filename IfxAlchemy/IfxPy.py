@@ -1,36 +1,31 @@
-# +--------------------------------------------------------------------------+
-# |  Licensed Materials - Property of IBM & OpenInformix                     |
-# |                                                                          |
-# | (C) Copyright IBM Corporation 2008, 2016.                                |
-# +--------------------------------------------------------------------------+
-# | This module complies with SQLAlchemy 0.8 and is                          |
-# | Licensed under the Apache License, Version 2.0 (the "License");          |
-# | you may not use this file except in compliance with the License.         |
-# | You may obtain a copy of the License at                                  |
-# | http://www.apache.org/licenses/LICENSE-2.0 Unless required by applicable |
-# | law or agreed to in writing, software distributed under the License is   |
-# | distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY |
-# | KIND, either express or implied. See the License for the specific        |
-# | language governing permissions and limitations under the License.        |
-# +--------------------------------------------------------------------------+
-# |                                                                          | 
-# | Authors: Sathyanesh Krishnan, Shilpa S Jadhav, Tim Powell                |       
-# |                                                                          |
-# +--------------------------------------------------------------------------+
-# ///////////////////////////////////////////////////////////////////////////
-# +--------------------------------------------------------------------------+
-# |                                                                          |
-# | Authors: Alex Pitigoi, Abhigyan Agrawal, Rahul Priyadarshi,Abhinav Radke |
-# | Contributors: Jaimy Azle, Mike Bayer,Hemlata Bhatt                       |
-# +--------------------------------------------------------------------------+
-
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2008-2016 IBM Corporation
+# Copyright (c) 2026 Angel Montilla
+#
+# Originally derived from IfxAlchemy / OpenInformix.
+# Modified by Angel Montilla to adapt IfxAlchemy to SQLAlchemy 2.0.
+#
+# Original authors: Sathyanesh Krishnan, Shilpa S Jadhav, Tim Powell
+# Additional authors: Alex Pitigoi, Abhigyan Agrawal, Rahul Priyadarshi, Abhinav Radke
+# Contributors: Jaimy Azle, Mike Bayer, Hemlata Bhatt, Angel Montilla
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import re
 from .base import IfxExecutionContext, IfxDialect
-from sqlalchemy import processors, types as sa_types, util
-from sqlalchemy import __version__ as SA_Version
+from sqlalchemy import types as sa_types, util
+from sqlalchemy.engine import processors
 from sqlalchemy.exc import ArgumentError
-SA_Version = [int(ver_token) for ver_token in SA_Version.split('.')[0:2]]
 SQL_TXN_READ_UNCOMMITTED = 1
 SQL_TXN_READ_COMMITTED = 2
 SQL_TXN_REPEATABLE_READ = 4
@@ -38,11 +33,6 @@ SQL_TXN_SERIALIZABLE = 8
 SQL_ATTR_TXN_ISOLATION = 108
 
 VERSION_RE = re.compile(r'(\d+)\.(\d+)(.+\d+)')
-
-if SA_Version < [0, 8]:
-    from sqlalchemy.engine import base
-else:
-    from sqlalchemy.engine import result as _result
 
 class _IFX_Numeric_IfxPy(sa_types.Numeric):
     def result_processor(self, dialect, coltype):
@@ -62,26 +52,14 @@ class IfxExecutionContext_IfxPy(IfxExecutionContext):
     def get_lastrowid(self):
         return self._lastrowid
 
-    def get_result_proxy(self):
-        if self._callproc_result and self._out_parameters:
-            if SA_Version < [0, 8]:
-                result = base.ResultProxy(self)
-            else:
-                result = _result.ResultProxy(self)
-            result.out_parameters = {}
+    def get_out_parameter_values(self, out_param_names):
+        if not self._callproc_result or not self._out_parameters:
+            return super().get_out_parameter_values(out_param_names)
 
-            for bindparam in self.compiled.binds.values():
-                if bindparam.isoutparam:
-                    name = self.compiled.bind_names[bindparam]
-                    result.out_parameters[name] = self._callproc_result[self.compiled.positiontup.index(name)]
-
-            return result
-        else:
-            if SA_Version < [0, 8]:
-                result = base.ResultProxy(self)
-            else:
-                result = _result.ResultProxy(self)
-            return result
+        return [
+            self._callproc_result[self.compiled.positiontup.index(name)]
+            for name in out_param_names
+        ]
 
 class IfxDialect_IfxPy(IfxDialect):
 
@@ -93,6 +71,7 @@ class IfxDialect_IfxPy(IfxDialect):
     supports_char_length = True
     supports_default_values = False
     supports_multivalues_insert = True
+    supports_statement_cache = False
     execution_ctx_cls = IfxExecutionContext_IfxPy
 
     colspecs = util.update_copy(
@@ -103,11 +82,12 @@ class IfxDialect_IfxPy(IfxDialect):
     )
 
     @classmethod
-    def dbapi(cls):
-        """ Returns: the underlying DBAPI driver module
-        """
+    def import_dbapi(cls):
+        """Return the underlying DBAPI driver module."""
         import IfxPyDbi as module
         return module
+
+    dbapi = import_dbapi
 
     def do_execute(self, cursor, statement, parameters, context=None):
         if context and context._out_parameters:

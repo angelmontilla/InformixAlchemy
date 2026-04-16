@@ -1,36 +1,85 @@
-from sqlalchemy import create_engine
-from sqlalchemy.dialects import registry
-from sqlalchemy.orm import sessionmaker
+from __future__ import annotations
 
-#import IfxPyDbi as dbapi2
+import datetime as dt
 
-registry.register("informix",        "IfxAlchemy.IfxPy", "IfxDialect_IfxPy")
-registry.register("informix.IfxPy",  "IfxAlchemy.IfxPy", "IfxDialect_IfxPy")
-registry.register("informix.pyodbc", "IfxAlchemy.pyodbc", "IfxDialect_pyodbc")
-
-from sqlalchemy import MetaData, Table, Column, Integer
-
-ConStr = 'informix://<username>:<password>@<host name>:<port number>/<databasename>;SERVER=<server name>'
-engine = create_engine(ConStr)
-
-connection = engine.connect()
-
-connection.execute("drop table if exists employee");
-connection.execute("create table employee (id int, fname varchar(20), lname varchar(20), salary money, purchase DATE )")
-connection.execute("insert into employee values(1, 'Sheetal', 'J',  20100.19, 2019-02-02 )");
-connection.execute("insert into employee values(2, 'Joe', 'T',  20111.19, 2019-11-023 )");
-connection.execute("update employee set id=200 where id=2 ");
-result = connection.execute("select * from employee")
+from sqlalchemy import text
 
 
-for row in result:
-     print("id:", row[0])
-     print("fName:", row[1])
-     print("lname:", row[2])
-     print("Salary:", row[3])
-     print("Purchase:", row[4])
+def test_basic_crud_round_trip(engine, name_factory):
+    table_name = name_factory("employee_")
 
-#connection.execute("drop table employee");
+    create_sql = f"""
+    CREATE TABLE {table_name} (
+        id INTEGER NOT NULL,
+        fname VARCHAR(20),
+        lname VARCHAR(20),
+        salary MONEY,
+        purchase DATE
+    )
+    """
 
-connection.close()
-print( "Done2" )
+    insert_sql = text(
+        f"""
+        INSERT INTO {table_name} (id, fname, lname, salary, purchase)
+        VALUES (:id, :fname, :lname, :salary, :purchase)
+        """
+    )
+
+    update_sql = text(f"UPDATE {table_name} SET id = :new_id WHERE id = :old_id")
+    select_sql = text(
+        f"""
+        SELECT id, fname, lname, salary, purchase
+        FROM {table_name}
+        ORDER BY id
+        """
+    )
+
+    with engine.connect() as connection:
+        try:
+            connection.exec_driver_sql(create_sql)
+            connection.commit()
+
+            connection.execute(
+                insert_sql,
+                [
+                    {
+                        "id": 1,
+                        "fname": "Sheetal",
+                        "lname": "J",
+                        "salary": 20100.19,
+                        "purchase": dt.date(2019, 2, 2),
+                    },
+                    {
+                        "id": 2,
+                        "fname": "Joe",
+                        "lname": "T",
+                        "salary": 20111.19,
+                        "purchase": dt.date(2019, 11, 23),
+                    },
+                ],
+            )
+            connection.commit()
+
+            connection.execute(update_sql, {"new_id": 200, "old_id": 2})
+            connection.commit()
+
+            rows = connection.execute(select_sql).all()
+        finally:
+            try:
+                connection.exec_driver_sql(f"DROP TABLE {table_name}")
+                connection.commit()
+            except Exception:
+                connection.rollback()
+
+    assert len(rows) == 2
+    assert rows[0].id == 1
+    assert rows[0].fname.strip() == "Sheetal"
+    assert rows[0].lname.strip() == "J"
+    assert float(rows[0].salary) == 20100.19
+    assert rows[0].purchase == dt.date(2019, 2, 2)
+
+    assert rows[1].id == 200
+    assert rows[1].fname.strip() == "Joe"
+    assert rows[1].lname.strip() == "T"
+    assert float(rows[1].salary) == 20111.19
+    assert rows[1].purchase == dt.date(2019, 11, 23)

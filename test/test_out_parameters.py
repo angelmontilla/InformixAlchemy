@@ -8,7 +8,7 @@ class OutParamTest(fixtures.TestBase):
 
     @classmethod
     def setup_class(cls):
-        config.db.execute("""
+        config.db.exec_driver_sql("""
                     create or replace procedure foo(IN x_in integer, OUT x_out integer, OUT y_out integer, OUT z_out varchar(20))
                     BEGIN
                     SET x_out = 10;
@@ -30,4 +30,4 @@ class OutParamTest(fixtures.TestBase):
 
     @classmethod
     def teardown_class(cls):
-         config.db.execute("DROP PROCEDURE foo")
+         config.db.exec_driver_sql("DROP PROCEDURE foo")

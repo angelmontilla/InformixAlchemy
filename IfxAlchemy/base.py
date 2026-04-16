@@ -1,27 +1,25 @@
-# +--------------------------------------------------------------------------+
-# |  Licensed Materials - Property of IBM & OpenInformix                     |
-# |                                                                          |
-# | (C) Copyright IBM Corporation 2008, 2016.                                |
-# +--------------------------------------------------------------------------+
-# | This module complies with SQLAlchemy 0.8 and is                          |
-# | Licensed under the Apache License, Version 2.0 (the "License");          |
-# | you may not use this file except in compliance with the License.         |
-# | You may obtain a copy of the License at                                  |
-# | http://www.apache.org/licenses/LICENSE-2.0 Unless required by applicable |
-# | law or agreed to in writing, software distributed under the License is   |
-# | distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY |
-# | KIND, either express or implied. See the License for the specific        |
-# | language governing permissions and limitations under the License.        |
-# +--------------------------------------------------------------------------+
-# |                                                                          |
-# | Authors: Sathyanesh Krishnan, Shilpa S Jadhav                            |
-# |                                                                          |
-# +--------------------------------------------------------------------------+
-# ///////////////////////////////////////////////////////////////////////////
-# +--------------------------------------------------------------------------+
-# | Authors: Alex Pitigoi, Abhigyan Agrawal, Rahul Priyadarshi               |
-# | Contributors: Jaimy Azle, Mike Bayer                                     |
-# +--------------------------------------------------------------------------+
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2008-2016 IBM Corporation
+# Copyright (c) 2026 Angel Montilla
+#
+# Originally derived from IfxAlchemy / OpenInformix.
+# Modified by Angel Montilla to adapt IfxAlchemy to SQLAlchemy 2.0.
+#
+# Original authors: Sathyanesh Krishnan, Shilpa S Jadhav
+# Additional authors: Alex Pitigoi, Abhigyan Agrawal, Rahul Priyadarshi
+# Contributors: Jaimy Azle, Mike Bayer, Angel Montilla
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Support for Informix database
 
 """
@@ -40,6 +38,11 @@ from sqlalchemy.types import BLOB, CHAR, CLOB, DATE, DATETIME, INTEGER,\
     VARCHAR, FLOAT
 
 SA_Version = [int(ver_token) for ver_token in SA_Version.split('.')[0:2]]
+_IFX_SINGLE_ROW_FROM = " FROM systables WHERE tabid = 1"
+_IFX_LASTROWID_DBINFO_BY_TYPE = {
+    "BIGSERIAL": "bigserial",
+    "SERIAL8": "serial8",
+}
 
 # as documented from:
 RESERVED_WORDS = set(
@@ -175,6 +178,63 @@ class LONGVARGRAPHIC(sa_types.UnicodeText):
 class XML(sa_types.Text):
     __visit_name__ = "XML"
 
+
+class SERIAL(sa_types.INTEGER):
+    __visit_name__ = "SERIAL"
+
+
+class SERIAL8(sa_types.BIGINT):
+    __visit_name__ = "SERIAL8"
+
+
+class BIGSERIAL(sa_types.BIGINT):
+    __visit_name__ = "BIGSERIAL"
+
+
+def _ifx_type_visit_name(type_):
+    if type_ is None:
+        return None
+    if isinstance(type_, type):
+        return getattr(type_, "__visit_name__", None)
+    return getattr(type_, "__visit_name__", None)
+
+
+def _is_ifx_serial_type(type_):
+    return _ifx_type_visit_name(type_) in {"SERIAL", "SERIAL8", "BIGSERIAL"}
+
+
+def _get_ifx_autoincrement_type_name(column):
+    type_name = _ifx_type_visit_name(column.type)
+
+    if type_name in {"SERIAL", "SERIAL8", "BIGSERIAL"}:
+        return type_name
+
+    table = getattr(column, "table", None)
+    autoincrement_column = getattr(table, "_autoincrement_column", None)
+    if autoincrement_column is not column:
+        return type_name
+
+    if isinstance(column.type, sa_types.BigInteger):
+        return "SERIAL8"
+    if isinstance(column.type, sa_types.Integer):
+        return "SERIAL"
+
+    return type_name
+
+
+def _get_ifx_lastrowid_query(column):
+    type_name = _get_ifx_autoincrement_type_name(column)
+
+    if type_name == "BIGSERIAL":
+        expr = "CAST(DBINFO('bigserial') AS DECIMAL(20,0))"
+    elif type_name == "SERIAL8":
+        expr = "DBINFO('serial8')"
+    else:
+        expr = "DBINFO('sqlca.sqlerrd1')"
+
+    return "SELECT %s%s" % (expr, _IFX_SINGLE_ROW_FROM)
+
+
 colspecs = {
     sa_types.Boolean: _IFX_Boolean,
     sa_types.Date: _IFX_Date
@@ -187,6 +247,9 @@ ischema_names = {
     'CLOB': CLOB,
     'DATE': DATE,
     'DATETIME': DATETIME,
+    'SERIAL': SERIAL,
+    'SERIAL8': SERIAL8,
+    'BIGSERIAL': BIGSERIAL,
     'INTEGER': INTEGER,
     'SMALLINT': SMALLINT,
     'BIGINT': BIGINT,
@@ -220,16 +283,25 @@ class IfxTypeCompiler(compiler.GenericTypeCompiler):
         return "TIME"
 
     def visit_DATETIME(self, type_):
-        return self.visit_TIMESTAMP(type_)
+        return "DATETIME"
 
     def visit_SMALLINT(self, type_):
         return "SMALLINT"
 
     def visit_INT(self, type_):
-        return "INT"
+        return "INTEGER"
 
     def visit_BIGINT(self, type_):
         return "BIGINT"
+
+    def visit_SERIAL(self, type_):
+        return "SERIAL"
+
+    def visit_SERIAL8(self, type_):
+        return "SERIAL8"
+
+    def visit_BIGSERIAL(self, type_):
+        return "BIGSERIAL"
 
     def visit_FLOAT(self, type_):
         return "FLOAT" if type_.precision is None else \
@@ -245,12 +317,12 @@ class IfxTypeCompiler(compiler.GenericTypeCompiler):
         return "CLOB"
 
     def visit_BLOB(self, type_):
-        return "BLOB(1M)" if type_.length in (None, 0) else \
-                "BLOB(%(length)s)" % {'length': type_.length}
+        # Informix accepts BLOB in DDL, while the legacy BLOB(1M) form
+        # raises -201 on the target server used by the SQLAlchemy suite.
+        return "BLOB"
 
     def visit_DBCLOB(self, type_):
-        return "DBCLOB(1M)" if type_.length in (None, 0) else \
-                "DBCLOB(%(length)s)" % {'length': type_.length}
+        return "DBCLOB"
 
     def visit_VARCHAR(self, type_):
         return "VARCHAR(%(length)s)" % {'length': type_.length}
@@ -286,7 +358,7 @@ class IfxTypeCompiler(compiler.GenericTypeCompiler):
         return self.visit_DECIMAL(type_)
 
     def visit_datetime(self, type_):
-        return self.visit_TIMESTAMP(type_)
+        return self.visit_DATETIME(type_)
 
     def visit_date(self, type_):
         return self.visit_DATE(type_)
@@ -316,7 +388,7 @@ class IfxTypeCompiler(compiler.GenericTypeCompiler):
         return self.visit_CLOB(type_)
 
     def visit_large_binary(self, type_):
-        return self.visit_BLOB(type_)
+        return "BYTE"
 
 
 class IfxCompiler(compiler.SQLCompiler):
@@ -347,9 +419,6 @@ class IfxCompiler(compiler.SQLCompiler):
                                                 self.process(binary.right))
 
     def limit_clause(self, select,**kwargs):
-        if (select._limit is not None) and (select._offset is None):
-            return " FETCH FIRST %s ROWS ONLY" % select._limit
-        else:
             return ""
 
     def visit_select(self, select, **kwargs):
@@ -357,7 +426,7 @@ class IfxCompiler(compiler.SQLCompiler):
         sql_ori = compiler.SQLCompiler.visit_select(self, select, **kwargs)
         if offset is not None:
             __rownum = 'Z.__ROWNUM'
-            sql_split = re.split("[\s+]FROM ", sql_ori, 1)
+            sql_split = re.split(r"[\s+]FROM ", sql_ori, 1)
             sql_sec = ""
             sql_sec = " \nFROM %s " % ( sql_split[1] )
 
@@ -400,9 +469,9 @@ class IfxCompiler(compiler.SQLCompiler):
             sql = '%s, ( ROW_NUMBER() OVER() ) AS "%s" FROM ( %s ) AS M' % ( sql_sel, __rownum, sql_pri )
             sql = '%s FROM ( %s ) Z WHERE' % ( sql_sel, sql )
 
-            if offset is not 0:
+            if offset != 0:
                 sql = '%s "%s" > %d' % ( sql, __rownum, offset )
-            if offset is not 0 and limit is not None:
+            if offset != 0 and limit is not None:
                 sql = '%s AND ' % ( sql )
             if limit is not None:
                 sql = '%s "%s" <= %d' % ( sql, __rownum, offset + limit )
@@ -410,11 +479,11 @@ class IfxCompiler(compiler.SQLCompiler):
         else:
             return sql_ori
 
-    def visit_sequence(self, sequence):
-        return "NEXT VALUE FOR %s" % sequence.name
+    def visit_sequence(self, sequence, **kw):
+        return "%s.NEXTVAL" % self.preparer.format_sequence(sequence)
 
     def default_from(self):
-        return  " FROM SYSIBM.SYSDUMMY1"
+        return _IFX_SINGLE_ROW_FROM
 
     def visit_function(self, func, result_map=None, **kwargs):
         if func.name.upper() == "AVG":
@@ -433,23 +502,41 @@ class IfxCompiler(compiler.SQLCompiler):
     def visit_cast(self, cast, **kw):
         type_ = cast.typeclause.type
 
-        # TODO: verify that CAST shouldn't be called with
-        # other types, I was able to CAST against VARCHAR
-        # for example
         if isinstance(type_, (
-                    sa_types.DateTime, sa_types.Date, sa_types.Time,
-                    sa_types.DECIMAL)):
+                    sa_types.DateTime,
+                    sa_types.Date,
+                    sa_types.Time,
+                    sa_types.DECIMAL,
+                    sa_types.Numeric,
+                    sa_types.Integer,
+                    sa_types.BigInteger,
+                    sa_types.SmallInteger,
+                    sa_types.Float,
+                    sa_types.String,
+                    sa_types.Text,
+                    sa_types.Unicode,
+                    sa_types.UnicodeText,
+                    sa_types.Boolean)):
             return super(IfxCompiler, self).visit_cast(cast, **kw)
         else:
-            return self.process(cast.clause)
+            return self.process(cast.clause, **kw)
 
-    def get_select_precolumns(self, select,**kwargs):
+    def get_select_precolumns(self, select, **kwargs):
+        text = ""
+
+        # Informix: SELECT FIRST n DISTINCT ...
+        if (select._limit_clause is not None) and (select._offset_clause is None):
+            if select._simple_int_clause(select._limit_clause):
+                text += "FIRST %s " % select._limit
+            else:
+                text += "FIRST %s " % self.process(select._limit_clause, **kwargs)
+
         if isinstance(select._distinct, str):
-            return select._distinct.upper() + " "
+            text += select._distinct.upper() + " "
         elif select._distinct:
-            return "DISTINCT "
-        else:
-            return ""
+            text += "DISTINCT "
+
+        return text
 
     def visit_join(self, join, asfrom=False, **kwargs):
         # NOTE: this is the same method as that used in mysql/base.py
@@ -461,13 +548,13 @@ class IfxCompiler(compiler.SQLCompiler):
              " ON ",
              self.process(join.onclause, **kwargs)))
 
-    def visit_savepoint(self, savepoint_stmt):
+    def visit_savepoint(self, savepoint_stmt, **kw):
         return "SAVEPOINT %(sid)s ON ROLLBACK RETAIN CURSORS" % {'sid':self.preparer.format_savepoint(savepoint_stmt)}
 
-    def visit_rollback_to_savepoint(self, savepoint_stmt):
+    def visit_rollback_to_savepoint(self, savepoint_stmt, **kw):
         return 'ROLLBACK TO SAVEPOINT %(sid)s'% {'sid':self.preparer.format_savepoint(savepoint_stmt)}
 
-    def visit_release_savepoint(self, savepoint_stmt):
+    def visit_release_savepoint(self, savepoint_stmt, **kw):
         return 'RELEASE TO SAVEPOINT %(sid)s'% {'sid':self.preparer.format_savepoint(savepoint_stmt)}
 
     def visit_unary(self, unary, **kw):
@@ -501,7 +588,20 @@ class IfxDDLCompiler(compiler.DDLCompiler):
 
     def get_column_specification(self, column, **kw):
         col_spec = [self.preparer.format_column(column)]
-        col_spec.append(self.dialect.type_compiler.process(column.type,type_expression=column))
+        rendered_type = self.dialect.type_compiler.process(
+            column.type,
+            type_expression=column
+        )
+
+        autoincrement_type_name = _get_ifx_autoincrement_type_name(column)
+        if autoincrement_type_name == "SERIAL":
+            rendered_type = "SERIAL"
+        elif autoincrement_type_name == "SERIAL8":
+            rendered_type = "SERIAL8"
+        elif autoincrement_type_name == "BIGSERIAL":
+            rendered_type = "BIGSERIAL"
+
+        col_spec.append(rendered_type)
 
 
         # column-options: "NOT NULL"
@@ -513,11 +613,6 @@ class IfxDDLCompiler(compiler.DDLCompiler):
         if default is not None:
             col_spec.append('WITH DEFAULT')
             col_spec.append(default)
-
-        if column is column.table._autoincrement_column:
-            col_spec.append('GENERATED BY DEFAULT')
-            col_spec.append('AS IDENTITY')
-            col_spec.append('(START WITH 1)')
 
         column_spec = ' '.join(col_spec)
         return column_spec
@@ -531,6 +626,48 @@ class IfxDDLCompiler(compiler.DDLCompiler):
             util.warn(
                 "Informix does not support UPDATE CASCADE for foreign keys.")
 
+        return text
+
+    def _define_constraint_name_postfix(self, constraint):
+        if constraint.name is None:
+            return ""
+
+        formatted_name = self.preparer.format_constraint(constraint)
+        if formatted_name is None:
+            return ""
+
+        return " CONSTRAINT %s" % formatted_name
+
+    def visit_primary_key_constraint(self, constraint, **kw):
+        if len(constraint) == 0:
+            return ""
+
+        text = self.define_primary_key_body(constraint, **kw)
+        text += self._define_constraint_name_postfix(constraint)
+        text += self.define_constraint_deferrability(constraint)
+        return text
+
+    def visit_unique_constraint(self, constraint, **kw):
+        if len(constraint) == 0:
+            return ""
+
+        text = self.define_unique_body(constraint, **kw)
+        text += self._define_constraint_name_postfix(constraint)
+        text += self.define_constraint_deferrability(constraint)
+        return text
+
+    def visit_foreign_key_constraint(self, constraint, **kw):
+        text = self.define_foreign_key_body(constraint, **kw)
+        text += self._define_constraint_name_postfix(constraint)
+        text += self.define_constraint_match(constraint)
+        text += self.define_constraint_cascades(constraint)
+        text += self.define_constraint_deferrability(constraint)
+        return text
+
+    def visit_check_constraint(self, constraint, **kw):
+        text = self.define_check_body(constraint, **kw)
+        text += self._define_constraint_name_postfix(constraint)
+        text += self.define_constraint_deferrability(constraint)
         return text
 
     def visit_drop_constraint(self, drop, **kw):
@@ -581,16 +718,21 @@ class IfxDDLCompiler(compiler.DDLCompiler):
         result = super( IfxDDLCompiler, self ).create_table_constraints(table, **kw)
         return result
 
-    def visit_create_index(self, create, include_schema=True, include_table_schema=True):
+    def visit_create_index(self, create, include_schema=True, include_table_schema=True, **kw):
         if SA_Version < [0, 8]:
             sql = super( IfxDDLCompiler, self ).visit_create_index(create)
         else:
-            sql = super( IfxDDLCompiler, self ).visit_create_index(create, include_schema, include_table_schema)
+            sql = super( IfxDDLCompiler, self ).visit_create_index(
+                create,
+                include_schema=include_schema,
+                include_table_schema=include_table_schema,
+                **kw
+            )
         if getattr(create.element, 'uConstraint_as_index', None):
             sql += ' EXCLUDE NULL KEYS'
         return sql
 
-    def visit_add_constraint(self, create):
+    def visit_add_constraint(self, create, **kw):
         if self._is_nullable_unique_constraint_supported(self.dialect):
             if isinstance(create.element, sa_schema.UniqueConstraint):
                 for column in create.element:
@@ -607,7 +749,10 @@ class IfxDDLCompiler(compiler.DDLCompiler):
                     index.uConstraint_as_index = True
                     sql = self.visit_create_index(sa_schema.CreateIndex(index))
                     return sql
-        sql = super( IfxDDLCompiler, self ).visit_add_constraint(create)
+        sql = "ALTER TABLE %s ADD CONSTRAINT %s" % (
+            self.preparer.format_table(create.element.table),
+            self.process(create.element),
+        )
         return sql
 
 class IfxIdentifierPreparer(compiler.IdentifierPreparer):
@@ -618,33 +763,53 @@ class IfxIdentifierPreparer(compiler.IdentifierPreparer):
 
 class IfxExecutionContext(default.DefaultExecutionContext):
     def fire_sequence(self, seq, type_):
-        return self._execute_scalar("SELECT NEXTVAL FOR " +
-                    self.dialect.identifier_preparer.format_sequence(seq) +
-                    " FROM SYSIBM.SYSDUMMY1", type_)
+        return self._execute_scalar(
+            "SELECT "
+            + self.dialect.identifier_preparer.format_sequence(seq)
+            + ".NEXTVAL"
+            + _IFX_SINGLE_ROW_FROM,
+            type_,
+        )
 
 class _SelectLastRowIDMixin(object):
     _select_lastrowid = False
     _lastrowid = None
+    _lastrowid_query = None
 
 
     def get_lastrowid(self):
         return self._lastrowid
 
     def pre_exec(self):
+        self._lastrowid = None
+        self._select_lastrowid = False
+        self._lastrowid_query = None
+
         if self.isinsert:
             tbl = self.compiled.statement.table
             seq_column = tbl._autoincrement_column
             insert_has_sequence = seq_column is not None
+            compiled_params = (
+                self.compiled_parameters[0] if self.compiled_parameters else {}
+            )
+            explicit_pk_value = (
+                seq_column is not None
+                and compiled_params.get(seq_column.key) is not None
+            )
 
             self._select_lastrowid = insert_has_sequence and \
+                                        not explicit_pk_value and \
                                         not self.compiled.returning and \
-                                        not self.compiled.inline
+                                        not self.compiled.inline and \
+                                        not self.executemany
+            if self._select_lastrowid:
+                self._lastrowid_query = _get_ifx_lastrowid_query(seq_column)
 
     def post_exec(self):
         conn = self.root_connection
-        if self._select_lastrowid:
+        if self._select_lastrowid and self._lastrowid_query:
             conn._cursor_execute(self.cursor,
-                    "SELECT IDENTITY_VAL_LOCAL() FROM SYSIBM.SYSDUMMY1",
+                    self._lastrowid_query,
                     (), self)
             row = self.cursor.fetchall()[0]
             if row[0] is not None:
@@ -668,6 +833,7 @@ class IfxDialect(default.DefaultDialect):
     supports_sane_multi_rowcount = True
     supports_native_decimal = False
     supports_native_boolean = False
+    supports_schemas = False
     preexecute_sequences = False
     supports_alter = True
     supports_sequences = True
@@ -677,6 +843,7 @@ class IfxDialect(default.DefaultDialect):
 
     supports_default_values = False
     supports_empty_insert = False
+    supports_statement_cache = False
 
     two_phase_transactions = False
     savepoints =  True
@@ -710,8 +877,8 @@ class IfxDialect(default.DefaultDialect):
     def _get_default_schema_name(self, connection):
         return self._reflector._get_default_schema_name(connection)
 
-    def has_table(self, connection, table_name, schema=None):
-        return self._reflector.has_table(connection, table_name, schema=schema)
+    def has_table(self, connection, table_name, schema=None, **kw):
+        return self._reflector.has_table(connection, table_name, schema=schema, **kw)
 
     def has_sequence(self, connection, sequence_name, schema=None):
         return self._reflector.has_sequence(connection, sequence_name,
@@ -724,8 +891,16 @@ class IfxDialect(default.DefaultDialect):
     def get_table_names(self, connection, schema=None, **kw):
         return self._reflector.get_table_names(connection, schema=schema, **kw)
 
+    def get_temp_table_names(self, connection, schema=None, **kw):
+        return self._reflector.get_temp_table_names(
+                                connection, schema=schema, **kw)
+
     def get_view_names(self, connection, schema=None, **kw):
         return self._reflector.get_view_names(connection, schema=schema, **kw)
+
+    def get_temp_view_names(self, connection, schema=None, **kw):
+        return self._reflector.get_temp_view_names(
+                                connection, schema=schema, **kw)
 
     def get_view_definition(self, connection, viewname, schema=None, **kw):
         return self._reflector.get_view_definition(
@@ -733,6 +908,10 @@ class IfxDialect(default.DefaultDialect):
 
     def get_columns(self, connection, table_name, schema=None, **kw):
         return self._reflector.get_columns(
+                                connection, table_name, schema=schema, **kw)
+
+    def get_pk_constraint(self, connection, table_name, schema=None, **kw):
+        return self._reflector.get_pk_constraint(
                                 connection, table_name, schema=schema, **kw)
 
     def get_primary_keys(self, connection, table_name, schema=None, **kw):
