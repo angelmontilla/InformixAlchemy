@@ -110,7 +110,7 @@ def test_type_compiler_smoke(dialect):
     assert type_compiler.process(String(50)).upper() == "VARCHAR(50)"
     assert type_compiler.process(Numeric(10, 2)).upper() == "DECIMAL(10, 2)"
     assert type_compiler.process(Date()).upper() == "DATE"
-    assert type_compiler.process(DateTime()).upper() == "DATETIME"
+    assert type_compiler.process(DateTime()).upper() == "DATETIME YEAR TO SECOND"
     assert type_compiler.process(Boolean()).upper() == "SMALLINT"
 
 

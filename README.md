@@ -4,7 +4,7 @@ The InformixAlchemy adapter provides a SQLAlchemy 2.0 (Ref: https://www.sqlalche
 Please note that this project is still under active development. Please report any bugs in the issue tracker
 
 ### Current state 
-Ready for use
+Not still production certified
 
 ## Autoincrement / identity contract
 

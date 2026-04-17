@@ -289,7 +289,7 @@ class IfxTypeCompiler(compiler.GenericTypeCompiler):
         return "TIME"
 
     def visit_DATETIME(self, type_):
-        return "DATETIME"
+        return "DATETIME YEAR TO SECOND"
 
     def visit_SMALLINT(self, type_):
         return "SMALLINT"
