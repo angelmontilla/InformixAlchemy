@@ -136,6 +136,7 @@ class _IFX_Boolean(sa_types.Boolean):
                 return '0'
         return process
 
+
 class _IFX_Date(sa_types.Date):
 
     def result_processor(self, dialect, coltype):
@@ -156,17 +157,22 @@ class _IFX_Date(sa_types.Date):
             return str(value)
         return process
 
+
 class DOUBLE(sa_types.Numeric):
     __visit_name__ = 'DOUBLE'
+
 
 class LONGVARCHAR(sa_types.VARCHAR):
     __visit_name_ = 'LONGVARCHAR'
 
+
 class DBCLOB(sa_types.CLOB):
     __visit_name__ = "DBCLOB"
 
+
 class GRAPHIC(sa_types.CHAR):
     __visit_name__ = "GRAPHIC"
+
 
 class VARGRAPHIC(sa_types.Unicode):
     __visit_name__ = "VARGRAPHIC"
@@ -174,6 +180,7 @@ class VARGRAPHIC(sa_types.Unicode):
 
 class LONGVARGRAPHIC(sa_types.UnicodeText):
     __visit_name__ = "LONGVARGRAPHIC"
+
 
 class XML(sa_types.Text):
     __visit_name__ = "XML"
@@ -272,7 +279,6 @@ ischema_names = {
 
 class IfxTypeCompiler(compiler.GenericTypeCompiler):
 
-
     def visit_TIMESTAMP(self, type_):
         return "TIMESTAMP"
 
@@ -352,7 +358,6 @@ class IfxTypeCompiler(compiler.GenericTypeCompiler):
         else:
             return "DECIMAL(%(precision)s, %(scale)s)" % {
                             'precision': type_.precision, 'scale': type_.scale}
-
 
     def visit_numeric(self, type_):
         return self.visit_DECIMAL(type_)
@@ -771,6 +776,7 @@ class IfxExecutionContext(default.DefaultExecutionContext):
             type_,
         )
 
+
 class _SelectLastRowIDMixin(object):
     _select_lastrowid = False
     _lastrowid = None
@@ -846,7 +852,7 @@ class IfxDialect(default.DefaultDialect):
     supports_statement_cache = False
 
     two_phase_transactions = False
-    savepoints =  True
+    savepoints = True
 
     statement_compiler = IfxCompiler
     ddl_compiler = IfxDDLCompiler

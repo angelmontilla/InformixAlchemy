@@ -22,10 +22,12 @@
 # limitations under the License.
 
 import re
-from .base import IfxExecutionContext, IfxDialect
 from sqlalchemy import types as sa_types, util
 from sqlalchemy.engine import processors
 from sqlalchemy.exc import ArgumentError
+
+from .base import IfxExecutionContext, IfxDialect
+
 SQL_TXN_READ_UNCOMMITTED = 1
 SQL_TXN_READ_COMMITTED = 2
 SQL_TXN_REPEATABLE_READ = 4
@@ -33,6 +35,12 @@ SQL_TXN_SERIALIZABLE = 8
 SQL_ATTR_TXN_ISOLATION = 108
 
 VERSION_RE = re.compile(r'(\d+)\.(\d+)(.+\d+)')
+
+CALLPROC_NAME_RE = re.compile(
+    r"^\s*(?:EXECUTE\s+PROCEDURE|CALL)\s+([^\s(]+)",
+    re.IGNORECASE,
+)
+
 
 class _IFX_Numeric_IfxPy(sa_types.Numeric):
     def result_processor(self, dialect, coltype):
@@ -61,9 +69,9 @@ class IfxExecutionContext_IfxPy(IfxExecutionContext):
             for name in out_param_names
         ]
 
-class IfxDialect_IfxPy(IfxDialect):
 
-    driver = 'IfxAlchemy'
+class IfxDialect_IfxPy(IfxDialect):
+    driver = "IfxPy"
     supports_unicode_statements = True
     supports_sane_rowcount = True
     supports_sane_multi_rowcount = False
@@ -72,105 +80,176 @@ class IfxDialect_IfxPy(IfxDialect):
     supports_default_values = False
     supports_multivalues_insert = True
     supports_statement_cache = False
+
     execution_ctx_cls = IfxExecutionContext_IfxPy
 
     colspecs = util.update_copy(
         IfxDialect.colspecs,
         {
-            sa_types.Numeric: _IFX_Numeric_IfxPy
-        }
+            sa_types.Numeric: _IFX_Numeric_IfxPy,
+        },
     )
+
+    _isolation_lookup = {
+        "READ STABILITY",
+        "RS",
+        "UNCOMMITTED READ",
+        "UR",
+        "CURSOR STABILITY",
+        "CS",
+        "REPEATABLE READ",
+        "RR",
+    }
+
+    _isolation_levels_cli = {
+        "RR": SQL_TXN_SERIALIZABLE,
+        "REPEATABLE READ": SQL_TXN_SERIALIZABLE,
+        "UR": SQL_TXN_READ_UNCOMMITTED,
+        "UNCOMMITTED READ": SQL_TXN_READ_UNCOMMITTED,
+        "RS": SQL_TXN_REPEATABLE_READ,
+        "READ STABILITY": SQL_TXN_REPEATABLE_READ,
+        "CS": SQL_TXN_READ_COMMITTED,
+        "CURSOR STABILITY": SQL_TXN_READ_COMMITTED,
+    }
+
+    _isolation_levels_returned = {
+        value: key for key, value in _isolation_levels_cli.items()
+    }
 
     @classmethod
     def import_dbapi(cls):
         """Return the underlying DBAPI driver module."""
         import IfxPyDbi as module
+
         return module
 
     dbapi = import_dbapi
 
+    @staticmethod
+    def _extract_procedure_name(statement):
+        match = CALLPROC_NAME_RE.match(statement or "")
+        if match:
+            return match.group(1)
+        return statement
+
+    @staticmethod
+    def _normalize_isolation_level(level):
+        if level is None:
+            return "CS"
+
+        normalized = level.strip()
+        if not normalized:
+            return "CS"
+
+        return normalized.upper().replace("-", " ")
+
     def do_execute(self, cursor, statement, parameters, context=None):
-        if context and context._out_parameters:
-            statement = statement.split('(', 1)[0].split()[1]
-            context._callproc_result = cursor.callproc(statement, parameters)
-        else:
-            cursor.execute(statement, parameters)
+        if context is not None and getattr(context, "_out_parameters", None):
+            procedure_name = self._extract_procedure_name(statement)
+            callproc_parameters = [] if parameters is None else parameters
+            context._callproc_result = cursor.callproc(
+                procedure_name, callproc_parameters
+            )
+            return
 
-
-    _isolation_lookup = set(['READ STABILITY','RS', 'UNCOMMITTED READ','UR',
-                             'CURSOR STABILITY','CS', 'REPEATABLE READ','RR'])
-
-    _isolation_levels_cli = {'RR': SQL_TXN_SERIALIZABLE, 'REPEATABLE READ': SQL_TXN_SERIALIZABLE,
-                            'UR': SQL_TXN_READ_UNCOMMITTED, 'UNCOMMITTED READ': SQL_TXN_READ_UNCOMMITTED,
-                             'RS': SQL_TXN_REPEATABLE_READ, 'READ STABILITY': SQL_TXN_REPEATABLE_READ,
-                             'CS': SQL_TXN_READ_COMMITTED, 'CURSOR STABILITY': SQL_TXN_READ_COMMITTED }
-
-    _isolation_levels_returned = { value : key for key, value in _isolation_levels_cli.items()}
+        cursor.execute(statement, parameters)
 
     def _get_cli_isolation_levels(self, level):
-        return _isolation_levels_cli[level]
+        return self._isolation_levels_cli[level]
 
     def set_isolation_level(self, connection, level):
-        if level is  None:
-         level ='CS'
-        else :
-          if len(level.strip()) < 1:
-            level ='CS'
-        level.upper().replace("-", " ")
-        if level not in self._isolation_lookup:
+        normalized_level = self._normalize_isolation_level(level)
+
+        if normalized_level not in self._isolation_lookup:
             raise ArgumentError(
                 "Invalid value '%s' for isolation_level. "
-                "Valid isolation levels for %s are %s" %
-                (level, self.name, ", ".join(self._isolation_lookup))
+                "Valid isolation levels for %s are %s"
+                % (
+                    normalized_level,
+                    self.name,
+                    ", ".join(sorted(self._isolation_lookup)),
+                )
             )
-        attrib = {SQL_ATTR_TXN_ISOLATION:_get_cli_isolation_levels(self,level)}
-        res = connection.set_option(attrib)
+
+        attrib = {
+            SQL_ATTR_TXN_ISOLATION: self._get_cli_isolation_levels(
+                normalized_level
+            )
+        }
+        connection.set_option(attrib)
 
     def reset_isolation_level(self, connection):
-        self.set_isolation_level(connection,'CS')
+        self.set_isolation_level(connection, "CS")
 
     def create_connect_args(self, url):
-        opts = url.translate_connect_args(username='uid', password='pwd',
-                host='server', port='service') # Are these safe renames?
-        connstr = ";".join(['%s=%s' % (k.upper(), v) for k, v in opts.items()])
-        opt = {}
+        opts = url.translate_connect_args(
+            username="uid",
+            password="pwd",
+            host="server",
+            port="service",
+        )
 
-        return ([connstr], opt)
+        query_items = {
+            key.upper(): value
+            for key, value in url.query.items()
+            if value is not None
+        }
 
-        #check for SSL arguments
-        ssl_keys = ['Security', 'SSLClientKeystoredb', 'SSLClientKeystash','SSLServerCertificate']
-        query_keys = url.query.keys()
-        for key in ssl_keys:
-             for query_key in query_keys:
-                 if query_key.lower() == key.lower():
-                     dsn_param.append('%(ssl_key)s=%(value)s' % {'ssl_key': key, 'value': url.query[query_key]})
-                     del url.query[query_key]
-                     break
+        normalized_opts = {}
+        for key, value in opts.items():
+            if value is None:
+                continue
+            normalized_opts[key.upper()] = value
 
-        dsn = ';'.join(dsn_param)
-        dsn += ';'
-        return ((dsn, url.username, '', '', ''), {})
+        for key, value in query_items.items():
+            normalized_opts[key] = value
 
-    # Retrieves current schema for the specified connection object
+        connstr = ";".join(
+            "%s=%s" % (key, value) for key, value in normalized_opts.items()
+        )
+        return ([connstr], {})
+
     def _get_default_schema_name(self, connection):
-        return self.normalize_name(connection.connection.get_current_schema())
+        current_schema = connection.connection.get_current_schema()
+        return self.normalize_name(current_schema)
 
     def _get_server_version_info(self, connection):
-        v = VERSION_RE.split(connection.connection.dbms_ver)
-        return (int(v[1]), int(v[2]), v[3])
+        version = getattr(connection.connection, "dbms_ver", None)
+        if not version:
+            return ()
 
+        match = VERSION_RE.match(version)
+        if not match:
+            return ()
 
-    # Checks if the DB_API driver error indicates an invalid connection
+        major, minor, rest = match.groups()
+        return (int(major), int(minor), rest)
+
     def is_disconnect(self, ex, connection, cursor):
-        if isinstance(ex, (self.dbapi.ProgrammingError,
-                                             self.dbapi.OperationalError)):
-            connection_errors = ('Connection is not active', 'connection is no longer active',
-                                    'Connection Resource cannot be found', 'SQL30081N'
-                                    'CLI0108E', 'CLI0106E', 'SQL1224N')
-            for err_msg in connection_errors:
-                if err_msg in str(ex):
-                    return True
-        else:
+        dbapi_module = getattr(self, "dbapi", None)
+        error_types = tuple(
+            err_type
+            for err_type in (
+                getattr(dbapi_module, "ProgrammingError", None),
+                getattr(dbapi_module, "OperationalError", None),
+            )
+            if isinstance(err_type, type)
+        )
+
+        if error_types and not isinstance(ex, error_types):
             return False
+
+        message = str(ex)
+        connection_errors = (
+            "Connection is not active",
+            "connection is no longer active",
+            "Connection Resource cannot be found",
+            "SQL30081N",
+            "CLI0108E",
+            "CLI0106E",
+            "SQL1224N",
+        )
+        return any(err_msg in message for err_msg in connection_errors)
+
 
 dialect = IfxDialect_IfxPy
