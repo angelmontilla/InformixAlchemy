@@ -15,6 +15,7 @@ setup(
     entry_points={
         "sqlalchemy.dialects": [
             "informix.pyodbc = IfxAlchemy.pyodbc:IfxDialect_pyodbc",
+            "informix.ifxpy = IfxAlchemy.IfxPy:IfxDialect_IfxPy",
             "informix = IfxAlchemy.pyodbc:IfxDialect_pyodbc",
         ]
     },

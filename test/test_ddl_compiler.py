@@ -8,6 +8,7 @@ from sqlalchemy import (
     Column,
     Date,
     DateTime,
+    func,
     Index,
     Integer,
     MetaData,
@@ -15,6 +16,11 @@ from sqlalchemy import (
     String,
     Table,
     select,
+)
+from sqlalchemy.sql.elements import (
+    ReleaseSavepointClause,
+    RollbackToSavepointClause,
+    SavepointClause,
 )
 from sqlalchemy.schema import CreateIndex, CreateTable, DropIndex, DropTable
 
@@ -129,6 +135,7 @@ def test_limit_compiles_as_first(dialect, sample_table):
 def test_limit_offset_compiles_with_row_number_wrapper(dialect, sample_table):
     stmt = (
         select(sample_table.c.id, sample_table.c.name)
+        .order_by(sample_table.c.id)
         .limit(5)
         .offset(10)
     )
@@ -136,8 +143,104 @@ def test_limit_offset_compiles_with_row_number_wrapper(dialect, sample_table):
     compiled = str(stmt.compile(dialect=dialect))
     upper = _upper_sql(compiled)
 
-    assert "ROW_NUMBER() OVER()" in upper
-    assert "__ROWNUM" in upper
+    assert "ROW_NUMBER() OVER (ORDER BY SA_COMPILE_BASIC.ID)" in upper
+    assert "IFX_RN" in upper
+    assert "> 10" in upper
+    assert "<= 15" in upper
+
+
+@pytest.mark.ddl_compiler
+def test_limit_offset_keeps_scalar_subquery_projection_intact(
+    dialect, sample_table
+):
+    scalar_table = sample_table.alias("sq")
+    scalar_subquery = (
+        select(scalar_table.c.code)
+        .where(scalar_table.c.id == sample_table.c.id)
+        .scalar_subquery()
+    )
+    stmt = (
+        select(sample_table.c.id, scalar_subquery.label("code_copy"))
+        .order_by(sample_table.c.id)
+        .limit(5)
+        .offset(10)
+    )
+
+    compiled = str(stmt.compile(dialect=dialect))
+    upper = _upper_sql(compiled)
+
+    assert (
+        "(SELECT SQ.CODE FROM SA_COMPILE_BASIC AS SQ "
+        "WHERE SQ.ID = SA_COMPILE_BASIC.ID) AS CODE_COPY"
+    ) in upper
+    assert "ROW_NUMBER() OVER (ORDER BY SA_COMPILE_BASIC.ID)" in upper
+
+
+@pytest.mark.ddl_compiler
+def test_limit_offset_keeps_function_arguments_with_commas_intact(
+    dialect, sample_table
+):
+    stmt = (
+        select(
+            sample_table.c.id,
+            func.replace(sample_table.c.name, "FROM", "X").label("name2"),
+        )
+        .order_by(sample_table.c.id)
+        .limit(5)
+        .offset(10)
+    )
+
+    compiled = str(stmt.compile(dialect=dialect))
+    upper = _upper_sql(compiled)
+
+    assert (
+        "REPLACE(SA_COMPILE_BASIC.NAME, :REPLACE_1, :REPLACE_2) AS NAME2"
+    ) in upper
+    assert "ROW_NUMBER() OVER (ORDER BY SA_COMPILE_BASIC.ID)" in upper
+
+
+@pytest.mark.ddl_compiler
+def test_offset_with_order_by_compiles_with_row_number_wrapper(
+    dialect, sample_table
+):
+    stmt = (
+        select(sample_table.c.id, sample_table.c.name)
+        .order_by(sample_table.c.name, sample_table.c.id)
+        .offset(10)
+    )
+
+    compiled = str(stmt.compile(dialect=dialect))
+    upper = _upper_sql(compiled)
+
+    assert (
+        "ROW_NUMBER() OVER (ORDER BY SA_COMPILE_BASIC.NAME, "
+        "SA_COMPILE_BASIC.ID)"
+    ) in upper
+    assert "ORDER BY ANON_1.IFX_RN" in upper
+    assert "> 10" in upper
+    assert "<=" not in upper
+
+
+@pytest.mark.ddl_compiler
+def test_limit_offset_preserves_distinct_before_row_number(
+    dialect, sample_table
+):
+    stmt = (
+        select(sample_table.c.name)
+        .distinct()
+        .order_by(sample_table.c.name)
+        .limit(5)
+        .offset(10)
+    )
+
+    compiled = str(stmt.compile(dialect=dialect))
+    upper = _upper_sql(compiled)
+
+    assert (
+        "FROM (SELECT DISTINCT SA_COMPILE_BASIC.NAME AS NAME "
+        "FROM SA_COMPILE_BASIC) AS ANON_2"
+    ) in upper
+    assert "ROW_NUMBER() OVER (ORDER BY ANON_2.NAME)" in upper
     assert "> 10" in upper
     assert "<= 15" in upper
 
@@ -183,3 +286,18 @@ def test_named_check_constraint_compiles_with_postfixed_name(dialect):
 
     assert "CHECK (QTY > 0) CONSTRAINT CK_QTY_POS" in upper
     assert "CONSTRAINT CK_QTY_POS CHECK" not in upper
+
+
+@pytest.mark.ddl_compiler
+def test_savepoint_clauses_compile_with_informix_syntax(dialect):
+    savepoint = str(SavepointClause("sa_savepoint_1").compile(dialect=dialect)).upper()
+    rollback = str(
+        RollbackToSavepointClause("sa_savepoint_1").compile(dialect=dialect)
+    ).upper()
+    release = str(
+        ReleaseSavepointClause("sa_savepoint_1").compile(dialect=dialect)
+    ).upper()
+
+    assert savepoint == "SAVEPOINT SA_SAVEPOINT_1"
+    assert rollback == "ROLLBACK TO SAVEPOINT SA_SAVEPOINT_1"
+    assert release == "RELEASE SAVEPOINT SA_SAVEPOINT_1"

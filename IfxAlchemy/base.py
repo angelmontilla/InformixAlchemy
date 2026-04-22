@@ -23,12 +23,14 @@
 """Support for Informix database
 
 """
-import datetime, re
+import datetime
 from sqlalchemy import types as sa_types
+from sqlalchemy import sql
 from sqlalchemy import schema as sa_schema
 from sqlalchemy import util
 from sqlalchemy.sql import compiler
 from sqlalchemy.sql import operators
+from sqlalchemy.sql import util as sql_util
 from sqlalchemy.engine import default
 from sqlalchemy import __version__ as SA_Version
 from . import reflection as ifx_reflection
@@ -163,7 +165,7 @@ class DOUBLE(sa_types.Numeric):
 
 
 class LONGVARCHAR(sa_types.VARCHAR):
-    __visit_name_ = 'LONGVARCHAR'
+    __visit_name__ = 'LONGVARCHAR'
 
 
 class DBCLOB(sa_types.CLOB):
@@ -423,66 +425,118 @@ class IfxCompiler(compiler.SQLCompiler):
         return "mod(%s, %s)" % (self.process(binary.left),
                                                 self.process(binary.right))
 
+    def _row_limit_expression(self, select, clause, attrname):
+        if clause is None:
+            return None
+
+        if select._simple_int_clause(clause):
+            return sql.literal_column(str(getattr(select, attrname)))
+
+        return clause
+
+    def _row_limit_upper_bound(self, select, limit_clause, offset_clause):
+        if (
+            select._simple_int_clause(limit_clause)
+            and select._simple_int_clause(offset_clause)
+        ):
+            return sql.literal_column(str(select._limit + select._offset))
+
+        return (
+            self._row_limit_expression(select, limit_clause, "_limit")
+            + self._row_limit_expression(select, offset_clause, "_offset")
+        )
+
+    def _translate_distinct_offset_select(self, select, order_by_clauses):
+        translated = select._generate().limit(None).offset(None).order_by(None)
+        translated = translated.alias()
+
+        adapter = sql_util.ClauseAdapter(translated)
+        translated_order_by = [
+            adapter.traverse(elem) for elem in order_by_clauses
+        ]
+
+        return sql.select(
+            *[
+                column
+                for column in translated.c
+                if select.selected_columns.corresponding_column(column)
+                is not None
+            ],
+            sql.func.ROW_NUMBER()
+            .over(order_by=translated_order_by or None)
+            .label("ifx_rn")
+        ).select_from(translated).alias()
+
+    def _translate_offset_select(self, select):
+        limit_clause = select._limit_clause
+        offset_clause = select._offset_clause
+
+        if offset_clause is None:
+            return select
+
+        order_by_clauses = [
+            sql_util.unwrap_label_reference(elem)
+            for elem in select._order_by_clauses
+        ]
+
+        if select._distinct:
+            translated = self._translate_distinct_offset_select(
+                select, order_by_clauses
+            )
+        else:
+            translated = (
+                select._generate()
+                .limit(None)
+                .offset(None)
+                .add_columns(
+                    sql.func.ROW_NUMBER()
+                    .over(order_by=order_by_clauses or None)
+                    .label("ifx_rn")
+                )
+                .order_by(None)
+                .alias()
+            )
+
+        row_number_col = translated.c.ifx_rn
+        paged = (
+            sql.select(
+                *[column for column in translated.c if column.key != "ifx_rn"]
+            )
+            .select_from(translated)
+            .order_by(row_number_col)
+        )
+
+        if not (
+            select._simple_int_clause(offset_clause) and select._offset == 0
+        ):
+            paged = paged.where(
+                row_number_col
+                > self._row_limit_expression(select, offset_clause, "_offset")
+            )
+
+        if limit_clause is not None:
+            paged = paged.where(
+                row_number_col
+                <= self._row_limit_upper_bound(
+                    select, limit_clause, offset_clause
+                )
+            )
+
+        return paged
+
     def limit_clause(self, select,**kwargs):
             return ""
 
+    def translate_select_structure(self, select_stmt, **kwargs):
+        if SA_Version >= [1, 4]:
+            return self._translate_offset_select(select_stmt)
+
+        return select_stmt
+
     def visit_select(self, select, **kwargs):
-        limit, offset = select._limit, select._offset
-        sql_ori = compiler.SQLCompiler.visit_select(self, select, **kwargs)
-        if offset is not None:
-            __rownum = 'Z.__ROWNUM'
-            sql_split = re.split(r"[\s+]FROM ", sql_ori, 1)
-            sql_sec = ""
-            sql_sec = " \nFROM %s " % ( sql_split[1] )
+        translated = self._translate_offset_select(select)
 
-            dummyVal = "Z.__Ifx_"
-            sql_pri = ""
-
-            sql_sel = "SELECT "
-            if select._distinct:
-                sql_sel = "SELECT DISTINCT "
-
-            sql_select_token = sql_split[0].split( "," )
-            i = 0
-            while ( i < len( sql_select_token ) ):
-                if sql_select_token[i].count( "TIMESTAMP(DATE(SUBSTR(CHAR(" ) == 1:
-                    sql_sel = "%s \"%s%d\"," % ( sql_sel, dummyVal, i + 1 )
-                    sql_pri = '%s %s,%s,%s,%s AS "%s%d",' % (
-                                    sql_pri,
-                                    sql_select_token[i],
-                                    sql_select_token[i + 1],
-                                    sql_select_token[i + 2],
-                                    sql_select_token[i + 3],
-                                    dummyVal, i + 1 )
-                    i = i + 4
-                    continue
-
-                if sql_select_token[i].count( " AS " ) == 1:
-                    temp_col_alias = sql_select_token[i].split( " AS " )
-                    sql_pri = '%s %s,' % ( sql_pri, sql_select_token[i] )
-                    sql_sel = "%s %s," % ( sql_sel, temp_col_alias[1] )
-                    i = i + 1
-                    continue
-
-                sql_pri = '%s %s AS "%s%d",' % ( sql_pri, sql_select_token[i], dummyVal, i + 1 )
-                sql_sel = "%s \"%s%d\"," % ( sql_sel, dummyVal, i + 1 )
-                i = i + 1
-
-            sql_pri = sql_pri[:len( sql_pri ) - 1]
-            sql_pri = "%s%s" % ( sql_pri, sql_sec )
-            sql_sel = sql_sel[:len( sql_sel ) - 1]
-            sql = '%s, ( ROW_NUMBER() OVER() ) AS "%s" FROM ( %s ) AS M' % ( sql_sel, __rownum, sql_pri )
-            sql = '%s FROM ( %s ) Z WHERE' % ( sql_sel, sql )
-
-            if offset != 0:
-                sql = '%s "%s" > %d' % ( sql, __rownum, offset )
-            if offset != 0 and limit is not None:
-                sql = '%s AND ' % ( sql )
-            if limit is not None:
-                sql = '%s "%s" <= %d' % ( sql, __rownum, offset + limit )
-            return "( %s )" % ( sql, )
-        else:
-            return sql_ori
+        return compiler.SQLCompiler.visit_select(self, translated, **kwargs)
 
     def visit_sequence(self, sequence, **kw):
         return "%s.NEXTVAL" % self.preparer.format_sequence(sequence)
@@ -554,13 +608,22 @@ class IfxCompiler(compiler.SQLCompiler):
              self.process(join.onclause, **kwargs)))
 
     def visit_savepoint(self, savepoint_stmt, **kw):
-        return "SAVEPOINT %(sid)s ON ROLLBACK RETAIN CURSORS" % {'sid':self.preparer.format_savepoint(savepoint_stmt)}
+        # Informix uses ANSI savepoint syntax here; the DB2-specific
+        # "ON ROLLBACK RETAIN CURSORS" suffix raises -201 on the target
+        # backend and breaks Session.begin_nested().
+        return "SAVEPOINT %(sid)s" % {
+            'sid': self.preparer.format_savepoint(savepoint_stmt)
+        }
 
     def visit_rollback_to_savepoint(self, savepoint_stmt, **kw):
-        return 'ROLLBACK TO SAVEPOINT %(sid)s'% {'sid':self.preparer.format_savepoint(savepoint_stmt)}
+        return 'ROLLBACK TO SAVEPOINT %(sid)s' % {
+            'sid': self.preparer.format_savepoint(savepoint_stmt)
+        }
 
     def visit_release_savepoint(self, savepoint_stmt, **kw):
-        return 'RELEASE TO SAVEPOINT %(sid)s'% {'sid':self.preparer.format_savepoint(savepoint_stmt)}
+        return 'RELEASE SAVEPOINT %(sid)s' % {
+            'sid': self.preparer.format_savepoint(savepoint_stmt)
+        }
 
     def visit_unary(self, unary, **kw):
         if (unary.operator == operators.exists)  and kw.get('within_columns_clause', False):
@@ -824,7 +887,7 @@ class _SelectLastRowIDMixin(object):
 
 class IfxDialect(default.DefaultDialect):
 
-    name = 'IfxAlchemy'
+    name = 'informix'
     max_identifier_length = 128
     encoding = 'utf-8'
     default_paramstyle = 'qmark'
