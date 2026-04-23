@@ -19,9 +19,12 @@
 
 """requirements.py
 
+Suite capability flags for the Informix fork targeting modern
+SQLAlchemy 2.x compatibility.
 
-This file is used by the SQLAlchemy 0.8 testing suite to mark various
-optional behaviors as non-supported.
+This module tells the SQLAlchemy test/provisioning helpers which
+optional behaviors are currently supported, unsupported, or
+intentionally out of scope for this dialect.
 
 """
 from sqlalchemy.testing.requirements import SuiteRequirements

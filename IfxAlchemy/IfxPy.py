@@ -152,7 +152,10 @@ class IfxDialect_IfxPy(IfxDialect):
             )
             return
 
-        cursor.execute(statement, parameters)
+        if parameters is None:
+            cursor.execute(statement)
+        else:
+            cursor.execute(statement, parameters)
 
     def _get_cli_isolation_levels(self, level):
         return self._isolation_levels_cli[level]

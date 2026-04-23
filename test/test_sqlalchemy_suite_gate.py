@@ -35,6 +35,30 @@ def test_has_table_signature_accepts_kwargs():
 
 
 @pytest.mark.sqlalchemy_suite
+def test_has_sequence_signature_accepts_kwargs():
+    sig = pyinspect.signature(IfxDialect.has_sequence)
+    assert any(
+        param.kind is pyinspect.Parameter.VAR_KEYWORD
+        for param in sig.parameters.values()
+    )
+
+
+@pytest.mark.sqlalchemy_suite
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "get_materialized_view_names",
+        "get_check_constraints",
+        "get_table_comment",
+        "get_table_options",
+    ],
+)
+def test_reflection_surface_methods_exist(method_name):
+    method = getattr(IfxDialect, method_name, None)
+    assert callable(method)
+
+
+@pytest.mark.sqlalchemy_suite
 def test_official_sqlalchemy_suite_module_is_available():
     __import__("sqlalchemy.testing.suite")
 
