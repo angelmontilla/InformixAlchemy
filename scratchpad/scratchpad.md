@@ -38,9 +38,9 @@ Ejemplo real usado en scratchpad:
 
 ```python
 DATABASE_URL = (
-    "informix+pyodbc://ctl:magogo@192.168.11.64/faempre999"
+    "informix+pyodbc://informix:@127.0.0.1/prueba4db"
     "?driver=IBM+INFORMIX+ODBC+DRIVER+(64-bit)"
-    "&server=pru_famadesa_s9"
+    "&server=informix"
     "&protocol=onsoctcp"
     "&service=9088"
 )
@@ -51,7 +51,7 @@ DATABASE_URL = (
 Esto es legacy y hoy no encaja bien con el dialecto `pyodbc` actual:
 
 ```python
-ConStr = "informix://informix:Blue4You@127.0.0.1:9088/db1;SERVER=ids0"
+ConStr = "informix://informix:@127.0.0.1:9088/prueba4db;SERVER=informix"
 ```
 
 Con esa forma, SQLAlchemy interpreta `db1;SERVER=ids0` como parte de

@@ -168,5 +168,10 @@ try.*
 /tmp/**
 
 
+# specific local project files
 Sample*.py
 try*.py
+setup.cfg
+run_test.py
+test/conftest.py
+

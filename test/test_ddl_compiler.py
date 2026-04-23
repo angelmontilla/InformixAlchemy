@@ -8,6 +8,7 @@ from sqlalchemy import (
     Column,
     Date,
     DateTime,
+    distinct,
     func,
     Index,
     Integer,
@@ -219,6 +220,21 @@ def test_limit_offset_keeps_unlabeled_function_projection_intact(
 
 
 @pytest.mark.ddl_compiler
+def test_offset_keeps_unlabeled_replace_projection_intact_without_limit(
+    dialect, sample_table
+):
+    stmt = select(func.replace(sample_table.c.name, "a", "b")).offset(2)
+
+    compiled = str(stmt.compile(dialect=dialect))
+    upper = _upper_sql(compiled)
+
+    assert "FROM (SELECT REPLACE(SA_COMPILE_BASIC.NAME, :REPLACE_" in upper
+    assert ") AS REPLACE_1, ROW_NUMBER() OVER () AS IFX_RN" in upper
+    assert "WHERE ANON_1.IFX_RN > 2" in upper
+    assert "__IFX_" not in upper
+
+
+@pytest.mark.ddl_compiler
 def test_limit_offset_keeps_cte_projection_intact(dialect, sample_table):
     cte = (
         select(
@@ -241,6 +257,28 @@ def test_limit_offset_keeps_cte_projection_intact(dialect, sample_table):
         "ROW_NUMBER() OVER () AS IFX_RN FROM CTE1) AS ANON_1"
     ) in upper
     assert " AS ID AS " not in upper
+    assert "__IFX_" not in upper
+
+
+@pytest.mark.ddl_compiler
+def test_limit_offset_keeps_direct_cte_projection_intact(
+    dialect, sample_table
+):
+    cte = select(sample_table.c.id, sample_table.c.name).cte("cte1")
+    stmt = select(cte.c.id, cte.c.name).limit(5).offset(2)
+
+    compiled = str(stmt.compile(dialect=dialect))
+    upper = _upper_sql(compiled)
+
+    assert (
+        "WITH CTE1 AS (SELECT SA_COMPILE_BASIC.ID AS ID, "
+        "SA_COMPILE_BASIC.NAME AS NAME FROM SA_COMPILE_BASIC)"
+    ) in upper
+    assert (
+        "FROM (SELECT CTE1.ID AS ID, CTE1.NAME AS NAME, "
+        "ROW_NUMBER() OVER () AS IFX_RN FROM CTE1) AS ANON_1"
+    ) in upper
+    assert "WHERE ANON_1.IFX_RN > 2 AND ANON_1.IFX_RN <= 7" in upper
     assert "__IFX_" not in upper
 
 
@@ -288,6 +326,29 @@ def test_limit_offset_preserves_distinct_before_row_number(
     assert "ROW_NUMBER() OVER (ORDER BY ANON_2.NAME)" in upper
     assert "> 10" in upper
     assert "<= 15" in upper
+
+
+@pytest.mark.ddl_compiler
+def test_limit_offset_preserves_distinct_expression_before_row_number(
+    dialect, sample_table
+):
+    stmt = (
+        select(distinct(sample_table.c.name))
+        .order_by(sample_table.c.name)
+        .limit(10)
+        .offset(3)
+    )
+
+    compiled = str(stmt.compile(dialect=dialect))
+    upper = _upper_sql(compiled)
+
+    assert (
+        "FROM (SELECT DISTINCT SA_COMPILE_BASIC.NAME AS ANON_1, "
+        "ROW_NUMBER() OVER (ORDER BY SA_COMPILE_BASIC.NAME) AS IFX_RN "
+        "FROM SA_COMPILE_BASIC) AS ANON_2"
+    ) in upper
+    assert "WHERE ANON_2.IFX_RN > 3 AND ANON_2.IFX_RN <= 13" in upper
+    assert "__IFX_" not in upper
 
 
 @pytest.mark.ddl_compiler

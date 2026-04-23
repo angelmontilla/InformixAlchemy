@@ -30,13 +30,14 @@ import re
 import codecs
 from sys import version_info
 
-class CoerceUnicode(sa_types.TypeDecorator):
-    impl = sa_types.Unicode
 
-    def process_bind_param(self, value, dialect):
-        if isinstance(value, str):
-            value = value
-        return value
+# class CoerceUnicode(sa_types.TypeDecorator):
+#     impl = sa_types.Unicode
+
+#     def process_bind_param(self, value, dialect):
+#         if isinstance(value, str):
+#             value = value
+#         return value
 
 class BaseReflector(object):
     def __init__(self, dialect):

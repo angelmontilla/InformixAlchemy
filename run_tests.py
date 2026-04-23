@@ -8,10 +8,10 @@ from sqlalchemy.dialects import registry
 
 
 DEFAULT_INFORMIX_SQLALCHEMY_URL = (
-    "informix+pyodbc://ctl:magogo@192.168.11.64/faempre999"
+    "informix+pyodbc://informix:in4mix@127.0.0.1/prueba4db"
     "?driver=IBM+INFORMIX+ODBC+DRIVER+(64-bit)"
     "&protocol=onsoctcp"
-    "&server=pru_famadesa_s9"
+    "&server=informix"
     "&service=9088"
     "&DELIMIDENT=Y"
 )

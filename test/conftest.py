@@ -5,13 +5,14 @@ import uuid
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
 DEFAULT_INFORMIX_SQLALCHEMY_URL = (
-    "informix+pyodbc://ctl:magogo@192.168.11.64/faempre999"
+    "informix+pyodbc://informix:in4mix@127.0.0.1/prueba4db"
     "?driver=IBM+INFORMIX+ODBC+DRIVER+(64-bit)"
     "&protocol=onsoctcp"
-    "&server=pru_famadesa_s9"
+    "&server=informix"
     "&service=9088"
     "&DELIMIDENT=Y"
 )
@@ -25,13 +26,62 @@ def _quote_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-@pytest.fixture(scope="session")
-def informix_url() -> str:
+def _build_informix_url() -> str:
     url = os.getenv("INFORMIX_SQLALCHEMY_URL") or DEFAULT_INFORMIX_SQLALCHEMY_URL
     if "delimident=" not in url.lower():
         separator = "&" if "?" in url else "?"
         url = f"{url}{separator}DELIMIDENT=Y"
     return url
+
+
+def _smoke_check_informix_url(url: str) -> None:
+    engine = create_engine(url, pool_pre_ping=True)
+
+    try:
+        with engine.connect() as connection:
+            database_name = connection.exec_driver_sql(
+                "SELECT DBINFO('dbname') FROM systables WHERE tabid = 1"
+            ).scalar_one()
+            first_table = connection.exec_driver_sql(
+                "SELECT FIRST 1 tabname FROM systables ORDER BY tabname"
+            ).scalar_one()
+    except Exception as exc:
+        rendered_url = make_url(url).render_as_string(hide_password=True)
+        raise pytest.UsageError(
+            "Informix smoke check failed before running tests.\n"
+            f"URL: {rendered_url}\n"
+            "Expected Docker defaults: "
+            "user=informix, password=in4mix, host=127.0.0.1, "
+            "service=9088, server=informix, database=prueba4db.\n"
+            f"Original error: {type(exc).__name__}: {exc}"
+        ) from exc
+    finally:
+        engine.dispose()
+
+    if str(database_name).strip() != "prueba4db":
+        rendered_url = make_url(url).render_as_string(hide_password=True)
+        raise pytest.UsageError(
+            "Informix smoke check connected to an unexpected database.\n"
+            f"URL: {rendered_url}\n"
+            f"Connected database: {database_name!r}\n"
+            "Expected database: 'prueba4db'"
+        )
+
+    if not str(first_table).strip():
+        rendered_url = make_url(url).render_as_string(hide_password=True)
+        raise pytest.UsageError(
+            "Informix smoke check succeeded, but systables returned no rows.\n"
+            f"URL: {rendered_url}"
+        )
+
+
+def pytest_sessionstart(session):
+    _smoke_check_informix_url(_build_informix_url())
+
+
+@pytest.fixture(scope="session")
+def informix_url() -> str:
+    return _build_informix_url()
 
 
 @pytest.fixture(scope="session")

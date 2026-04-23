@@ -2,9 +2,9 @@ from sqlalchemy import create_engine, Column, String
 from sqlalchemy.orm import declarative_base, Session
 
 DATABASE_URL = (
-    "informix+pyodbc://ctl:magogo@192.168.11.64/faempre999"
+    "informix+pyodbc://informix:@127.0.0.1/prueba4db"
     "?driver=IBM+INFORMIX+ODBC+DRIVER+(64-bit)"
-    "&server=pru_famadesa_s9"
+    "&server=informix"
     "&protocol=onsoctcp"
     "&service=9088"
 )

@@ -399,13 +399,11 @@ class IfxTypeCompiler(compiler.GenericTypeCompiler):
 
 
 class IfxCompiler(compiler.SQLCompiler):
+    def visit_false(self, expr, **kw):
+        return '0'
 
-    if SA_Version < [0, 9]:
-        def visit_false(self, expr, **kw):
-            return '0'
-
-        def visit_true(self, expr, **kw):
-            return '1'
+    def visit_true(self, expr, **kw):
+        return '1'
 
     def get_cte_preamble(self, recursive):
         return "WITH"
