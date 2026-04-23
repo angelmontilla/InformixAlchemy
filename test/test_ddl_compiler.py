@@ -18,6 +18,7 @@ from sqlalchemy import (
     Table,
     select,
 )
+from sqlalchemy.exc import CompileError
 from sqlalchemy.sql.elements import (
     ReleaseSavepointClause,
     RollbackToSavepointClause,
@@ -99,6 +100,26 @@ def test_create_index_compiles(dialect, sample_table):
 
 
 @pytest.mark.ddl_compiler
+def test_constraint_backing_index_appends_exclude_null_keys(dialect):
+    metadata = MetaData()
+    table = Table(
+        "sa_compile_unique",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("name", String(50)),
+    )
+    index = Index("ix_sa_compile_unique_name", table.c.name, unique=True)
+    index.uConstraint_as_index = True
+
+    compiled = str(CreateIndex(index).compile(dialect=dialect))
+    upper = _upper_sql(compiled)
+
+    assert "CREATE UNIQUE INDEX" in upper
+    assert "IX_SA_COMPILE_UNIQUE_NAME" in upper
+    assert "EXCLUDE NULL KEYS" in upper
+
+
+@pytest.mark.ddl_compiler
 def test_drop_index_compiles(dialect, sample_table):
     index = next(iter(sample_table.indexes))
 
@@ -133,6 +154,18 @@ def test_limit_compiles_as_first(dialect, sample_table):
 
 
 @pytest.mark.ddl_compiler
+def test_fetch_compiles_as_first(dialect, sample_table):
+    stmt = select(sample_table.c.id, sample_table.c.name).fetch(5)
+
+    compiled = str(stmt.compile(dialect=dialect))
+    upper = _upper_sql(compiled)
+
+    assert "SELECT FIRST 5" in upper
+    assert "FETCH FIRST" not in upper
+    assert "FROM SA_COMPILE_BASIC" in upper
+
+
+@pytest.mark.ddl_compiler
 def test_limit_offset_compiles_with_row_number_wrapper(dialect, sample_table):
     stmt = (
         select(sample_table.c.id, sample_table.c.name)
@@ -148,6 +181,25 @@ def test_limit_offset_compiles_with_row_number_wrapper(dialect, sample_table):
     assert "IFX_RN" in upper
     assert "> 10" in upper
     assert "<= 15" in upper
+
+
+@pytest.mark.ddl_compiler
+def test_fetch_offset_compiles_with_row_number_wrapper(dialect, sample_table):
+    stmt = (
+        select(sample_table.c.id, sample_table.c.name)
+        .order_by(sample_table.c.id)
+        .fetch(5)
+        .offset(10)
+    )
+
+    compiled = str(stmt.compile(dialect=dialect))
+    upper = _upper_sql(compiled)
+
+    assert "ROW_NUMBER() OVER (ORDER BY SA_COMPILE_BASIC.ID)" in upper
+    assert "IFX_RN" in upper
+    assert "> 10" in upper
+    assert "<= 15" in upper
+    assert "FETCH FIRST" not in upper
 
 
 @pytest.mark.ddl_compiler
@@ -349,6 +401,152 @@ def test_limit_offset_preserves_distinct_expression_before_row_number(
     ) in upper
     assert "WHERE ANON_2.IFX_RN > 3 AND ANON_2.IFX_RN <= 13" in upper
     assert "__IFX_" not in upper
+
+
+@pytest.mark.ddl_compiler
+def test_for_update_compiles_to_update_lock_clause(dialect, sample_table):
+    stmt = select(sample_table).with_for_update()
+
+    compiled = str(stmt.compile(dialect=dialect))
+    upper = _upper_sql(compiled)
+
+    assert upper.endswith("WITH RS USE AND KEEP UPDATE LOCKS")
+
+
+@pytest.mark.ddl_compiler
+def test_for_update_read_compiles_to_share_lock_clause(dialect, sample_table):
+    stmt = select(sample_table).with_for_update(read=True)
+
+    compiled = str(stmt.compile(dialect=dialect))
+    upper = _upper_sql(compiled)
+
+    assert upper.endswith("WITH RS USE AND KEEP SHARE LOCKS")
+
+
+@pytest.mark.ddl_compiler
+@pytest.mark.parametrize(
+    ("builder", "message"),
+    [
+        (lambda table: {"nowait": True}, "NOWAIT"),
+        (lambda table: {"skip_locked": True}, "SKIP LOCKED"),
+        (lambda table: {"of": [table.c.id]}, "FOR UPDATE OF"),
+        (lambda table: {"key_share": True}, "KEY SHARE"),
+    ],
+)
+def test_for_update_rejects_unsupported_variants(
+    dialect, sample_table, builder, message
+):
+    stmt = select(sample_table).with_for_update(**builder(sample_table))
+
+    with pytest.raises(CompileError, match=message):
+        stmt.compile(dialect=dialect)
+
+
+@pytest.mark.ddl_compiler
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"with_ties": True}, "WITH TIES"),
+        ({"percent": True}, "PERCENT"),
+    ],
+)
+def test_fetch_rejects_unsupported_variants(
+    dialect, sample_table, kwargs, message
+):
+    stmt = select(sample_table).fetch(5, **kwargs)
+
+    with pytest.raises(CompileError, match=message):
+        stmt.compile(dialect=dialect)
+
+
+@pytest.mark.ddl_compiler
+def test_exists_in_columns_clause_wraps_as_case_expression(
+    dialect, sample_table
+):
+    stmt = select(
+        select(sample_table.c.id)
+        .where(sample_table.c.id == 1)
+        .exists()
+    )
+
+    compiled = str(stmt.compile(dialect=dialect))
+    upper = _upper_sql(compiled)
+
+    assert "CASE WHEN EXISTS (" in upper
+    assert "THEN 1 ELSE 0 END AS ANON_1" in upper
+
+
+@pytest.mark.ddl_compiler
+def test_exists_in_where_clause_remains_plain_exists(dialect, sample_table):
+    stmt = select(sample_table.c.id).where(
+        select(sample_table.c.id)
+        .where(sample_table.c.id == 1)
+        .exists()
+    )
+
+    compiled = str(stmt.compile(dialect=dialect))
+    upper = _upper_sql(compiled)
+
+    assert "WHERE EXISTS (" in upper
+    assert "CASE WHEN EXISTS" not in upper
+
+
+@pytest.mark.ddl_compiler
+def test_inner_join_compiles_with_base_join_syntax(dialect):
+    metadata = MetaData()
+    left = Table(
+        "sa_join_left",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("name", String(20)),
+    )
+    right = Table(
+        "sa_join_right",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("left_id", Integer),
+    )
+
+    stmt = select(left.c.id, right.c.id).select_from(
+        left.join(right, left.c.id == right.c.left_id)
+    )
+
+    compiled = str(stmt.compile(dialect=dialect))
+    upper = _upper_sql(compiled)
+
+    assert (
+        "FROM SA_JOIN_LEFT JOIN SA_JOIN_RIGHT "
+        "ON SA_JOIN_LEFT.ID = SA_JOIN_RIGHT.LEFT_ID"
+    ) in upper
+
+
+@pytest.mark.ddl_compiler
+def test_left_outer_join_compiles_with_base_join_syntax(dialect):
+    metadata = MetaData()
+    left = Table(
+        "sa_join_left",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("name", String(20)),
+    )
+    right = Table(
+        "sa_join_right",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("left_id", Integer),
+    )
+
+    stmt = select(left.c.id, right.c.id).select_from(
+        left.outerjoin(right, left.c.id == right.c.left_id)
+    )
+
+    compiled = str(stmt.compile(dialect=dialect))
+    upper = _upper_sql(compiled)
+
+    assert (
+        "FROM SA_JOIN_LEFT LEFT OUTER JOIN SA_JOIN_RIGHT "
+        "ON SA_JOIN_LEFT.ID = SA_JOIN_RIGHT.LEFT_ID"
+    ) in upper
 
 
 @pytest.mark.ddl_compiler

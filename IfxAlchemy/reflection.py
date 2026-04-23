@@ -20,24 +20,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import sys
 from sqlalchemy import exc
 from sqlalchemy import types as sa_types
 from sqlalchemy import sql, util
 from sqlalchemy import Table, MetaData, Column
 from sqlalchemy.engine import reflection
 import re
-import codecs
-from sys import version_info
-
-
-# class CoerceUnicode(sa_types.TypeDecorator):
-#     impl = sa_types.Unicode
-
-#     def process_bind_param(self, value, dialect):
-#         if isinstance(value, str):
-#             value = value
-#         return value
 
 class BaseReflector(object):
     def __init__(self, dialect):
@@ -45,45 +33,54 @@ class BaseReflector(object):
         self.ischema_names = dialect.ischema_names
         self.identifier_preparer = dialect.identifier_preparer
 
+    def _coerce_name(self, name):
+        if name is None:
+            return None
+
+        if isinstance(name, memoryview):
+            name = name.tobytes()
+
+        if isinstance(name, bytearray):
+            name = bytes(name)
+
+        if isinstance(name, bytes):
+            return name.decode()
+
+        return str(name)
+
     def normalize_name(self, name):
-        if isinstance(name, str):
-            name = name
-        if name != None:
-            return name.lower() if name.upper() == name and \
-               not self.identifier_preparer._requires_quotes(name.lower()) \
-               else name
+        name = self._coerce_name(name)
+        if name is None:
+            return None
+
+        lowered = name.lower()
+        if (
+            name.upper() == name
+            and not self.identifier_preparer._requires_quotes(lowered)
+        ):
+            return lowered
+
         return name
 
     def denormalize_name(self, name):
+        name = self._coerce_name(name)
         if name is None:
             return None
-        elif name.lower() == name and \
-                not self.identifier_preparer._requires_quotes(name.lower()):
-            name = name.upper()
-        if not self.dialect.supports_unicode_binds:
-            if(isinstance(name, str)):
-                name = name
-            else:
-                name = codecs.decode(name)
-        else:
-            if version_info[0] < 3:
-                name = unicode(name)
-            else:
-                name = str(name)
+
+        lowered = name.lower()
+        if lowered == name and not self.identifier_preparer._requires_quotes(
+            lowered
+        ):
+            return name.upper()
+
         return name
 
     def _get_default_schema_name(self, connection):
         """Return: current setting of the schema attribute"""
         default_schema_name = connection.exec_driver_sql(
-                    u'SELECT USER FROM systables WHERE tabid = 1').scalar()
-        if isinstance(default_schema_name, str):
-            default_schema_name = default_schema_name.strip()
-        elif version_info[0] < 3:
-            if isinstance(default_schema_name, unicode):
-                default_schema_name = default_schema_name.strip().__str__()
-            else:
-                if isinstance(default_schema_name, str):
-                    default_schema_name = default_schema_name.strip().__str__()
+                    'SELECT USER FROM systables WHERE tabid = 1').scalar()
+        if default_schema_name is not None:
+            default_schema_name = self._coerce_name(default_schema_name).strip()
         return self.normalize_name(default_schema_name)
 
     @property
@@ -937,6 +934,26 @@ class IfxReflector(BaseReflector):
         """
         rows = connection.exec_driver_sql(sql_text, (owner,)).fetchall()
         return [self.normalize_name(self._clean_str(r[0])) for r in rows]
+
+    def get_materialized_view_names(self, connection, schema=None, **kw):
+        # Informix does not expose a materialized-view concept through this
+        # dialect, so the contract is explicit and empty.
+        return []
+
+    def get_check_constraints(self, connection, table_name, schema=None, **kw):
+        # Explicit contract for a reflection surface we don't currently
+        # implement for Informix in this dialect.
+        return []
+
+    def get_table_comment(self, connection, table_name, schema=None, **kw):
+        # Informix table comments are not currently reflected by this
+        # dialect; return the stable SQLAlchemy structure explicitly.
+        return {"text": None}
+
+    def get_table_options(self, connection, table_name, schema=None, **kw):
+        # Informix-specific table options are not currently reflected by
+        # this dialect; return the stable SQLAlchemy structure explicitly.
+        return {}
 
     def get_temp_view_names(self, connection, schema=None, **kw):
         # Informix does not support TEMP VIEW creation in the same way as

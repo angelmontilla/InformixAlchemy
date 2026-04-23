@@ -24,6 +24,7 @@
 
 """
 import datetime
+from sqlalchemy import exc
 from sqlalchemy import types as sa_types
 from sqlalchemy import sql
 from sqlalchemy import schema as sa_schema
@@ -32,14 +33,12 @@ from sqlalchemy.sql import compiler
 from sqlalchemy.sql import operators
 from sqlalchemy.sql import util as sql_util
 from sqlalchemy.engine import default
-from sqlalchemy import __version__ as SA_Version
 from . import reflection as ifx_reflection
 
 from sqlalchemy.types import BLOB, CHAR, CLOB, DATE, DATETIME, INTEGER,\
     SMALLINT, BIGINT, DECIMAL, NUMERIC, REAL, TIME, TIMESTAMP,\
     VARCHAR, FLOAT
 
-SA_Version = [int(ver_token) for ver_token in SA_Version.split('.')[0:2]]
 _IFX_SINGLE_ROW_FROM = " FROM systables WHERE tabid = 1"
 _IFX_LASTROWID_DBINFO_BY_TYPE = {
     "BIGSERIAL": "bigserial",
@@ -411,37 +410,96 @@ class IfxCompiler(compiler.SQLCompiler):
     def visit_now_func(self, fn, **kw):
         return "CURRENT_TIMESTAMP"
 
-    def for_update_clause(self, select):
-        if select.for_update == True:
-            return ' WITH RS USE AND KEEP UPDATE LOCKS'
-        elif select.for_update == 'read':
-            return ' WITH RS USE AND KEEP SHARE LOCKS'
-        else:
+    def for_update_clause(self, select, **kw):
+        for_update = select._for_update_arg
+
+        if for_update is None:
             return ''
+
+        if for_update.nowait:
+            raise exc.CompileError(
+                "Informix dialect does not support FOR UPDATE NOWAIT"
+            )
+
+        if for_update.skip_locked:
+            raise exc.CompileError(
+                "Informix dialect does not support FOR UPDATE SKIP LOCKED"
+            )
+
+        if for_update.of:
+            raise exc.CompileError(
+                "Informix dialect does not support FOR UPDATE OF"
+            )
+
+        if for_update.key_share:
+            raise exc.CompileError(
+                "Informix dialect does not support KEY SHARE locks"
+            )
+
+        if for_update.read:
+            return ' WITH RS USE AND KEEP SHARE LOCKS'
+
+        return ' WITH RS USE AND KEEP UPDATE LOCKS'
 
     def visit_mod_binary(self, binary, operator, **kw):
         return "mod(%s, %s)" % (self.process(binary.left),
                                                 self.process(binary.right))
 
-    def _row_limit_expression(self, select, clause, attrname):
+    def _fetch_clause_options(self, select):
+        return select._fetch_clause_options or {
+            "percent": False,
+            "with_ties": False,
+        }
+
+    def _get_limit_or_fetch_clause(self, select):
+        if select._fetch_clause is not None:
+            fetch_options = self._fetch_clause_options(select)
+
+            if fetch_options["with_ties"]:
+                raise exc.CompileError(
+                    "Informix dialect does not support FETCH WITH TIES"
+                )
+
+            if fetch_options["percent"]:
+                raise exc.CompileError(
+                    "Informix dialect does not support FETCH PERCENT"
+                )
+
+            return select._fetch_clause
+
+        return select._limit_clause
+
+    def _get_limit_or_fetch_value(self, select, clause):
+        if clause is None:
+            return None
+
+        if select._fetch_clause is clause:
+            return select._offset_or_limit_clause_asint(clause, "fetch")
+
+        return select._limit
+
+    def _row_limit_expression(self, select, clause, value):
         if clause is None:
             return None
 
         if select._simple_int_clause(clause):
-            return sql.literal_column(str(getattr(select, attrname)))
+            return sql.literal_column(str(value))
 
         return clause
 
     def _row_limit_upper_bound(self, select, limit_clause, offset_clause):
+        limit_value = self._get_limit_or_fetch_value(select, limit_clause)
+        offset_value = select._offset
+
         if (
             select._simple_int_clause(limit_clause)
             and select._simple_int_clause(offset_clause)
         ):
-            return sql.literal_column(str(select._limit + select._offset))
+            return sql.literal_column(str(limit_value + offset_value))
 
         return (
-            self._row_limit_expression(select, limit_clause, "_limit")
-            + self._row_limit_expression(select, offset_clause, "_offset")
+            self._row_limit_expression(select, limit_clause, limit_value)
+            + self._row_limit_expression(select, offset_clause, offset_value)
         )
 
     def _translate_distinct_offset_select(self, select, order_by_clauses):
@@ -466,7 +524,7 @@ class IfxCompiler(compiler.SQLCompiler):
         ).select_from(translated).alias()
 
     def _translate_offset_select(self, select):
-        limit_clause = select._limit_clause
+        limit_clause = self._get_limit_or_fetch_clause(select)
         offset_clause = select._offset_clause
 
         if offset_clause is None:
@@ -509,7 +567,9 @@ class IfxCompiler(compiler.SQLCompiler):
         ):
             paged = paged.where(
                 row_number_col
-                > self._row_limit_expression(select, offset_clause, "_offset")
+                > self._row_limit_expression(
+                    select, offset_clause, select._offset
+                )
             )
 
         if limit_clause is not None:
@@ -525,16 +585,21 @@ class IfxCompiler(compiler.SQLCompiler):
     def limit_clause(self, select,**kwargs):
             return ""
 
+    def fetch_clause(
+        self,
+        select,
+        fetch_clause=None,
+        require_offset=False,
+        use_literal_execute_for_simple_int=False,
+        **kw
+    ):
+        if select._fetch_clause is not None:
+            self._get_limit_or_fetch_clause(select)
+
+        return ""
+
     def translate_select_structure(self, select_stmt, **kwargs):
-        if SA_Version >= [1, 4]:
-            return self._translate_offset_select(select_stmt)
-
-        return select_stmt
-
-    def visit_select(self, select, **kwargs):
-        translated = self._translate_offset_select(select)
-
-        return compiler.SQLCompiler.visit_select(self, translated, **kwargs)
+        return self._translate_offset_select(select_stmt)
 
     def visit_sequence(self, sequence, **kw):
         return "%s.NEXTVAL" % self.preparer.format_sequence(sequence)
@@ -542,13 +607,21 @@ class IfxCompiler(compiler.SQLCompiler):
     def default_from(self):
         return _IFX_SINGLE_ROW_FROM
 
-    def visit_function(self, func, result_map=None, **kwargs):
+    def visit_function(self, func, add_to_result_map=None, **kwargs):
+        if add_to_result_map is not None:
+            add_to_result_map(func.name, func.name, (func.name,), func.type)
+
         if func.name.upper() == "AVG":
             return "AVG(DOUBLE(%s))" % (self.function_argspec(func, **kwargs))
         elif func.name.upper() == "CHAR_LENGTH":
             return "CHAR_LENGTH(%s, %s)" % (self.function_argspec(func, **kwargs), 'OCTETS')
         else:
-            return compiler.SQLCompiler.visit_function(self, func, **kwargs)
+            return compiler.SQLCompiler.visit_function(
+                self,
+                func,
+                add_to_result_map=add_to_result_map,
+                **kwargs
+            )
     # TODO: this is wrong but need to know what Informix is expecting here
     #    if func.name.upper() == "LENGTH":
     #        return "LENGTH('%s')" % func.compile().params[func.name + '_1']
@@ -580,13 +653,15 @@ class IfxCompiler(compiler.SQLCompiler):
 
     def get_select_precolumns(self, select, **kwargs):
         text = ""
+        limit_clause = self._get_limit_or_fetch_clause(select)
+        limit_value = self._get_limit_or_fetch_value(select, limit_clause)
 
         # Informix: SELECT FIRST n DISTINCT ...
-        if (select._limit_clause is not None) and (select._offset_clause is None):
-            if select._simple_int_clause(select._limit_clause):
-                text += "FIRST %s " % select._limit
+        if (limit_clause is not None) and (select._offset_clause is None):
+            if select._simple_int_clause(limit_clause):
+                text += "FIRST %s " % limit_value
             else:
-                text += "FIRST %s " % self.process(select._limit_clause, **kwargs)
+                text += "FIRST %s " % self.process(limit_clause, **kwargs)
 
         if isinstance(select._distinct, str):
             text += select._distinct.upper() + " "
@@ -594,16 +669,6 @@ class IfxCompiler(compiler.SQLCompiler):
             text += "DISTINCT "
 
         return text
-
-    def visit_join(self, join, asfrom=False, **kwargs):
-        # NOTE: this is the same method as that used in mysql/base.py
-        # to render INNER JOIN
-        return ''.join(
-            (self.process(join.left, asfrom=True, **kwargs),
-             (join.isouter and " LEFT OUTER JOIN " or " INNER JOIN "),
-             self.process(join.right, asfrom=True, **kwargs),
-             " ON ",
-             self.process(join.onclause, **kwargs)))
 
     def visit_savepoint(self, savepoint_stmt, **kw):
         # Informix uses ANSI savepoint syntax here; the DB2-specific
@@ -623,13 +688,23 @@ class IfxCompiler(compiler.SQLCompiler):
             'sid': self.preparer.format_savepoint(savepoint_stmt)
         }
 
-    def visit_unary(self, unary, **kw):
-        if (unary.operator == operators.exists)  and kw.get('within_columns_clause', False):
-            usql = super(IfxCompiler, self).visit_unary(unary, **kw)
-            usql = "CASE WHEN " + usql + " THEN 1 ELSE 0 END"
-            return usql
-        else:
-            return super(IfxCompiler, self).visit_unary(unary, **kw)
+    def visit_unary(
+        self, unary, add_to_result_map=None, result_map_targets=(), **kw
+    ):
+        usql = super(IfxCompiler, self).visit_unary(
+            unary,
+            add_to_result_map=add_to_result_map,
+            result_map_targets=result_map_targets,
+            **kw
+        )
+
+        if (
+            unary.operator == operators.exists
+            and kw.get('within_columns_clause', False)
+        ):
+            return "CASE WHEN " + usql + " THEN 1 ELSE 0 END"
+
+        return usql
 
 class IfxDDLCompiler(compiler.DDLCompiler):
 
@@ -784,16 +859,15 @@ class IfxDDLCompiler(compiler.DDLCompiler):
         result = super( IfxDDLCompiler, self ).create_table_constraints(table, **kw)
         return result
 
-    def visit_create_index(self, create, include_schema=True, include_table_schema=True, **kw):
-        if SA_Version < [0, 8]:
-            sql = super( IfxDDLCompiler, self ).visit_create_index(create)
-        else:
-            sql = super( IfxDDLCompiler, self ).visit_create_index(
-                create,
-                include_schema=include_schema,
-                include_table_schema=include_table_schema,
-                **kw
-            )
+    def visit_create_index(
+        self, create, include_schema=False, include_table_schema=True, **kw
+    ):
+        sql = super( IfxDDLCompiler, self ).visit_create_index(
+            create,
+            include_schema=include_schema,
+            include_table_schema=include_table_schema,
+            **kw
+        )
         if getattr(create.element, 'uConstraint_as_index', None):
             sql += ' EXCLUDE NULL KEYS'
         return sql
@@ -847,13 +921,23 @@ class _SelectLastRowIDMixin(object):
     def get_lastrowid(self):
         return self._lastrowid
 
+    def _get_lastrowid_dml_table(self):
+        dml_compile_state = getattr(self.compiled, "dml_compile_state", None)
+        return getattr(dml_compile_state, "dml_table", None)
+
+    def _has_effective_returning(self):
+        return bool(getattr(self.compiled, "effective_returning", None))
+
     def pre_exec(self):
         self._lastrowid = None
         self._select_lastrowid = False
         self._lastrowid_query = None
 
         if self.isinsert:
-            tbl = self.compiled.statement.table
+            tbl = self._get_lastrowid_dml_table()
+            if tbl is None:
+                return
+
             seq_column = tbl._autoincrement_column
             insert_has_sequence = seq_column is not None
             compiled_params = (
@@ -866,7 +950,7 @@ class _SelectLastRowIDMixin(object):
 
             self._select_lastrowid = insert_has_sequence and \
                                         not explicit_pk_value and \
-                                        not self.compiled.returning and \
+                                        not self._has_effective_returning() and \
                                         not self.compiled.inline and \
                                         not self.executemany
             if self._select_lastrowid:
@@ -947,9 +1031,10 @@ class IfxDialect(default.DefaultDialect):
     def has_table(self, connection, table_name, schema=None, **kw):
         return self._reflector.has_table(connection, table_name, schema=schema, **kw)
 
-    def has_sequence(self, connection, sequence_name, schema=None):
-        return self._reflector.has_sequence(connection, sequence_name,
-                        schema=schema)
+    def has_sequence(self, connection, sequence_name, schema=None, **kw):
+        return self._reflector.has_sequence(
+            connection, sequence_name, schema=schema, **kw
+        )
 
     def get_schema_names(self, connection, **kw):
         return self._reflector.get_schema_names(connection, **kw)
@@ -964,6 +1049,11 @@ class IfxDialect(default.DefaultDialect):
 
     def get_view_names(self, connection, schema=None, **kw):
         return self._reflector.get_view_names(connection, schema=schema, **kw)
+
+    def get_materialized_view_names(self, connection, schema=None, **kw):
+        return self._reflector.get_materialized_view_names(
+            connection, schema=schema, **kw
+        )
 
     def get_temp_view_names(self, connection, schema=None, **kw):
         return self._reflector.get_temp_view_names(
@@ -999,6 +1089,18 @@ class IfxDialect(default.DefaultDialect):
 
     def get_unique_constraints(self, connection, table_name, schema=None, **kw):
         return self._reflector.get_unique_constraints(
+                                connection, table_name, schema=schema, **kw)
+
+    def get_check_constraints(self, connection, table_name, schema=None, **kw):
+        return self._reflector.get_check_constraints(
+                                connection, table_name, schema=schema, **kw)
+
+    def get_table_comment(self, connection, table_name, schema=None, **kw):
+        return self._reflector.get_table_comment(
+                                connection, table_name, schema=schema, **kw)
+
+    def get_table_options(self, connection, table_name, schema=None, **kw):
+        return self._reflector.get_table_options(
                                 connection, table_name, schema=schema, **kw)
 
 

@@ -196,6 +196,50 @@ def test_get_view_names_and_definition(engine, basic_reflection_objects):
 
 
 @pytest.mark.reflection_minimal
+def test_get_materialized_view_names_returns_empty_list(engine):
+    with engine.connect() as connection:
+        insp = inspect(connection)
+        mat_views = insp.get_materialized_view_names()
+
+    assert mat_views == []
+
+
+@pytest.mark.reflection_minimal
+def test_get_check_constraints_returns_empty_list(
+    engine, basic_reflection_objects
+):
+    table_name = basic_reflection_objects["table"]
+
+    with engine.connect() as connection:
+        insp = inspect(connection)
+        checks = insp.get_check_constraints(table_name)
+
+    assert checks == []
+
+
+@pytest.mark.reflection_minimal
+def test_get_table_comment_returns_none_text(engine, basic_reflection_objects):
+    table_name = basic_reflection_objects["table"]
+
+    with engine.connect() as connection:
+        insp = inspect(connection)
+        comment = insp.get_table_comment(table_name)
+
+    assert comment == {"text": None}
+
+
+@pytest.mark.reflection_minimal
+def test_get_table_options_returns_empty_dict(engine, basic_reflection_objects):
+    table_name = basic_reflection_objects["table"]
+
+    with engine.connect() as connection:
+        insp = inspect(connection)
+        options = insp.get_table_options(table_name)
+
+    assert options == {}
+
+
+@pytest.mark.reflection_minimal
 def test_get_columns(engine, basic_reflection_objects):
     table_name = basic_reflection_objects["table"]
 
