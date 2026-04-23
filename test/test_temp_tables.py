@@ -133,6 +133,51 @@ def test_get_temp_table_names_is_explicitly_unsupported_and_returns_empty_list(
             connection.rollback()
 
 
+@pytest.mark.temp_tables
+def test_temp_table_visibility_round_trips_across_session_and_connection(
+    pinned_connection_session, name_factory
+):
+    connection, session = pinned_connection_session
+    table_name = name_factory("tmp_same_")
+
+    try:
+        connection.exec_driver_sql(
+            f"""
+            CREATE TEMP TABLE {table_name} (
+                id INTEGER NOT NULL,
+                name VARCHAR(20) NOT NULL
+            )
+            """
+        )
+        connection.commit()
+
+        connection.exec_driver_sql(
+            f"INSERT INTO {table_name} (id, name) VALUES (1, 'alpha')"
+        )
+        connection.commit()
+
+        assert session.execute(
+            text(f"SELECT name FROM {table_name} WHERE id = :id"),
+            {"id": 1},
+        ).scalar_one() == "alpha"
+
+        session.execute(
+            text(f"INSERT INTO {table_name} (id, name) VALUES (:id, :name)"),
+            {"id": 2, "name": "beta"},
+        )
+        session.commit()
+
+        assert connection.execute(
+            text(f"SELECT COUNT(*) FROM {table_name}")
+        ).scalar_one() == 2
+    finally:
+        try:
+            connection.exec_driver_sql(f"DROP TABLE {table_name}")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+
+
 def test_get_temp_view_names_is_explicitly_unsupported_and_returns_empty_list(engine):
     with engine.connect() as connection:
         insp = inspect(connection)

@@ -16,7 +16,10 @@ from sqlalchemy import (
     Table,
     UniqueConstraint,
     inspect,
+    insert,
+    select,
 )
+from sqlalchemy.orm import Session
 
 
 @pytest.fixture
@@ -163,3 +166,91 @@ def test_named_check_constraint_ddl_executes(engine, name_factory):
         assert insp.has_table(table_name) is True
 
         metadata.drop_all(connection)
+
+
+@pytest.mark.ddl_execute
+def test_session_begin_nested_uses_real_savepoints(engine, name_factory):
+    table_name = name_factory("sa_svpt_")
+    metadata = MetaData()
+    table = Table(
+        table_name,
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("name", String(30), nullable=False),
+    )
+
+    with engine.begin() as connection:
+        table.create(connection)
+
+    try:
+        with Session(engine, expire_on_commit=False) as session:
+            with session.begin():
+                session.execute(insert(table).values(id=1, name="outer"))
+
+                nested = session.begin_nested()
+                session.execute(insert(table).values(id=2, name="nested_rollback"))
+                nested.rollback()
+
+                rows_after_nested_rollback = session.execute(
+                    select(table.c.id, table.c.name).order_by(table.c.id)
+                ).all()
+                assert rows_after_nested_rollback == [(1, "outer")]
+
+                with session.begin_nested():
+                    session.execute(
+                        insert(table).values(id=3, name="nested_commit")
+                    )
+
+                rows_after_nested_commit = session.execute(
+                    select(table.c.id, table.c.name).order_by(table.c.id)
+                ).all()
+                assert rows_after_nested_commit == [
+                    (1, "outer"),
+                    (3, "nested_commit"),
+                ]
+
+        with engine.connect() as connection:
+            persisted_rows = connection.execute(
+                select(table.c.id, table.c.name).order_by(table.c.id)
+            ).all()
+
+        assert persisted_rows == [(1, "outer"), (3, "nested_commit")]
+    finally:
+        with engine.begin() as connection:
+            table.drop(connection)
+
+
+@pytest.mark.ddl_execute
+def test_pk_fk_indexes_reflect_on_fresh_connection(engine, ddl_roundtrip_objects):
+    metadata = ddl_roundtrip_objects["metadata"]
+    names = ddl_roundtrip_objects["names"]
+
+    with engine.begin() as connection:
+        metadata.create_all(connection)
+
+    try:
+        with engine.connect() as connection:
+            insp = inspect(connection)
+
+            parent_pk = insp.get_pk_constraint(names["parent"])
+            child_fks = insp.get_foreign_keys(names["child"])
+            child_indexes = insp.get_indexes(names["child"])
+
+        assert parent_pk["name"] == names["pk_parent"].lower(), parent_pk
+        assert parent_pk["constrained_columns"] == ["id"], parent_pk
+
+        assert len(child_fks) == 1, child_fks
+        fk = child_fks[0]
+        assert fk["name"] == names["fk_child_parent"].lower(), fk
+        assert fk["constrained_columns"] == ["parent_id"], fk
+        assert fk["referred_table"] == names["parent"], fk
+        assert fk["referred_columns"] == ["id"], fk
+
+        ix_by_name = {ix["name"]: ix for ix in child_indexes}
+        assert names["ix_child_note"].lower() in ix_by_name, child_indexes
+        assert ix_by_name[names["ix_child_note"].lower()]["column_names"] == [
+            "note"
+        ]
+    finally:
+        with engine.begin() as connection:
+            metadata.drop_all(connection)

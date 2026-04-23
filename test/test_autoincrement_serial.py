@@ -23,6 +23,43 @@ def dialect():
     return IfxDialect_pyodbc()
 
 
+def _assert_generated_lastrowid_roundtrip(engine, name_factory, prefix, type_):
+    table_name = name_factory(prefix)
+    metadata = MetaData()
+    table = Table(
+        table_name,
+        metadata,
+        Column("id", type_, primary_key=True),
+        Column("name", String(30)),
+    )
+
+    with engine.begin() as conn:
+        table.create(conn)
+
+        try:
+            result = conn.execute(insert(table).values(name="alpha"))
+
+            assert result.lastrowid is not None
+            assert isinstance(result.lastrowid, int)
+            assert result.lastrowid > 0
+
+            pk = result.inserted_primary_key
+            assert pk is not None
+            assert len(pk) == 1
+            assert pk[0] == result.lastrowid
+
+            row = conn.execute(
+                select(table.c.id, table.c.name).where(
+                    table.c.id == result.lastrowid
+                )
+            ).one()
+
+            assert row.id == result.lastrowid
+            assert row.name == "alpha"
+        finally:
+            table.drop(conn)
+
+
 @pytest.mark.serial_identity
 def test_compile_serial_types(dialect):
     assert dialect.type_compiler.process(SERIAL()).upper() == "SERIAL"
@@ -143,6 +180,27 @@ def test_insert_without_pk_returns_generated_serial_pk(engine, name_factory):
         assert row.name == "alpha"
 
         metadata.drop_all(conn)
+
+
+@pytest.mark.serial_identity
+def test_lastrowid_round_trip_for_serial(engine, name_factory):
+    _assert_generated_lastrowid_roundtrip(
+        engine, name_factory, "sa_lr_ser_", SERIAL()
+    )
+
+
+@pytest.mark.serial_identity
+def test_lastrowid_round_trip_for_serial8(engine, name_factory):
+    _assert_generated_lastrowid_roundtrip(
+        engine, name_factory, "sa_lr_ser8_", SERIAL8()
+    )
+
+
+@pytest.mark.serial_identity
+def test_lastrowid_round_trip_for_bigserial(engine, name_factory):
+    _assert_generated_lastrowid_roundtrip(
+        engine, name_factory, "sa_lr_big_", BIGSERIAL()
+    )
 
 
 @pytest.mark.serial_identity
