@@ -200,6 +200,51 @@ def test_limit_offset_keeps_function_arguments_with_commas_intact(
 
 
 @pytest.mark.ddl_compiler
+def test_limit_offset_keeps_unlabeled_function_projection_intact(
+    dialect, sample_table
+):
+    stmt = (
+        select(func.replace(sample_table.c.name, "FROM", "X"))
+        .limit(5)
+        .offset(10)
+    )
+
+    compiled = str(stmt.compile(dialect=dialect))
+    upper = _upper_sql(compiled)
+
+    assert "REPLACE(SA_COMPILE_BASIC.NAME," in upper
+    assert "AS REPLACE_1" in upper
+    assert "__IFX_" not in upper
+    assert "ROW_NUMBER() OVER () AS IFX_RN" in upper
+
+
+@pytest.mark.ddl_compiler
+def test_limit_offset_keeps_cte_projection_intact(dialect, sample_table):
+    cte = (
+        select(
+            sample_table.c.id.label("id"),
+            sample_table.c.name.label("name"),
+        )
+        .cte("cte1")
+    )
+    stmt = select(cte.c.id, cte.c.name).select_from(cte).limit(5).offset(10)
+
+    compiled = str(stmt.compile(dialect=dialect))
+    upper = _upper_sql(compiled)
+
+    assert (
+        "WITH CTE1 AS (SELECT SA_COMPILE_BASIC.ID AS ID, "
+        "SA_COMPILE_BASIC.NAME AS NAME FROM SA_COMPILE_BASIC)"
+    ) in upper
+    assert (
+        "FROM (SELECT CTE1.ID AS ID, CTE1.NAME AS NAME, "
+        "ROW_NUMBER() OVER () AS IFX_RN FROM CTE1) AS ANON_1"
+    ) in upper
+    assert " AS ID AS " not in upper
+    assert "__IFX_" not in upper
+
+
+@pytest.mark.ddl_compiler
 def test_offset_with_order_by_compiles_with_row_number_wrapper(
     dialect, sample_table
 ):

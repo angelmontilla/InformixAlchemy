@@ -40,6 +40,13 @@ Statement caching is currently disabled for:
 
 This will remain so until the official SQLAlchemy suite is green at a reasonable level for the corresponding backend.
 
+### LIMIT/OFFSET compilation
+
+- `LIMIT` without `OFFSET` compiles to Informix `FIRST n`
+- `OFFSET` is compiled by wrapping the original `SELECT` with `ROW_NUMBER()`, not by parsing rendered SQL strings
+- Complex projections such as scalar subqueries, function calls with commas, and CTE-based selects are preserved by that translation
+- For deterministic pagination, pass an explicit `ORDER BY` when using `OFFSET`
+
 ### External schemas
 
 The selected Informix backend is currently gated as:
