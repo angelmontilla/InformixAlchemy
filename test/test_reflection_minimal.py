@@ -11,6 +11,18 @@ def _norm(value: str | None) -> str | None:
     return value.lower() if isinstance(value, str) else value
 
 
+def test_decode_datetime_qualifiers_without_database():
+    from IfxAlchemy.pyodbc import IfxDialect_pyodbc
+
+    reflector = IfxDialect_pyodbc()._reflector
+
+    qualifiers = reflector._decode_datetime_qualifiers(4365)
+
+    assert qualifiers["length"] == 17
+    assert qualifiers["first"] == "YEAR"
+    assert qualifiers["last"] == "FRACTION(3)"
+
+
 @pytest.fixture
 def name_factory():
     def _make(prefix: str = "sa_") -> str:
@@ -263,6 +275,23 @@ def test_get_columns(engine, basic_reflection_objects):
 
     assert by_name["created_on"]["type"]._type_affinity is sqltypes.Date
     assert by_name["amount"]["type"]._type_affinity is sqltypes.Numeric
+
+
+@pytest.mark.requires_informix
+@pytest.mark.reflection_minimal
+def test_multi_columns_reflection(engine, basic_reflection_objects):
+    table_name = basic_reflection_objects["table"]
+
+    with engine.connect() as conn:
+        result = dict(
+            conn.dialect.get_multi_columns(
+                conn,
+                filter_names=[table_name],
+            )
+        )
+
+    assert (None, table_name) in result
+    assert result[(None, table_name)]
 
 
 @pytest.mark.reflection_minimal

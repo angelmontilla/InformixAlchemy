@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import URL, make_url
 
 from IfxAlchemy.pyodbc import IfxDialect_pyodbc, _quote_odbc_value
 
@@ -53,6 +53,32 @@ def test_odbc_connect_passthrough_is_not_modified():
     )
 
     assert connstr == "DRIVER={Existing};HOST=ifx;UID=user"
+
+
+def test_odbc_connect_preserves_encoded_plus():
+    dialect = IfxDialect_pyodbc()
+    url = make_url(
+        "informix+pyodbc:///?odbc_connect="
+        "DRIVER%3D%7BIBM%7D%3BPWD%3Da%2Bb"
+    )
+
+    args, kwargs = dialect.create_connect_args(url)
+
+    assert args == ["DRIVER={IBM};PWD=a+b"]
+    assert kwargs == {}
+
+
+def test_odbc_connect_preserves_literal_plus_when_already_decoded_by_url():
+    dialect = IfxDialect_pyodbc()
+    url = URL.create(
+        "informix+pyodbc",
+        query={"odbc_connect": "PWD=a+b"},
+    )
+
+    args, kwargs = dialect.create_connect_args(url)
+
+    assert args == ["PWD=a+b"]
+    assert kwargs == {}
 
 
 def test_trusted_context_alias_renders_tctx_keyword():

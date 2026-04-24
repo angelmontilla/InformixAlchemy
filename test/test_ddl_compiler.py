@@ -204,6 +204,61 @@ def test_fetch_offset_compiles_with_row_number_wrapper(dialect, sample_table):
 
 
 @pytest.mark.ddl_compiler
+def test_limit_offset_with_bound_parameters_compiles(dialect, sample_table):
+    stmt = (
+        select(sample_table.c.id)
+        .order_by(sample_table.c.id)
+        .limit(5)
+        .offset(2)
+    )
+
+    compiled = str(stmt.compile(dialect=dialect))
+    upper = _upper_sql(compiled)
+
+    assert "ROW_NUMBER()" in upper
+    assert "IFX_RN" in upper
+    assert "> 2" in upper
+    assert "<= 7" in upper
+
+
+@pytest.mark.ddl_compiler
+def test_offset_zero_does_not_emit_lower_bound(dialect, sample_table):
+    stmt = (
+        select(sample_table.c.id)
+        .order_by(sample_table.c.id)
+        .limit(5)
+        .offset(0)
+    )
+
+    compiled = str(stmt.compile(dialect=dialect))
+    upper = _upper_sql(compiled)
+
+    assert "ROW_NUMBER()" in upper
+    assert "<= 5" in upper
+    assert " > 0" not in upper
+
+
+@pytest.mark.ddl_compiler
+def test_fetch_percent_rejected(dialect, sample_table):
+    stmt = select(sample_table.c.id).fetch(50, percent=True)
+
+    with pytest.raises(CompileError):
+        stmt.compile(dialect=dialect)
+
+
+@pytest.mark.ddl_compiler
+def test_fetch_with_ties_rejected(dialect, sample_table):
+    stmt = (
+        select(sample_table.c.id)
+        .order_by(sample_table.c.id)
+        .fetch(5, with_ties=True)
+    )
+
+    with pytest.raises(CompileError):
+        stmt.compile(dialect=dialect)
+
+
+@pytest.mark.ddl_compiler
 def test_limit_offset_keeps_scalar_subquery_projection_intact(
     dialect, sample_table
 ):

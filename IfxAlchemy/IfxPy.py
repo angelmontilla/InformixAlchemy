@@ -90,7 +90,14 @@ class IfxDialect_IfxPy(IfxDialect):
     supports_native_decimal = False
     supports_char_length = True
     supports_default_values = False
-    supports_multivalues_insert = True
+    insert_returning = False
+    update_returning = False
+    delete_returning = False
+    full_returning = False
+    supports_multivalues_insert = False
+    use_insertmanyvalues = False
+    use_insertmanyvalues_wo_returning = False
+    supports_identity_columns = False
     supports_statement_cache = False
 
     execution_ctx_cls = IfxExecutionContext_IfxPy

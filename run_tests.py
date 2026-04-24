@@ -50,7 +50,12 @@ def main(argv: list[str] | None = None) -> int:
         "test/test_suite.py",
         "--dburi",
         dburi,
+        "-ra",
     ]
+
+    junit_path = os.getenv("SQLALCHEMY_SUITE_JUNIT")
+    if junit_path:
+        args.extend(["--junitxml", junit_path])
 
     if argv:
         args.extend(argv)

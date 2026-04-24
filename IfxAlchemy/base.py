@@ -34,6 +34,7 @@ from sqlalchemy.sql import operators
 from sqlalchemy.sql import util as sql_util
 from sqlalchemy.engine import default
 from . import reflection as ifx_reflection
+from . import sqla_compat
 
 from sqlalchemy.types import BLOB, CHAR, CLOB, DATE, DATETIME, INTEGER,\
     SMALLINT, BIGINT, DECIMAL, NUMERIC, REAL, TIME, TIMESTAMP,\
@@ -243,49 +244,6 @@ def _get_ifx_lastrowid_query(column):
     return "SELECT %s%s" % (expr, _IFX_SINGLE_ROW_FROM)
 
 
-def _sa_fetch_clause(select):
-    return getattr(select, "_fetch_clause", None)
-
-
-def _sa_fetch_clause_options(select):
-    return getattr(select, "_fetch_clause_options", None) or {
-        "percent": False,
-        "with_ties": False,
-    }
-
-
-def _sa_limit_clause(select):
-    return getattr(select, "_limit_clause", None)
-
-
-def _sa_offset_clause(select):
-    return getattr(select, "_offset_clause", None)
-
-
-def _sa_distinct(select):
-    return getattr(select, "_distinct", False)
-
-
-def _sa_offset(select):
-    return getattr(select, "_offset", None)
-
-
-def _sa_limit(select):
-    return getattr(select, "_limit", None)
-
-
-def _sa_clone_select(select):
-    return select._generate()
-
-
-def _sa_simple_int_clause(select, clause):
-    return clause is not None and select._simple_int_clause(clause)
-
-
-def _sa_offset_or_limit_clause_asint(select, clause, attrname):
-    return select._offset_or_limit_clause_asint(clause, attrname)
-
-
 colspecs = {
     sa_types.Boolean: _IFX_Boolean,
     sa_types.Date: _IFX_Date
@@ -317,7 +275,11 @@ ischema_names = {
     'GRAPHIC': GRAPHIC,
     'VARGRAPHIC': VARGRAPHIC,
     'LONGVARGRAPHIC': LONGVARGRAPHIC,
-    'DBCLOB': DBCLOB
+    'DBCLOB': DBCLOB,
+    'BOOLEAN': _IFX_Boolean,
+    'BYTE': sa_types.LargeBinary,
+    'TEXT': sa_types.Text,
+    'LVARCHAR': VARCHAR,
 }
 
 
@@ -498,52 +460,54 @@ class IfxCompiler(compiler.SQLCompiler):
                                                 self.process(binary.right))
 
     def _fetch_clause_options(self, select):
-        return _sa_fetch_clause_options(select)
+        return sqla_compat.get_fetch_clause_options(select)
 
     def _get_limit_or_fetch_clause(self, select):
-        fetch_clause = _sa_fetch_clause(select)
+        fetch_clause = sqla_compat.get_fetch_clause(select)
         if fetch_clause is not None:
             fetch_options = self._fetch_clause_options(select)
 
-            if fetch_options["with_ties"]:
+            if fetch_options.get("with_ties"):
                 raise exc.CompileError(
                     "Informix dialect does not support FETCH WITH TIES"
                 )
 
-            if fetch_options["percent"]:
+            if fetch_options.get("percent"):
                 raise exc.CompileError(
                     "Informix dialect does not support FETCH PERCENT"
                 )
 
             return fetch_clause
 
-        return _sa_limit_clause(select)
+        return sqla_compat.get_limit_clause(select)
 
     def _get_limit_or_fetch_value(self, select, clause):
         if clause is None:
             return None
 
-        if _sa_fetch_clause(select) is clause:
-            return _sa_offset_or_limit_clause_asint(select, clause, "fetch")
+        if sqla_compat.get_fetch_clause(select) is clause:
+            return sqla_compat.offset_or_limit_clause_asint(
+                select, clause, "fetch"
+            )
 
-        return _sa_limit(select)
+        return sqla_compat.get_limit_value(select)
 
     def _row_limit_expression(self, select, clause, value):
         if clause is None:
             return None
 
-        if _sa_simple_int_clause(select, clause):
+        if sqla_compat.simple_int_clause(select, clause):
             return sql.literal_column(str(value))
 
         return clause
 
     def _row_limit_upper_bound(self, select, limit_clause, offset_clause):
         limit_value = self._get_limit_or_fetch_value(select, limit_clause)
-        offset_value = _sa_offset(select)
+        offset_value = sqla_compat.get_offset_value(select)
 
         if (
-            _sa_simple_int_clause(select, limit_clause)
-            and _sa_simple_int_clause(select, offset_clause)
+            sqla_compat.simple_int_clause(select, limit_clause)
+            and sqla_compat.simple_int_clause(select, offset_clause)
         ):
             return sql.literal_column(str(limit_value + offset_value))
 
@@ -553,7 +517,12 @@ class IfxCompiler(compiler.SQLCompiler):
         )
 
     def _translate_distinct_offset_select(self, select, order_by_clauses):
-        translated = _sa_clone_select(select).limit(None).offset(None).order_by(None)
+        translated = (
+            sqla_compat.clone_select(select)
+            .limit(None)
+            .offset(None)
+            .order_by(None)
+        )
         translated = translated.alias()
 
         adapter = sql_util.ClauseAdapter(translated)
@@ -575,23 +544,23 @@ class IfxCompiler(compiler.SQLCompiler):
 
     def _translate_offset_select(self, select):
         limit_clause = self._get_limit_or_fetch_clause(select)
-        offset_clause = _sa_offset_clause(select)
+        offset_clause = sqla_compat.get_offset_clause(select)
 
         if offset_clause is None:
             return select
 
         order_by_clauses = [
             sql_util.unwrap_label_reference(elem)
-            for elem in select._order_by_clauses
+            for elem in sqla_compat.get_order_by_clauses(select)
         ]
 
-        if _sa_distinct(select):
+        if sqla_compat.get_distinct(select):
             translated = self._translate_distinct_offset_select(
                 select, order_by_clauses
             )
         else:
             translated = (
-                _sa_clone_select(select)
+                sqla_compat.clone_select(select)
                 .limit(None)
                 .offset(None)
                 .add_columns(
@@ -613,13 +582,15 @@ class IfxCompiler(compiler.SQLCompiler):
         )
 
         if not (
-            _sa_simple_int_clause(select, offset_clause)
-            and _sa_offset(select) == 0
+            sqla_compat.simple_int_clause(select, offset_clause)
+            and sqla_compat.get_offset_value(select) == 0
         ):
             paged = paged.where(
                 row_number_col
                 > self._row_limit_expression(
-                    select, offset_clause, _sa_offset(select)
+                    select,
+                    offset_clause,
+                    sqla_compat.get_offset_value(select),
                 )
             )
 
@@ -644,7 +615,7 @@ class IfxCompiler(compiler.SQLCompiler):
         use_literal_execute_for_simple_int=False,
         **kw
     ):
-        if _sa_fetch_clause(select) is not None:
+        if sqla_compat.get_fetch_clause(select) is not None:
             self._get_limit_or_fetch_clause(select)
 
         return ""
@@ -708,13 +679,15 @@ class IfxCompiler(compiler.SQLCompiler):
         limit_value = self._get_limit_or_fetch_value(select, limit_clause)
 
         # Informix: SELECT FIRST n DISTINCT ...
-        if (limit_clause is not None) and (_sa_offset_clause(select) is None):
-            if _sa_simple_int_clause(select, limit_clause):
+        if (limit_clause is not None) and (
+            sqla_compat.get_offset_clause(select) is None
+        ):
+            if sqla_compat.simple_int_clause(select, limit_clause):
                 text += "FIRST %s " % limit_value
             else:
                 text += "FIRST %s " % self.process(limit_clause, **kwargs)
 
-        distinct = _sa_distinct(select)
+        distinct = sqla_compat.get_distinct(select)
         if isinstance(distinct, str):
             text += distinct.upper() + " "
         elif distinct:
@@ -1052,6 +1025,14 @@ class IfxDialect(default.DefaultDialect):
     supports_sane_multi_rowcount = True
     supports_native_decimal = False
     supports_native_boolean = False
+    insert_returning = False
+    update_returning = False
+    delete_returning = False
+    full_returning = False
+    supports_multivalues_insert = False
+    use_insertmanyvalues = False
+    use_insertmanyvalues_wo_returning = False
+    supports_identity_columns = False
     supports_schemas = False
     preexecute_sequences = False
     supports_alter = True
@@ -1161,6 +1142,81 @@ class IfxDialect(default.DefaultDialect):
     def get_unique_constraints(self, connection, table_name, schema=None, **kw):
         return self._reflector.get_unique_constraints(
                                 connection, table_name, schema=schema, **kw)
+
+    def get_multi_columns(
+        self,
+        connection,
+        *,
+        schema=None,
+        filter_names=None,
+        **kw,
+    ):
+        return self._reflector.get_multi_columns(
+            connection,
+            schema=schema,
+            filter_names=filter_names,
+            **kw,
+        )
+
+    def get_multi_pk_constraint(
+        self,
+        connection,
+        *,
+        schema=None,
+        filter_names=None,
+        **kw,
+    ):
+        return self._reflector.get_multi_pk_constraint(
+            connection,
+            schema=schema,
+            filter_names=filter_names,
+            **kw,
+        )
+
+    def get_multi_foreign_keys(
+        self,
+        connection,
+        *,
+        schema=None,
+        filter_names=None,
+        **kw,
+    ):
+        return self._reflector.get_multi_foreign_keys(
+            connection,
+            schema=schema,
+            filter_names=filter_names,
+            **kw,
+        )
+
+    def get_multi_indexes(
+        self,
+        connection,
+        *,
+        schema=None,
+        filter_names=None,
+        **kw,
+    ):
+        return self._reflector.get_multi_indexes(
+            connection,
+            schema=schema,
+            filter_names=filter_names,
+            **kw,
+        )
+
+    def get_multi_unique_constraints(
+        self,
+        connection,
+        *,
+        schema=None,
+        filter_names=None,
+        **kw,
+    ):
+        return self._reflector.get_multi_unique_constraints(
+            connection,
+            schema=schema,
+            filter_names=filter_names,
+            **kw,
+        )
 
     def get_check_constraints(self, connection, table_name, schema=None, **kw):
         return self._reflector.get_check_constraints(

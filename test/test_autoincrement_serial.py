@@ -118,6 +118,11 @@ def test_compile_serial_types(dialect):
 
 
 @pytest.mark.serial_identity
+def test_integer_identity_does_not_enable_sqlalchemy_identity_flag(dialect):
+    assert dialect.supports_identity_columns is False
+
+
+@pytest.mark.serial_identity
 def test_reflect_serial_autoincrement_true(db_builder, engine, name_factory):
     table_name = name_factory("sa_ser_")
 

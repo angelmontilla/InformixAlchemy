@@ -10,14 +10,33 @@ and is not part of the public entry-point contract.
 
 | Component | Supported baseline |
 | --- | --- |
-| Python | 3.10, 3.11, 3.12 |
+| Python | 3.10, 3.11, 3.12, 3.13 |
 | SQLAlchemy | 2.0.x stable. 2.1.x is validated only in prerelease CI until SQLAlchemy 2.1 is final. |
 | DBAPI | `pyodbc>=5.0` |
 | Driver | IBM Informix ODBC Driver |
 | Protocol | Informix over `onsoctcp` |
 
-Statement caching remains disabled until the SQLAlchemy third-party suite is
-green enough for this backend.
+## SQLAlchemy Support Policy
+
+This package supports SQLAlchemy `>=2.0,<2.1`.
+
+SQLAlchemy 2.1 prereleases are tested in non-blocking CI so compatibility
+breakage is visible before the package widens its public dependency range.
+
+The supported public dialect is `informix+pyodbc`. The legacy `IfxPy` module
+remains importable for source compatibility but is not part of the SQLAlchemy
+2.1 support contract.
+
+Unsupported by contract:
+
+- schema-qualified SQLAlchemy ownership model: `supports_schemas = False`
+- temp table enumeration/reflection
+- temporary views
+- `ON UPDATE CASCADE`
+- portable microsecond reflection for generic `DateTime`
+- unbounded `VARCHAR`
+- SQLAlchemy `Identity()` DDL; integer primary keys compile to Informix
+  `SERIAL`
 
 ## Connection Examples
 

@@ -69,6 +69,10 @@ class Requirements(SuiteRequirements):
 
         return exclusions.closed()
 
+    # Informix can store fractional DATETIME qualifiers, but the current
+    # generic SQLAlchemy DateTime mapping intentionally exposes second
+    # precision only. Informix-specific qualifier metadata is preserved on
+    # reflected types.
     @property
     def datetime_microseconds(self):
         """The current Informix DATETIME mapping is second precision."""
@@ -86,6 +90,48 @@ class Requirements(SuiteRequirements):
         """Informix VARCHAR requires an explicit length in DDL."""
 
         return exclusions.closed()
+
+    @property
+    def schemas(self):
+        """SQLAlchemy schema-qualified ownership is outside this contract."""
+
+        return exclusions.closed()
+
+    @property
+    def temporary_tables(self):
+        """Informix supports known connection-local temporary tables."""
+
+        return exclusions.open()
+
+    @property
+    def views(self):
+        """Informix views are reflected by the supported pyodbc dialect."""
+
+        return exclusions.open()
+
+    @property
+    def table_reflection(self):
+        """Basic table reflection is part of the supported contract."""
+
+        return exclusions.open()
+
+    @property
+    def foreign_key_constraint_reflection(self):
+        """Foreign-key reflection is part of the supported contract."""
+
+        return exclusions.open()
+
+    @property
+    def unique_constraint_reflection(self):
+        """Unique-constraint reflection is part of the supported contract."""
+
+        return exclusions.open()
+
+    @property
+    def index_reflection(self):
+        """Index reflection is part of the supported contract."""
+
+        return exclusions.open()
 
     #@property
     #def offset(self):

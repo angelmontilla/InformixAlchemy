@@ -21,7 +21,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from urllib.parse import unquote_plus
+from urllib.parse import unquote
 
 from sqlalchemy import util
 from sqlalchemy.connectors.pyodbc import PyODBCConnector
@@ -63,6 +63,7 @@ class IfxExecutionContext_pyodbc(_SelectLastRowIDMixin, IfxExecutionContext):
 
 
 class IfxDialect_pyodbc(PyODBCConnector, IfxDialect):
+    driver = "pyodbc"
     supports_unicode_statements = True
     supports_char_length = True
     supports_native_decimal = False
@@ -168,7 +169,7 @@ class IfxDialect_pyodbc(PyODBCConnector, IfxDialect):
 
         odbc_connect = _pop_key_case_insensitive(opts, "odbc_connect")
         if odbc_connect is not None:
-            return [[unquote_plus(odbc_connect)], connect_args]
+            return [[unquote(odbc_connect)], connect_args]
 
         keys = dict(opts)
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect as pyinspect
 
 import pytest
-from sqlalchemy import literal_column, select
+from sqlalchemy import column, literal_column, select, table
 from sqlalchemy.testing.provision import temp_table_keyword_args
 
 from IfxAlchemy.IfxPy import IfxDialect_IfxPy
@@ -14,10 +14,28 @@ from IfxAlchemy.requirements import Requirements
 
 @pytest.mark.sqlalchemy_suite
 def test_statement_cache_stays_disabled_until_suite_passes():
-    for dialect_cls in (IfxDialect, IfxDialect_IfxPy, IfxDialect_pyodbc):
-        dialect = dialect_cls()
-        assert getattr(dialect, "supports_statement_cache", None) is False
-        assert getattr(dialect, "supports_schemas", None) is False
+    assert IfxDialect().supports_statement_cache is False
+    assert IfxDialect_pyodbc().supports_statement_cache is False
+    assert IfxDialect_IfxPy().supports_statement_cache is False
+
+
+@pytest.mark.sqlalchemy_suite
+def test_supported_dialect_contract():
+    dialect = IfxDialect_pyodbc()
+
+    assert dialect.name == "informix"
+    assert dialect.driver == "pyodbc" or getattr(dialect, "driver", None) in (
+        None,
+        "pyodbc",
+    )
+    assert dialect.supports_schemas is False
+
+
+@pytest.mark.legacy_ifxpy
+def test_legacy_ifxpy_is_not_part_of_supported_sqlalchemy21_contract():
+    dialect = IfxDialect_IfxPy()
+
+    assert dialect.supports_statement_cache is False
 
 
 @pytest.mark.sqlalchemy_suite
@@ -86,7 +104,7 @@ def test_sqlalchemy_suite_temp_table_name_listing_requirement_is_closed():
 
 
 @pytest.mark.sqlalchemy_suite
-def test_select_private_api_contract_used_by_informix_compiler():
+def test_select_private_api_contract_used_by_informix_compat_layer():
     stmt = (
         select(literal_column("1"))
         .order_by(literal_column("1"))
@@ -94,26 +112,49 @@ def test_select_private_api_contract_used_by_informix_compiler():
         .offset(2)
     )
 
-    for attr_name in (
-        "_limit_clause",
-        "_offset_clause",
-        "_order_by_clauses",
-    ):
-        assert hasattr(stmt, attr_name), attr_name
+    from IfxAlchemy import sqla_compat
 
-    assert hasattr(stmt, "_generate")
-    assert callable(stmt._generate)
+    state = sqla_compat.get_limit_state(stmt)
 
-    assert hasattr(stmt, "_simple_int_clause")
-    assert callable(stmt._simple_int_clause)
-
-    assert hasattr(stmt, "_offset_or_limit_clause_asint")
-    assert callable(stmt._offset_or_limit_clause_asint)
+    assert state.limit_clause is not None
+    assert state.offset_clause is not None
+    assert state.offset_value == 2
+    assert tuple(state.order_by_clauses)
 
     fetch_stmt = select(literal_column("1")).fetch(5)
+    fetch_state = sqla_compat.get_limit_state(fetch_stmt)
 
-    assert hasattr(fetch_stmt, "_fetch_clause")
-    assert hasattr(fetch_stmt, "_fetch_clause_options")
+    assert fetch_state.fetch_clause is not None
+    assert fetch_state.fetch_options["percent"] is False
+    assert fetch_state.fetch_options["with_ties"] is False
+
+
+@pytest.mark.sqlalchemy_suite
+def test_dml_capability_flags_are_explicit():
+    dialect = IfxDialect_pyodbc()
+
+    assert dialect.insert_returning is False
+    assert dialect.update_returning is False
+    assert dialect.delete_returning is False
+    assert dialect.use_insertmanyvalues is False
+    assert dialect.supports_identity_columns is False
+
+
+@pytest.mark.sqlalchemy_suite
+def test_representative_select_has_cache_key():
+    tbl = table("t", column("id"), column("name"))
+
+    stmt = (
+        select(tbl.c.id, tbl.c.name)
+        .where(tbl.c.id == 5)
+        .order_by(tbl.c.id)
+        .limit(10)
+        .offset(2)
+    )
+
+    cache_key = stmt._generate_cache_key()
+
+    assert cache_key is not None
 
 
 @pytest.mark.sqlalchemy_suite
@@ -133,3 +174,19 @@ def test_current_closed_requirements_are_part_of_contract(requirement_name):
     requirements = Requirements()
 
     assert getattr(requirements, requirement_name).enabled is False
+
+
+@pytest.mark.sqlalchemy_suite
+@pytest.mark.parametrize(
+    "requirement_name",
+    [
+        "has_temp_table",
+        "window_functions",
+        "precision_numerics_enotation_small",
+        "precision_numerics_retains_significant_digits",
+    ],
+)
+def test_current_open_requirements_are_part_of_contract(requirement_name):
+    requirements = Requirements()
+
+    assert getattr(requirements, requirement_name).enabled is True

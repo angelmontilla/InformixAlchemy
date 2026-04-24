@@ -115,9 +115,31 @@ class IfxReflector(BaseReflector):
         17: "INT8",
         18: "SERIAL8",
         40: "LVARCHAR",
+        41: "OPAQUE",
         45: "BOOLEAN",
         52: "BIGINT",
         53: "BIGSERIAL",
+    }
+
+    _OPAQUE_TYPE_NAMES = {
+        "blob": "BLOB",
+        "clob": "CLOB",
+        "boolean": "BOOLEAN",
+        "lvarchar": "LVARCHAR",
+    }
+
+    _DATETIME_QUALIFIERS = {
+        0: "YEAR",
+        2: "MONTH",
+        4: "DAY",
+        6: "HOUR",
+        8: "MINUTE",
+        10: "SECOND",
+        11: "FRACTION(1)",
+        12: "FRACTION(2)",
+        13: "FRACTION(3)",
+        14: "FRACTION(4)",
+        15: "FRACTION(5)",
     }
 
     def _clean_str(self, value):
@@ -126,6 +148,39 @@ class IfxReflector(BaseReflector):
         if isinstance(value, str):
             return value.strip()
         return str(value).strip()
+
+    def _normalize_extended_type_name(self, value):
+        value = self._clean_str(value)
+        if not value:
+            return None
+        return value.lower()
+
+    def _resolve_opaque_type_name(self, extended_type_name, base_code):
+        normalized = self._normalize_extended_type_name(extended_type_name)
+
+        if normalized in self._OPAQUE_TYPE_NAMES:
+            return self._OPAQUE_TYPE_NAMES[normalized]
+
+        if base_code == 40:
+            return "LVARCHAR"
+
+        if base_code == 45:
+            return "BOOLEAN"
+
+        return None
+
+    def _decode_datetime_qualifiers(self, encoded_len):
+        first = (encoded_len & 0x00F0) >> 4
+        last = encoded_len & 0x000F
+        length = encoded_len >> 8
+
+        return {
+            "length": length,
+            "first": self._DATETIME_QUALIFIERS.get(first),
+            "last": self._DATETIME_QUALIFIERS.get(last),
+            "first_code": first,
+            "last_code": last,
+        }
 
     def _resolved_owner(self, schema=None):
         owner = schema if schema is not None else self.default_schema_name
@@ -812,7 +867,14 @@ class IfxReflector(BaseReflector):
         util.warn(f"Did not recognize Informix type '{type_name}'")
         return sa_types.NullType()
 
-    def _decode_ifx_type(self, coltype, collength, extended_id=None):
+    def _decode_ifx_type(
+        self,
+        coltype,
+        collength,
+        extended_id=None,
+        extended_type_name=None,
+        extended_maxlen=None,
+    ):
         nullable = not bool(int(coltype) & 0x0100)
         base_code = int(coltype) & 0x00FF
         encoded_len = int(collength) if collength is not None else 0
@@ -831,8 +893,46 @@ class IfxReflector(BaseReflector):
             )
             return sa_types.NullType(), autoincrement, nullable
 
-        # CHAR / NCHAR / LVARCHAR
-        if base_code in (0, 15, 40):
+        if base_code in (40, 41, 45):
+            opaque_type_name = self._resolve_opaque_type_name(
+                extended_type_name,
+                base_code,
+            )
+
+            if opaque_type_name is None:
+                util.warn(
+                    "Did not recognize Informix opaque type "
+                    f"extended_id={extended_id!r}, "
+                    f"name={extended_type_name!r}"
+                )
+                return sa_types.NullType(), autoincrement, nullable
+
+            if opaque_type_name == "LVARCHAR":
+                length = extended_maxlen or encoded_len or None
+                if length is not None:
+                    length = int(length)
+                return (
+                    self._instantiate_ischema_type("VARCHAR", length),
+                    autoincrement,
+                    nullable,
+                )
+
+            return (
+                self._instantiate_ischema_type(opaque_type_name),
+                autoincrement,
+                nullable,
+            )
+
+        if base_code in (10, 14):
+            qualifiers = self._decode_datetime_qualifiers(encoded_len)
+            satype = self._instantiate_ischema_type(type_name)
+            # Preserve Informix metadata without pretending SQLAlchemy has a
+            # portable generic representation for every Informix qualifier.
+            satype._informix_qualifiers = qualifiers
+            return satype, autoincrement, nullable
+
+        # CHAR / NCHAR
+        if base_code in (0, 15):
             return (
                 self._instantiate_ischema_type(type_name, encoded_len),
                 autoincrement,
@@ -945,6 +1045,12 @@ class IfxReflector(BaseReflector):
         rows = connection.exec_driver_sql(sql_text, (owner,)).fetchall()
         return [self.normalize_name(self._clean_str(r[0])) for r in rows]
 
+    def _table_names_for_multi(self, connection, schema=None, filter_names=None):
+        if filter_names is not None:
+            return list(filter_names)
+
+        return self.get_table_names(connection, schema=schema)
+
     def get_materialized_view_names(self, connection, schema=None, **kw):
         # Informix does not expose a materialized-view concept through this
         # dialect, so the contract is explicit and empty.
@@ -1013,9 +1119,13 @@ class IfxReflector(BaseReflector):
                 c.coltype,
                 c.collength,
                 c.extended_id,
+                xt.name AS extended_type_name,
+                xt.maxlen AS extended_maxlen,
                 d.type AS default_type,
                 d.default AS default_value
             FROM syscolumns c
+            LEFT OUTER JOIN sysxtdtypes xt
+              ON xt.extended_id = c.extended_id
             LEFT OUTER JOIN sysdefaults d
               ON d.tabid = c.tabid
              AND d.colno = c.colno
@@ -1031,13 +1141,17 @@ class IfxReflector(BaseReflector):
             coltype = int(row[2])
             collength = int(row[3]) if row[3] is not None else 0
             extended_id = row[4]
-            default_type = row[5]
-            default_value = row[6]
+            extended_type_name = row[5]
+            extended_maxlen = row[6]
+            default_type = row[7]
+            default_value = row[8]
 
             satype, autoincrement, nullable = self._decode_ifx_type(
                 coltype=coltype,
                 collength=collength,
                 extended_id=extended_id,
+                extended_type_name=extended_type_name,
+                extended_maxlen=extended_maxlen,
             )
 
             sa_columns.append(
@@ -1420,6 +1534,111 @@ class IfxReflector(BaseReflector):
             )
 
         return unique_constraints
+
+    def get_multi_columns(
+        self,
+        connection,
+        *,
+        schema=None,
+        filter_names=None,
+        **kw,
+    ):
+        names = self._table_names_for_multi(
+            connection,
+            schema=schema,
+            filter_names=filter_names,
+        )
+
+        for name in names:
+            yield (
+                (schema, name),
+                self.get_columns(connection, name, schema=schema, **kw),
+            )
+
+    def get_multi_pk_constraint(
+        self,
+        connection,
+        *,
+        schema=None,
+        filter_names=None,
+        **kw,
+    ):
+        names = self._table_names_for_multi(
+            connection,
+            schema=schema,
+            filter_names=filter_names,
+        )
+
+        for name in names:
+            yield (
+                (schema, name),
+                self.get_pk_constraint(connection, name, schema=schema, **kw),
+            )
+
+    def get_multi_foreign_keys(
+        self,
+        connection,
+        *,
+        schema=None,
+        filter_names=None,
+        **kw,
+    ):
+        names = self._table_names_for_multi(
+            connection,
+            schema=schema,
+            filter_names=filter_names,
+        )
+
+        for name in names:
+            yield (
+                (schema, name),
+                self.get_foreign_keys(connection, name, schema=schema, **kw),
+            )
+
+    def get_multi_indexes(
+        self,
+        connection,
+        *,
+        schema=None,
+        filter_names=None,
+        **kw,
+    ):
+        names = self._table_names_for_multi(
+            connection,
+            schema=schema,
+            filter_names=filter_names,
+        )
+
+        for name in names:
+            yield (
+                (schema, name),
+                self.get_indexes(connection, name, schema=schema, **kw),
+            )
+
+    def get_multi_unique_constraints(
+        self,
+        connection,
+        *,
+        schema=None,
+        filter_names=None,
+        **kw,
+    ):
+        names = self._table_names_for_multi(
+            connection,
+            schema=schema,
+            filter_names=filter_names,
+        )
+
+        for name in names:
+            yield (
+                (schema, name),
+                self.get_unique_constraints(
+                    connection,
+                    name,
+                    schema=schema,
+                    **kw,
+                ),
+            )
 
     @reflection.cache
     def get_sequence_names(self, connection, schema=None, **kw):
