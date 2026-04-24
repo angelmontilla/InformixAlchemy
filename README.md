@@ -11,7 +11,7 @@ and is not part of the public entry-point contract.
 | Component | Supported baseline |
 | --- | --- |
 | Python | 3.10, 3.11, 3.12 |
-| SQLAlchemy | 2.0.x and 2.1.x target line, dependency range `>=2.0,<2.3` |
+| SQLAlchemy | 2.0.x stable. 2.1.x is validated only in prerelease CI until SQLAlchemy 2.1 is final. |
 | DBAPI | `pyodbc>=5.0` |
 | Driver | IBM Informix ODBC Driver |
 | Protocol | Informix over `onsoctcp` |
@@ -81,10 +81,13 @@ common SQLAlchemy result handling.
 - For deterministic pagination, pass an explicit `ORDER BY` with `OFFSET`.
 - `supports_schemas = False`; owner-qualified cross-schema DDL and reflection
   are outside the supported SQLAlchemy surface.
-- `Inspector.has_table()` supports connection-local temporary tables when
-  checked on the same connection.
+- `Inspector.has_table()` supports known connection-local temporary table names
+  on the same connection.
 - `Inspector.get_temp_table_names()` and `Inspector.get_temp_view_names()`
-  intentionally return `[]`.
+  intentionally return `[]` because the supported Informix ODBC path does not
+  expose a reliable enumeration API for connection-local temporary objects.
+- The SQLAlchemy suite requirements mark full temp-table enumeration/reflection
+  as unsupported for this backend.
 
 ## Running Tests
 

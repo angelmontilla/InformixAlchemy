@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect as pyinspect
 
 import pytest
+from sqlalchemy import literal_column, select
 from sqlalchemy.testing.provision import temp_table_keyword_args
 
 from IfxAlchemy.IfxPy import IfxDialect_IfxPy
@@ -75,6 +76,44 @@ def test_sqlalchemy_suite_temp_table_reflection_requirement_is_closed():
     requirements = Requirements()
 
     assert requirements.temp_table_reflection.enabled is False
+
+
+@pytest.mark.sqlalchemy_suite
+def test_sqlalchemy_suite_temp_table_name_listing_requirement_is_closed():
+    requirements = Requirements()
+
+    assert requirements.temp_table_names.enabled is False
+
+
+@pytest.mark.sqlalchemy_suite
+def test_select_private_api_contract_used_by_informix_compiler():
+    stmt = (
+        select(literal_column("1"))
+        .order_by(literal_column("1"))
+        .limit(5)
+        .offset(2)
+    )
+
+    for attr_name in (
+        "_limit_clause",
+        "_offset_clause",
+        "_order_by_clauses",
+    ):
+        assert hasattr(stmt, attr_name), attr_name
+
+    assert hasattr(stmt, "_generate")
+    assert callable(stmt._generate)
+
+    assert hasattr(stmt, "_simple_int_clause")
+    assert callable(stmt._simple_int_clause)
+
+    assert hasattr(stmt, "_offset_or_limit_clause_asint")
+    assert callable(stmt._offset_or_limit_clause_asint)
+
+    fetch_stmt = select(literal_column("1")).fetch(5)
+
+    assert hasattr(fetch_stmt, "_fetch_clause")
+    assert hasattr(fetch_stmt, "_fetch_clause_options")
 
 
 @pytest.mark.sqlalchemy_suite

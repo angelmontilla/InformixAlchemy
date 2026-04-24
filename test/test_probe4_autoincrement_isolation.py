@@ -248,3 +248,34 @@ def test_probe4_explicit_pk_does_not_schedule_dbinfo_lastrowid_query(unique_name
 
     assert context._select_lastrowid is False
     assert context._lastrowid_query is None
+
+
+def test_lastrowid_uses_statement_table_fallback_when_dml_compile_state_missing(
+    unique_name,
+):
+    table_name = unique_name()
+    metadata = MetaData()
+    table = Table(
+        table_name,
+        metadata,
+        Column("id", Integer, primary_key=True),
+        Column("payload", String(50), nullable=False),
+    )
+
+    insert_stmt = table.insert()
+
+    context = _LastrowidContext()
+    context.isinsert = True
+    context.compiled = SimpleNamespace(
+        statement=insert_stmt,
+        effective_returning=None,
+        inline=False,
+    )
+    context.compiled_parameters = [{"payload": "auto"}]
+    context.executemany = False
+
+    context.pre_exec()
+
+    assert context._select_lastrowid is True
+    assert context._lastrowid_query is not None
+    assert "DBINFO" in context._lastrowid_query

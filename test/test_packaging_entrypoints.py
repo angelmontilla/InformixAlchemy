@@ -21,3 +21,10 @@ def test_pyproject_uses_readme_md_as_package_description():
     contents = _pyproject_text()
 
     assert 'readme = "README.md"' in contents
+
+
+def test_pyproject_sqlalchemy_range_is_stable_20_only():
+    contents = _pyproject_text()
+
+    assert '"SQLAlchemy>=2.0,<2.1"' in contents
+    assert '"SQLAlchemy>=2.0,<2.3"' not in contents

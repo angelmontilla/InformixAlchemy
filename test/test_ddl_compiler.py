@@ -16,6 +16,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Table,
+    Unicode,
     select,
 )
 from sqlalchemy.exc import CompileError
@@ -565,6 +566,53 @@ def test_reserved_words_are_quoted_in_compiled_ddl(dialect):
     assert 'CREATE TABLE "ORDER"' in upper
     assert '"SELECT" SERIAL NOT NULL' in upper
     assert '"FROM" VARCHAR(20)' in upper
+
+
+@pytest.mark.ddl_compiler
+def test_identifiers_with_illegal_initial_characters_are_quoted(dialect):
+    metadata = MetaData()
+    table = Table(
+        "1bad_table",
+        metadata,
+        Column("2bad_column", Integer, primary_key=True, autoincrement=False),
+        Column("_private_name", String(20)),
+        Column("$amount", String(20)),
+    )
+
+    compiled = str(CreateTable(table).compile(dialect=dialect))
+    upper = _upper_sql(compiled)
+
+    assert 'CREATE TABLE "1BAD_TABLE"' in upper
+    assert '"2BAD_COLUMN" INTEGER NOT NULL' in upper
+    assert '"_PRIVATE_NAME" VARCHAR(20)' in upper
+    assert '"$AMOUNT" VARCHAR(20)' in upper
+
+
+@pytest.mark.ddl_compiler
+def test_unbounded_string_raises_compile_error(dialect):
+    with pytest.raises(
+        CompileError,
+        match="Informix VARCHAR requires an explicit length",
+    ):
+        dialect.type_compiler.process(String())
+
+
+@pytest.mark.ddl_compiler
+def test_zero_length_string_raises_compile_error(dialect):
+    with pytest.raises(
+        CompileError,
+        match="Informix VARCHAR requires an explicit length",
+    ):
+        dialect.type_compiler.process(String(0))
+
+
+@pytest.mark.ddl_compiler
+def test_unbounded_unicode_raises_compile_error(dialect):
+    with pytest.raises(
+        CompileError,
+        match="Informix VARGRAPHIC requires an explicit length",
+    ):
+        dialect.type_compiler.process(Unicode())
 
 
 @pytest.mark.ddl_compiler

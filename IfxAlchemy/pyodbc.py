@@ -66,6 +66,8 @@ class IfxDialect_pyodbc(PyODBCConnector, IfxDialect):
     supports_unicode_statements = True
     supports_char_length = True
     supports_native_decimal = False
+    # Must be declared locally on the concrete dialect class. Keep disabled
+    # until cache-key safety is proven for informix+pyodbc.
     supports_statement_cache = False
 
     execution_ctx_cls = IfxExecutionContext_pyodbc
@@ -75,8 +77,6 @@ class IfxDialect_pyodbc(PyODBCConnector, IfxDialect):
     @classmethod
     def import_dbapi(cls):
         return __import__("pyodbc")
-
-    dbapi = import_dbapi
 
     def on_connect(self):
         super_ = super().on_connect()

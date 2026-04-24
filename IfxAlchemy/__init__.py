@@ -17,7 +17,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 # Importaciones de los módulos necesarios para el dialecto pyodbc y tipos de datos
 from . import pyodbc, base

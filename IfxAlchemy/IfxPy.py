@@ -135,8 +135,6 @@ class IfxDialect_IfxPy(IfxDialect):
 
         return module
 
-    dbapi = import_dbapi
-
     @staticmethod
     def _extract_procedure_name(statement):
         match = CALLPROC_NAME_RE.match(statement or "")

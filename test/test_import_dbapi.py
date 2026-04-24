@@ -21,19 +21,21 @@ class ImportDbapiCompatibilityTests(unittest.TestCase):
         return fake_module, mock.patch("builtins.__import__", side_effect=fake_import)
 
     @pytest.mark.legacy_ifxpy
-    def test_ifxpy_exposes_import_dbapi_and_dbapi_alias(self):
+    def test_ifxpy_exposes_import_dbapi_without_legacy_dbapi_classmethod(self):
         fake_module, patched_import = self._patch_import("IfxPyDbi")
 
         with patched_import:
             self.assertIs(IfxDialect_IfxPy.import_dbapi(), fake_module)
-            self.assertIs(IfxDialect_IfxPy.dbapi(), fake_module)
 
-    def test_pyodbc_exposes_import_dbapi_and_dbapi_alias(self):
+        self.assertNotIn("dbapi", IfxDialect_IfxPy.__dict__)
+
+    def test_pyodbc_exposes_import_dbapi_without_legacy_dbapi_classmethod(self):
         fake_module, patched_import = self._patch_import("pyodbc")
 
         with patched_import:
             self.assertIs(IfxDialect_pyodbc.import_dbapi(), fake_module)
-            self.assertIs(IfxDialect_pyodbc.dbapi(), fake_module)
+
+        self.assertNotIn("dbapi", IfxDialect_pyodbc.__dict__)
 
 
 if __name__ == "__main__":

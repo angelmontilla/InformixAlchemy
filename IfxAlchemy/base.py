@@ -374,14 +374,23 @@ class IfxTypeCompiler(compiler.GenericTypeCompiler):
     def visit_DBCLOB(self, type_):
         return "DBCLOB"
 
+    def _require_length(self, type_, type_name):
+        if type_.length in (None, 0):
+            raise exc.CompileError(
+                "Informix %s requires an explicit length" % type_name
+            )
+        return type_.length
+
     def visit_VARCHAR(self, type_):
-        return "VARCHAR(%(length)s)" % {'length': type_.length}
+        length = self._require_length(type_, "VARCHAR")
+        return "VARCHAR(%(length)s)" % {"length": length}
 
     def visit_LONGVARCHAR(self, type_):
         return "LONG VARCHAR"
 
     def visit_VARGRAPHIC(self, type_):
-        return "VARGRAPHIC(%(length)s)" % {'length': type_.length}
+        length = self._require_length(type_, "VARGRAPHIC")
+        return "VARGRAPHIC(%(length)s)" % {"length": length}
 
     def visit_LONGVARGRAPHIC(self, type_):
         return "LONG VARGRAPHIC"
@@ -941,7 +950,7 @@ class IfxDDLCompiler(compiler.DDLCompiler):
 class IfxIdentifierPreparer(compiler.IdentifierPreparer):
 
     reserved_words = RESERVED_WORDS
-    illegal_initial_characters = set(range(0, 10)).union(["_", "$"])
+    illegal_initial_characters = set("0123456789_$")
 
 
 class IfxExecutionContext(default.DefaultExecutionContext):
@@ -965,11 +974,28 @@ class _SelectLastRowIDMixin(object):
         return self._lastrowid
 
     def _get_lastrowid_dml_table(self):
-        dml_compile_state = getattr(self.compiled, "dml_compile_state", None)
-        return getattr(dml_compile_state, "dml_table", None)
+        compiled = getattr(self, "compiled", None)
+        if compiled is None:
+            return None
+
+        dml_compile_state = getattr(compiled, "dml_compile_state", None)
+        table = getattr(dml_compile_state, "dml_table", None)
+        if table is not None:
+            return table
+
+        statement = getattr(compiled, "statement", None)
+        return getattr(statement, "table", None)
 
     def _has_effective_returning(self):
-        return bool(getattr(self.compiled, "effective_returning", None))
+        compiled = getattr(self, "compiled", None)
+        if compiled is None:
+            return False
+
+        if getattr(compiled, "effective_returning", None):
+            return True
+
+        statement = getattr(compiled, "statement", None)
+        return bool(getattr(statement, "_returning", None))
 
     def pre_exec(self):
         self._lastrowid = None
@@ -981,7 +1007,7 @@ class _SelectLastRowIDMixin(object):
             if tbl is None:
                 return
 
-            seq_column = tbl._autoincrement_column
+            seq_column = getattr(tbl, "_autoincrement_column", None)
             insert_has_sequence = seq_column is not None
             compiled_params = (
                 self.compiled_parameters[0] if self.compiled_parameters else {}
@@ -1036,6 +1062,9 @@ class IfxDialect(default.DefaultDialect):
 
     supports_default_values = False
     supports_empty_insert = False
+    # Keep disabled until the compiler's LIMIT/OFFSET/FETCH rewrites and
+    # Informix-specific DDL paths are validated with SQLAlchemy's statement
+    # cache test coverage.
     supports_statement_cache = False
 
     two_phase_transactions = False
