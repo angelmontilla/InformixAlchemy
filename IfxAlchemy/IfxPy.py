@@ -21,10 +21,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Legacy IfxPy backend.
+
+The supported backend for this fork is ``informix+pyodbc``.  This module is
+kept for source compatibility with older applications and tests, but it is not
+registered as a public SQLAlchemy entry point.
+"""
+
 import re
 from sqlalchemy import types as sa_types, util
-from sqlalchemy.engine import processors
 from sqlalchemy.exc import ArgumentError
+try:
+    from sqlalchemy.engine import processors
+except ImportError:  # pragma: no cover - compatibility with older SQLAlchemy
+    from sqlalchemy import processors
 
 from .base import IfxExecutionContext, IfxDialect
 
@@ -71,6 +81,8 @@ class IfxExecutionContext_IfxPy(IfxExecutionContext):
 
 
 class IfxDialect_IfxPy(IfxDialect):
+    """Deprecated legacy dialect kept outside the supported public contract."""
+
     driver = "IfxPy"
     supports_unicode_statements = True
     supports_sane_rowcount = True

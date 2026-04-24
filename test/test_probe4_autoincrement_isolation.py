@@ -23,14 +23,21 @@ Si ambos tests pasan, la conclusión es fuerte:
 """
 
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import Column, Integer, MetaData, String, Table, inspect, select, text
 from sqlalchemy.orm import Session, registry
 from sqlalchemy.schema import CreateTable
 
+from IfxAlchemy.base import _SelectLastRowIDMixin
+
 
 pytestmark = [pytest.mark.serial_identity]
+
+
+class _LastrowidContext(_SelectLastRowIDMixin):
+    pass
 
 
 @pytest.fixture
@@ -215,3 +222,29 @@ def test_probe4_style_autoincrement_matches_existing_working_contract(engine, un
     assert f"CREATE TABLE {table_name.upper()}" in compiled or f'CREATE TABLE "{table_name.upper()}"' in compiled
     assert "ID SERIAL NOT NULL" in compiled, compiled
     assert "PRIMARY KEY (ID)" in compiled, compiled
+
+
+def test_probe4_explicit_pk_does_not_schedule_dbinfo_lastrowid_query(unique_name):
+    table_name = unique_name()
+    metadata = MetaData()
+    table = Table(
+        table_name,
+        metadata,
+        Column("id", Integer, primary_key=True),
+        Column("payload", String(50), nullable=False),
+    )
+
+    context = _LastrowidContext()
+    context.isinsert = True
+    context.compiled = SimpleNamespace(
+        dml_compile_state=SimpleNamespace(dml_table=table),
+        effective_returning=None,
+        inline=False,
+    )
+    context.compiled_parameters = [{"id": 1001, "payload": "manual"}]
+    context.executemany = False
+
+    context.pre_exec()
+
+    assert context._select_lastrowid is False
+    assert context._lastrowid_query is None

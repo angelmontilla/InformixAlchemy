@@ -75,3 +75,22 @@ def test_sqlalchemy_suite_temp_table_reflection_requirement_is_closed():
     requirements = Requirements()
 
     assert requirements.temp_table_reflection.enabled is False
+
+
+@pytest.mark.sqlalchemy_suite
+@pytest.mark.parametrize(
+    "requirement_name",
+    [
+        "temp_table_names",
+        "temp_table_reflection",
+        "temporary_views",
+        "on_update_cascade",
+        "datetime_microseconds",
+        "time_microseconds",
+        "unbounded_varchar",
+    ],
+)
+def test_current_closed_requirements_are_part_of_contract(requirement_name):
+    requirements = Requirements()
+
+    assert getattr(requirements, requirement_name).enabled is False

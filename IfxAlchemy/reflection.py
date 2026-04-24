@@ -23,6 +23,7 @@
 from sqlalchemy import exc
 from sqlalchemy import types as sa_types
 from sqlalchemy import sql, util
+from sqlalchemy.sql import quoted_name
 from sqlalchemy import Table, MetaData, Column
 from sqlalchemy.engine import reflection
 import re
@@ -623,47 +624,73 @@ class IfxReflector(BaseReflector):
 
         return False
 
-    def _has_table_via_sql_probe(self, connection, table_name, schema=None):
+    def _render_probe_identifier(self, schema_token, table_token, quoted):
+        table_identifier = (
+            quoted_name(table_token, True) if quoted else table_token
+        )
+        rendered_table = self.identifier_preparer.quote(table_identifier)
+
+        if not schema_token:
+            return rendered_table
+
+        rendered_schema = self.identifier_preparer.quote_schema(schema_token)
+        return "%s.%s" % (rendered_schema, rendered_table)
+
+    def _probe_table_candidates(self, table_name):
         cleaned_name = self._clean_str(table_name)
         if not cleaned_name:
+            return []
+
+        if getattr(table_name, "quote", None) is True:
+            return [(cleaned_name, True)]
+
+        return [(self._fold_unquoted_lookup_name(cleaned_name), False)]
+
+    def _probe_schema_candidates(self, schema):
+        if schema is None:
+            return [None]
+
+        cleaned_schema = self._clean_str(schema)
+        if not cleaned_schema:
+            return [None]
+
+        if getattr(schema, "quote", None) is True:
+            return [quoted_name(cleaned_schema, True)]
+
+        schema_candidates = []
+        folded_schema = self._fold_unquoted_lookup_name(cleaned_schema)
+        for token in (folded_schema, cleaned_schema):
+            if token and token not in schema_candidates:
+                schema_candidates.append(token)
+        return schema_candidates
+
+    def _is_dbapi_probe_error(self, error):
+        if isinstance(error, exc.DBAPIError):
+            return True
+
+        module_name = type(error).__module__.split(".", 1)[0].lower()
+        return module_name in {"pyodbc", "ifxpy", "ifxpydbi"}
+
+    def _has_table_via_sql_probe(self, connection, table_name, schema=None):
+        name_candidates = self._probe_table_candidates(table_name)
+        if not name_candidates:
             return False
 
-        is_explicitly_quoted = getattr(table_name, "quote", None) is True
-        if is_explicitly_quoted:
-            # Solo probar la forma quoted exacta.
-            name_candidates = [self.identifier_preparer.quote(cleaned_name)]
-        else:
-            # Solo probar la forma unquoted/case-insensitive del backend.
-            name_candidates = [self._fold_unquoted_lookup_name(cleaned_name)]
-
-        if schema is not None:
-            cleaned_schema = self._clean_str(schema)
-            if not cleaned_schema:
-                schema_candidates = [None]
-            elif getattr(schema, "quote", None) is True:
-                schema_candidates = [self.identifier_preparer.quote_schema(cleaned_schema)]
-            else:
-                schema_candidates = []
-                folded_schema = self._fold_unquoted_lookup_name(cleaned_schema)
-                for token in (folded_schema, cleaned_schema):
-                    if token and token not in schema_candidates:
-                        schema_candidates.append(token)
-        else:
-            schema_candidates = [None]
+        schema_candidates = self._probe_schema_candidates(schema)
 
         for schema_token in schema_candidates:
-            for table_token in name_candidates:
-                if schema_token:
-                    from_token = "%s.%s" % (schema_token, table_token)
-                else:
-                    from_token = table_token
-
+            for table_token, quoted in name_candidates:
+                from_token = self._render_probe_identifier(
+                    schema_token,
+                    table_token,
+                    quoted,
+                )
                 sql_text = "SELECT COUNT(*) FROM %s" % from_token
 
                 try:
                     connection.exec_driver_sql(sql_text).scalar()
                     return True
-                except Exception:
+                except exc.DBAPIError:
                     continue
 
         return False
@@ -673,51 +700,34 @@ class IfxReflector(BaseReflector):
         if dbapi_connection is None:
             return False
 
-        cleaned_name = self._clean_str(table_name)
-        if not cleaned_name:
+        name_candidates = self._probe_table_candidates(table_name)
+        if not name_candidates:
             return False
 
-        is_explicitly_quoted = getattr(table_name, "quote", None) is True
-        if is_explicitly_quoted:
-            # Solo probar la forma quoted exacta.
-            name_candidates = [self.identifier_preparer.quote(cleaned_name)]
-        else:
-            # Solo probar la forma unquoted/case-insensitive del backend.
-            name_candidates = [self._fold_unquoted_lookup_name(cleaned_name)]
-
-        if schema is not None:
-            cleaned_schema = self._clean_str(schema)
-            if not cleaned_schema:
-                schema_candidates = [None]
-            elif getattr(schema, "quote", None) is True:
-                schema_candidates = [self.identifier_preparer.quote_schema(cleaned_schema)]
-            else:
-                schema_candidates = []
-                folded_schema = self._fold_unquoted_lookup_name(cleaned_schema)
-                for token in (folded_schema, cleaned_schema):
-                    if token and token not in schema_candidates:
-                        schema_candidates.append(token)
-        else:
-            schema_candidates = [None]
+        schema_candidates = self._probe_schema_candidates(schema)
 
         cursor = None
         try:
             cursor = dbapi_connection.cursor()
             for schema_token in schema_candidates:
-                for table_token in name_candidates:
-                    if schema_token:
-                        from_token = "%s.%s" % (schema_token, table_token)
-                    else:
-                        from_token = table_token
-
+                for table_token, quoted in name_candidates:
+                    from_token = self._render_probe_identifier(
+                        schema_token,
+                        table_token,
+                        quoted,
+                    )
                     sql_text = "SELECT COUNT(*) FROM %s" % from_token
                     try:
                         cursor.execute(sql_text)
                         cursor.fetchone()
                         return True
-                    except Exception:
+                    except Exception as err:
+                        if not self._is_dbapi_probe_error(err):
+                            raise
                         continue
-        except Exception:
+        except Exception as err:
+            if not self._is_dbapi_probe_error(err):
+                raise
             return False
         finally:
             if cursor is not None:

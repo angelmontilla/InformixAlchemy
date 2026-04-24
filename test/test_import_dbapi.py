@@ -2,6 +2,8 @@ import types
 import unittest
 from unittest import mock
 
+import pytest
+
 from IfxAlchemy.IfxPy import IfxDialect_IfxPy
 from IfxAlchemy.pyodbc import IfxDialect_pyodbc
 
@@ -18,6 +20,7 @@ class ImportDbapiCompatibilityTests(unittest.TestCase):
 
         return fake_module, mock.patch("builtins.__import__", side_effect=fake_import)
 
+    @pytest.mark.legacy_ifxpy
     def test_ifxpy_exposes_import_dbapi_and_dbapi_alias(self):
         fake_module, patched_import = self._patch_import("IfxPyDbi")
 

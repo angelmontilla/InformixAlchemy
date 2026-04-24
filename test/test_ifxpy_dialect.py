@@ -1,7 +1,12 @@
 from types import SimpleNamespace
 from unittest import mock
 
+import pytest
+
 from IfxAlchemy.IfxPy import IfxDialect_IfxPy
+
+
+pytestmark = pytest.mark.legacy_ifxpy
 
 
 def test_do_execute_omits_parameters_when_none():

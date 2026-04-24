@@ -23,7 +23,6 @@ __version__ = "1.0.1"
 from . import pyodbc, base
 
 # Dialecto por defecto: pyodbc
-base.dialect = pyodbc.IfxDialect_pyodbc
 dialect = pyodbc.IfxDialect_pyodbc
 
 # Tipos de datos soportados por el dialecto Informix

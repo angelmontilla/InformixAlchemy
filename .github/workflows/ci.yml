@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  unit:
+    name: Unit / compile (py${{ matrix.python-version }}, ${{ matrix.sqlalchemy }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+        sqlalchemy:
+          - "SQLAlchemy>=2.0,<2.1"
+          - "SQLAlchemy>=2.1,<2.2"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install "${{ matrix.sqlalchemy }}" pytest
+
+      - name: Run tests without Informix
+        run: python -m pytest -m "not requires_informix and not legacy_ifxpy and not sqlalchemy_suite"
+
+  integration:
+    name: Informix integration
+    runs-on: ubuntu-latest
+    env:
+      INFORMIX_SQLALCHEMY_URL: ${{ secrets.INFORMIX_SQLALCHEMY_URL }}
+      INFORMIX_SQLALCHEMY_SUITE_URL: ${{ secrets.INFORMIX_SQLALCHEMY_SUITE_URL || secrets.INFORMIX_SQLALCHEMY_URL }}
+
+    steps:
+      - name: Skip when no Informix URL is configured
+        if: ${{ env.INFORMIX_SQLALCHEMY_URL == '' }}
+        run: echo "INFORMIX_SQLALCHEMY_URL is not configured; skipping integration layer."
+
+      - uses: actions/checkout@v4
+        if: ${{ env.INFORMIX_SQLALCHEMY_URL != '' }}
+
+      - uses: actions/setup-python@v5
+        if: ${{ env.INFORMIX_SQLALCHEMY_URL != '' }}
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        if: ${{ env.INFORMIX_SQLALCHEMY_URL != '' }}
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install pytest
+
+      - name: Run package integration tests
+        if: ${{ env.INFORMIX_SQLALCHEMY_URL != '' }}
+        run: python -m pytest -m "requires_informix and not legacy_ifxpy"
+
+      - name: Run official SQLAlchemy suite
+        if: ${{ env.INFORMIX_SQLALCHEMY_URL != '' }}
+        run: python run_tests.py

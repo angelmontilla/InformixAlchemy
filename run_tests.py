@@ -5,6 +5,7 @@ import sys
 
 import pytest
 from sqlalchemy.dialects import registry
+from sqlalchemy.engine import make_url
 
 
 DEFAULT_INFORMIX_SQLALCHEMY_URL = (
@@ -32,7 +33,14 @@ def _normalized_dburi() -> str:
 def main(argv: list[str] | None = None) -> int:
     registry.register("informix", "IfxAlchemy.pyodbc", "IfxDialect_pyodbc")
     registry.register("informix.pyodbc", "IfxAlchemy.pyodbc", "IfxDialect_pyodbc")
-    registry.register("informix.ifxpy", "IfxAlchemy.IfxPy", "IfxDialect_IfxPy")
+
+    dburi = _normalized_dburi()
+    safe_dburi = make_url(dburi).render_as_string(hide_password=True)
+    print(
+        "Running the official SQLAlchemy suite for informix+pyodbc "
+        f"against {safe_dburi}",
+        file=sys.stderr,
+    )
 
     args = [
         "-c",
@@ -41,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
         "sqlalchemy.testing.plugin.pytestplugin",
         "test/test_suite.py",
         "--dburi",
-        _normalized_dburi(),
+        dburi,
     ]
 
     if argv:

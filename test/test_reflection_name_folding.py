@@ -6,14 +6,22 @@ from IfxAlchemy.reflection import IfxReflector
 
 
 class _FakeIdentifierPreparer:
+    reserved_words = {"select", "from", "table"}
+
     def _requires_quotes(self, value):
-        return False
+        return (
+            value.lower() in self.reserved_words
+            or value != value.lower()
+            or " " in value
+        )
 
     def quote(self, value):
-        return f'"{value}"'
+        if getattr(value, "quote", None) is True or self._requires_quotes(str(value)):
+            return f'"{value}"'
+        return str(value)
 
     def quote_schema(self, value):
-        return f'"{value}"'
+        return self.quote(value)
 
 
 class _FakeDialect:
@@ -44,6 +52,35 @@ class _RecordingConnection:
     def exec_driver_sql(self, statement, params=()):
         self.calls.append((statement, params))
         return _FakeResult(first_row=self.first_row, scalar_value=self.scalar_value)
+
+
+class _RecordingCursor:
+    def __init__(self):
+        self.calls = []
+        self.closed = False
+
+    def execute(self, statement):
+        self.calls.append(statement)
+
+    def fetchone(self):
+        return (1,)
+
+    def close(self):
+        self.closed = True
+
+
+class _RecordingDbapiConnection:
+    def __init__(self):
+        self.cursor_obj = _RecordingCursor()
+
+    def cursor(self):
+        return self.cursor_obj
+
+
+class _DbapiProbeConnection:
+    def __init__(self):
+        self.dbapi_connection = _RecordingDbapiConnection()
+        self.connection = self
 
 
 def test_get_table_row_folds_unquoted_names_to_lowercase_catalog_form():
@@ -83,3 +120,50 @@ def test_has_table_sql_probe_quotes_explicitly_quoted_names():
         quoted_name("MixCaseDemo", True),
     ) is True
     assert connection.calls[0][0] == 'SELECT COUNT(*) FROM "MixCaseDemo"'
+
+
+def test_has_table_sql_probe_quotes_reserved_words():
+    reflector = IfxReflector(_FakeDialect())
+    connection = _RecordingConnection(scalar_value=1)
+
+    assert reflector._has_table_via_sql_probe(connection, "SELECT") is True
+    assert connection.calls[0][0] == 'SELECT COUNT(*) FROM "select"'
+
+
+def test_has_table_sql_probe_quotes_names_with_spaces():
+    reflector = IfxReflector(_FakeDialect())
+    connection = _RecordingConnection(scalar_value=1)
+
+    assert reflector._has_table_via_sql_probe(
+        connection,
+        quoted_name("Table With Spaces", True),
+    ) is True
+    assert connection.calls[0][0] == 'SELECT COUNT(*) FROM "Table With Spaces"'
+
+
+def test_has_table_sql_probe_quotes_schema_and_table_with_preparer():
+    reflector = IfxReflector(_FakeDialect())
+    connection = _RecordingConnection(scalar_value=1)
+
+    assert reflector._has_table_via_sql_probe(
+        connection,
+        quoted_name("Order Detail", True),
+        schema=quoted_name("Reporting Owner", True),
+    ) is True
+    assert connection.calls[0][0] == (
+        'SELECT COUNT(*) FROM "Reporting Owner"."Order Detail"'
+    )
+
+
+def test_has_table_dbapi_probe_uses_rendered_identifier():
+    reflector = IfxReflector(_FakeDialect())
+    connection = _DbapiProbeConnection()
+
+    assert reflector._has_table_via_dbapi_probe(
+        connection,
+        quoted_name("Order Detail", True),
+    ) is True
+
+    cursor = connection.dbapi_connection.cursor_obj
+    assert cursor.calls == ['SELECT COUNT(*) FROM "Order Detail"']
+    assert cursor.closed is True

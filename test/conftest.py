@@ -75,8 +75,33 @@ def _smoke_check_informix_url(url: str) -> None:
         )
 
 
-def pytest_sessionstart(session):
-    _smoke_check_informix_url(_build_informix_url())
+_INFORMIX_FIXTURES = {
+    "conn",
+    "db_builder",
+    "engine",
+    "pinned_connection_session",
+}
+
+
+def _is_sqlalchemy_suite_run(config) -> bool:
+    if config.pluginmanager.hasplugin("sqlalchemy.testing.plugin.pytestplugin"):
+        return True
+    try:
+        return bool(config.getoption("dburi"))
+    except (AttributeError, ValueError):
+        return False
+
+
+def pytest_ignore_collect(collection_path, config):
+    if collection_path.name in {"test_out_parameters.py", "test_suite.py"}:
+        return not _is_sqlalchemy_suite_run(config)
+    return False
+
+
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        if _INFORMIX_FIXTURES.intersection(getattr(item, "fixturenames", ())):
+            item.add_marker(pytest.mark.requires_informix)
 
 
 @pytest.fixture(scope="session")
@@ -86,6 +111,7 @@ def informix_url() -> str:
 
 @pytest.fixture(scope="session")
 def engine(informix_url: str):
+    _smoke_check_informix_url(informix_url)
     eng = create_engine(
         informix_url,
         pool_pre_ping=True,

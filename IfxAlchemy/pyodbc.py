@@ -30,6 +30,34 @@ from .base import _SelectLastRowIDMixin, IfxExecutionContext, IfxDialect
 from . import reflection as ifx_reflection
 
 
+def _quote_odbc_value(value, force=False):
+    if value is None:
+        value = ""
+
+    value = str(value)
+    needs_quotes = (
+        force
+        or ";" in value
+        or "{" in value
+        or "}" in value
+        or value[:1].isspace()
+        or value[-1:].isspace()
+    )
+
+    if needs_quotes:
+        return "{%s}" % value.replace("}", "}}")
+
+    return value
+
+
+def _pop_key_case_insensitive(mapping, key, default=None):
+    lowered = key.lower()
+    for existing_key in list(mapping):
+        if existing_key.lower() == lowered:
+            return mapping.pop(existing_key)
+    return default
+
+
 class IfxExecutionContext_pyodbc(_SelectLastRowIDMixin, IfxExecutionContext):
     pass
 
@@ -121,10 +149,12 @@ class IfxDialect_pyodbc(PyODBCConnector, IfxDialect):
             service
             port     -> mapped to SERVICE if service is not provided
             dsn
+            tctx=1 / trusted_context=true -> mapped to TCTX=1
+            NeedODBCTypesOnly (defaults to 1)
             ansi
             unicode_results
             autocommit
-            odbc_autotranslate
+            AutoTranslate / odbc_autotranslate
             <any other param> -> appended as KEY=VALUE
         """
         opts = dict(url.translate_connect_args(username="user"))
@@ -132,68 +162,112 @@ class IfxDialect_pyodbc(PyODBCConnector, IfxDialect):
 
         connect_args = {}
         for param in ("ansi", "unicode_results", "autocommit"):
-            if param in opts:
-                connect_args[param] = util.asbool(opts.pop(param))
+            value = _pop_key_case_insensitive(opts, param)
+            if value is not None:
+                connect_args[param] = util.asbool(value)
 
-        if "odbc_connect" in opts:
-            return [[unquote_plus(opts.pop("odbc_connect"))], connect_args]
+        odbc_connect = _pop_key_case_insensitive(opts, "odbc_connect")
+        if odbc_connect is not None:
+            return [[unquote_plus(odbc_connect)], connect_args]
 
         keys = dict(opts)
-        lowered_keys = {k.lower() for k in keys}
 
-        if "needodbctypesonly" not in lowered_keys:
+        need_odbc_types_only = _pop_key_case_insensitive(
+            keys, "NeedODBCTypesOnly"
+        )
+        if need_odbc_types_only is None:
             # Ask the Informix ODBC driver to report standard ODBC types when
             # possible; this avoids pyodbc failures on Informix-specific types
             # such as SQL_INFX_BIGINT (-114).
-            keys["NeedODBCTypesOnly"] = "1"
+            need_odbc_types_only = "1"
 
-        # 1) DSN mode
-        if "dsn" in keys or ("host" in keys and "database" not in keys and "server" not in keys):
-            dsn = keys.pop("dsn", None) or keys.pop("host", "")
-            connectors = [f"DSN={dsn}"]
+        delimident = _pop_key_case_insensitive(keys, "DELIMIDENT")
+        auto_translate = _pop_key_case_insensitive(keys, "AutoTranslate")
+        odbc_auto_translate = _pop_key_case_insensitive(
+            keys, "odbc_autotranslate"
+        )
+        if auto_translate is None:
+            auto_translate = odbc_auto_translate
 
-        # 2) Explicit Informix connection string
+        user = _pop_key_case_insensitive(keys, "user")
+        password = _pop_key_case_insensitive(keys, "password", "")
+        uid = _pop_key_case_insensitive(keys, "UID")
+        pwd = _pop_key_case_insensitive(keys, "PWD")
+        if user is None and uid is not None:
+            user = uid
+            password = "" if pwd is None else pwd
+        elif pwd is not None and password in (None, ""):
+            password = pwd
+
+        tctx = _pop_key_case_insensitive(keys, "TCTX")
+        trusted_context = _pop_key_case_insensitive(keys, "trusted_context")
+        trusted_context_enabled = (
+            (tctx is not None and util.asbool(tctx))
+            or (
+                trusted_context is not None
+                and util.asbool(trusted_context)
+            )
+        )
+
+        dsn = _pop_key_case_insensitive(keys, "dsn")
+
+        # 1) odbc_connect was handled above as a literal passthrough.
+        # 2) DSN mode uses only DSN plus optional auth/driver options.
+        if dsn is not None:
+            connectors = ["DSN=%s" % _quote_odbc_value(dsn)]
+
+        # 3) Explicit Informix connection string.
         else:
-            driver = keys.pop("driver", self.pyodbc_driver_name)
-            host = keys.pop("host", "")
-            database = keys.pop("database", "")
-            server = keys.pop("server", "")
-            protocol = keys.pop("protocol", "")
-            service = keys.pop("service", "")
+            driver = _pop_key_case_insensitive(
+                keys, "driver", self.pyodbc_driver_name
+            )
+            host = _pop_key_case_insensitive(keys, "host", "")
+            database = _pop_key_case_insensitive(keys, "database", "")
+            server = _pop_key_case_insensitive(keys, "server", "")
+            protocol = _pop_key_case_insensitive(keys, "protocol", "")
+            service = _pop_key_case_insensitive(keys, "service", "")
 
             # Backward compatibility: if only port is passed, use it as SERVICE
-            if not service and "port" in keys:
-                service = str(keys.pop("port"))
+            if not service:
+                port = _pop_key_case_insensitive(keys, "port")
+                if port is not None:
+                    service = str(port)
 
-            connectors = [f"DRIVER={{{driver}}}"]
+            connectors = [
+                "DRIVER=%s" % _quote_odbc_value(driver, force=True)
+            ]
 
             if host:
-                connectors.append(f"HOST={host}")
+                connectors.append("HOST=%s" % _quote_odbc_value(host))
             if service:
-                connectors.append(f"SERVICE={service}")
+                connectors.append("SERVICE=%s" % _quote_odbc_value(service))
             if server:
-                connectors.append(f"SERVER={server}")
+                connectors.append("SERVER=%s" % _quote_odbc_value(server))
             if database:
-                connectors.append(f"DATABASE={database}")
+                connectors.append("DATABASE=%s" % _quote_odbc_value(database))
             if protocol:
-                connectors.append(f"PROTOCOL={protocol}")
-
-        user = keys.pop("user", None)
-        password = keys.pop("password", "")
+                connectors.append("PROTOCOL=%s" % _quote_odbc_value(protocol))
 
         if user:
-            connectors.append(f"UID={user}")
-            connectors.append(f"PWD={password}")
-        else:
-            # Keep compatibility for DSN/trusted scenarios
-            connectors.append("Trusted_Connection=Yes")
+            connectors.append("UID=%s" % _quote_odbc_value(user))
+            connectors.append("PWD=%s" % _quote_odbc_value(password))
+        elif trusted_context_enabled:
+            connectors.append("TCTX=1")
 
-        if "odbc_autotranslate" in keys:
-            connectors.append(f"AutoTranslate={keys.pop('odbc_autotranslate')}")
+        connectors.append(
+            "NeedODBCTypesOnly=%s" % _quote_odbc_value(need_odbc_types_only)
+        )
+        if delimident is not None:
+            connectors.append("DELIMIDENT=%s" % _quote_odbc_value(delimident))
+        if auto_translate is not None:
+            connectors.append(
+                "AutoTranslate=%s" % _quote_odbc_value(auto_translate)
+            )
 
         # Append any remaining params untouched
         for k, v in keys.items():
-            connectors.append(f"{k}={v}")
+            if v is not None:
+                connectors.append("%s=%s" % (k, _quote_odbc_value(v)))
 
         return [[";".join(connectors)], connect_args]
 

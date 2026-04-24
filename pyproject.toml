@@ -1,3 +1,28 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "IfxAlchemy"
+version = "1.0.1"
+description = "Informix dialect for SQLAlchemy using pyodbc"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "Angel Montilla" },
+]
+license = { file = "LICENSE" }
+dependencies = [
+    "SQLAlchemy>=2.0,<2.3",
+    "pyodbc>=5.0",
+]
+
+[project.entry-points."sqlalchemy.dialects"]
+informix = "IfxAlchemy.pyodbc:IfxDialect_pyodbc"
+"informix.pyodbc" = "IfxAlchemy.pyodbc:IfxDialect_pyodbc"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["IfxAlchemy*"]

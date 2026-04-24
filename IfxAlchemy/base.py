@@ -243,6 +243,49 @@ def _get_ifx_lastrowid_query(column):
     return "SELECT %s%s" % (expr, _IFX_SINGLE_ROW_FROM)
 
 
+def _sa_fetch_clause(select):
+    return getattr(select, "_fetch_clause", None)
+
+
+def _sa_fetch_clause_options(select):
+    return getattr(select, "_fetch_clause_options", None) or {
+        "percent": False,
+        "with_ties": False,
+    }
+
+
+def _sa_limit_clause(select):
+    return getattr(select, "_limit_clause", None)
+
+
+def _sa_offset_clause(select):
+    return getattr(select, "_offset_clause", None)
+
+
+def _sa_distinct(select):
+    return getattr(select, "_distinct", False)
+
+
+def _sa_offset(select):
+    return getattr(select, "_offset", None)
+
+
+def _sa_limit(select):
+    return getattr(select, "_limit", None)
+
+
+def _sa_clone_select(select):
+    return select._generate()
+
+
+def _sa_simple_int_clause(select, clause):
+    return clause is not None and select._simple_int_clause(clause)
+
+
+def _sa_offset_or_limit_clause_asint(select, clause, attrname):
+    return select._offset_or_limit_clause_asint(clause, attrname)
+
+
 colspecs = {
     sa_types.Boolean: _IFX_Boolean,
     sa_types.Date: _IFX_Date
@@ -446,13 +489,11 @@ class IfxCompiler(compiler.SQLCompiler):
                                                 self.process(binary.right))
 
     def _fetch_clause_options(self, select):
-        return select._fetch_clause_options or {
-            "percent": False,
-            "with_ties": False,
-        }
+        return _sa_fetch_clause_options(select)
 
     def _get_limit_or_fetch_clause(self, select):
-        if select._fetch_clause is not None:
+        fetch_clause = _sa_fetch_clause(select)
+        if fetch_clause is not None:
             fetch_options = self._fetch_clause_options(select)
 
             if fetch_options["with_ties"]:
@@ -465,35 +506,35 @@ class IfxCompiler(compiler.SQLCompiler):
                     "Informix dialect does not support FETCH PERCENT"
                 )
 
-            return select._fetch_clause
+            return fetch_clause
 
-        return select._limit_clause
+        return _sa_limit_clause(select)
 
     def _get_limit_or_fetch_value(self, select, clause):
         if clause is None:
             return None
 
-        if select._fetch_clause is clause:
-            return select._offset_or_limit_clause_asint(clause, "fetch")
+        if _sa_fetch_clause(select) is clause:
+            return _sa_offset_or_limit_clause_asint(select, clause, "fetch")
 
-        return select._limit
+        return _sa_limit(select)
 
     def _row_limit_expression(self, select, clause, value):
         if clause is None:
             return None
 
-        if select._simple_int_clause(clause):
+        if _sa_simple_int_clause(select, clause):
             return sql.literal_column(str(value))
 
         return clause
 
     def _row_limit_upper_bound(self, select, limit_clause, offset_clause):
         limit_value = self._get_limit_or_fetch_value(select, limit_clause)
-        offset_value = select._offset
+        offset_value = _sa_offset(select)
 
         if (
-            select._simple_int_clause(limit_clause)
-            and select._simple_int_clause(offset_clause)
+            _sa_simple_int_clause(select, limit_clause)
+            and _sa_simple_int_clause(select, offset_clause)
         ):
             return sql.literal_column(str(limit_value + offset_value))
 
@@ -503,7 +544,7 @@ class IfxCompiler(compiler.SQLCompiler):
         )
 
     def _translate_distinct_offset_select(self, select, order_by_clauses):
-        translated = select._generate().limit(None).offset(None).order_by(None)
+        translated = _sa_clone_select(select).limit(None).offset(None).order_by(None)
         translated = translated.alias()
 
         adapter = sql_util.ClauseAdapter(translated)
@@ -525,7 +566,7 @@ class IfxCompiler(compiler.SQLCompiler):
 
     def _translate_offset_select(self, select):
         limit_clause = self._get_limit_or_fetch_clause(select)
-        offset_clause = select._offset_clause
+        offset_clause = _sa_offset_clause(select)
 
         if offset_clause is None:
             return select
@@ -535,13 +576,13 @@ class IfxCompiler(compiler.SQLCompiler):
             for elem in select._order_by_clauses
         ]
 
-        if select._distinct:
+        if _sa_distinct(select):
             translated = self._translate_distinct_offset_select(
                 select, order_by_clauses
             )
         else:
             translated = (
-                select._generate()
+                _sa_clone_select(select)
                 .limit(None)
                 .offset(None)
                 .add_columns(
@@ -563,12 +604,13 @@ class IfxCompiler(compiler.SQLCompiler):
         )
 
         if not (
-            select._simple_int_clause(offset_clause) and select._offset == 0
+            _sa_simple_int_clause(select, offset_clause)
+            and _sa_offset(select) == 0
         ):
             paged = paged.where(
                 row_number_col
                 > self._row_limit_expression(
-                    select, offset_clause, select._offset
+                    select, offset_clause, _sa_offset(select)
                 )
             )
 
@@ -593,7 +635,7 @@ class IfxCompiler(compiler.SQLCompiler):
         use_literal_execute_for_simple_int=False,
         **kw
     ):
-        if select._fetch_clause is not None:
+        if _sa_fetch_clause(select) is not None:
             self._get_limit_or_fetch_clause(select)
 
         return ""
@@ -657,15 +699,16 @@ class IfxCompiler(compiler.SQLCompiler):
         limit_value = self._get_limit_or_fetch_value(select, limit_clause)
 
         # Informix: SELECT FIRST n DISTINCT ...
-        if (limit_clause is not None) and (select._offset_clause is None):
-            if select._simple_int_clause(limit_clause):
+        if (limit_clause is not None) and (_sa_offset_clause(select) is None):
+            if _sa_simple_int_clause(select, limit_clause):
                 text += "FIRST %s " % limit_value
             else:
                 text += "FIRST %s " % self.process(limit_clause, **kwargs)
 
-        if isinstance(select._distinct, str):
-            text += select._distinct.upper() + " "
-        elif select._distinct:
+        distinct = _sa_distinct(select)
+        if isinstance(distinct, str):
+            text += distinct.upper() + " "
+        elif distinct:
             text += "DISTINCT "
 
         return text
@@ -957,12 +1000,11 @@ class _SelectLastRowIDMixin(object):
                 self._lastrowid_query = _get_ifx_lastrowid_query(seq_column)
 
     def post_exec(self):
-        conn = self.root_connection
         if self._select_lastrowid and self._lastrowid_query:
-            conn._cursor_execute(self.cursor,
-                    self._lastrowid_query,
-                    (), self)
-            row = self.cursor.fetchall()[0]
+            self.cursor.execute(self._lastrowid_query)
+            row = self.cursor.fetchone()
+            if row is None:
+                return
             if row[0] is not None:
                 self._lastrowid = int(row[0])
 

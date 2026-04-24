@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from sqlalchemy import (
     Column,
@@ -15,7 +17,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Session, registry
 from sqlalchemy.schema import CreateTable
 
-from IfxAlchemy.base import BIGSERIAL, SERIAL, SERIAL8
+from IfxAlchemy.base import BIGSERIAL, SERIAL, SERIAL8, _SelectLastRowIDMixin
 from IfxAlchemy.pyodbc import IfxDialect_pyodbc
 
 @pytest.fixture
@@ -58,6 +60,54 @@ def _assert_generated_lastrowid_roundtrip(engine, name_factory, prefix, type_):
             assert row.name == "alpha"
         finally:
             table.drop(conn)
+
+
+class _RecordingCursor:
+    def __init__(self, row):
+        self.row = row
+        self.executed = []
+
+    def execute(self, statement):
+        self.executed.append(statement)
+
+    def fetchone(self):
+        return self.row
+
+
+class _LastrowidContext(_SelectLastRowIDMixin):
+    pass
+
+
+@pytest.mark.serial_identity
+def test_lastrowid_post_exec_uses_direct_cursor_execute():
+    cursor = _RecordingCursor((42,))
+    context = _LastrowidContext()
+    context.cursor = cursor
+    context.root_connection = SimpleNamespace(
+        _cursor_execute=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("_cursor_execute should not be used")
+        )
+    )
+    context._select_lastrowid = True
+    context._lastrowid_query = "SELECT DBINFO('sqlca.sqlerrd1') FROM systables WHERE tabid = 1"
+
+    context.post_exec()
+
+    assert cursor.executed == [context._lastrowid_query]
+    assert context.get_lastrowid() == 42
+
+
+@pytest.mark.serial_identity
+def test_lastrowid_post_exec_handles_missing_row():
+    cursor = _RecordingCursor(None)
+    context = _LastrowidContext()
+    context.cursor = cursor
+    context._select_lastrowid = True
+    context._lastrowid_query = "SELECT DBINFO('sqlca.sqlerrd1') FROM systables WHERE tabid = 1"
+
+    context.post_exec()
+
+    assert context.get_lastrowid() is None
 
 
 @pytest.mark.serial_identity

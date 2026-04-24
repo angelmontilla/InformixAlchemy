@@ -42,7 +42,9 @@ class Requirements(SuiteRequirements):
 
     @property
     def temp_table_names(self):
-        """target dialect supports listing of temporary table names"""
+        """Informix ODBC does not expose a reliable connection-local
+        listing API for temporary tables in this dialect.
+        """
 
         return exclusions.closed()
 
@@ -57,34 +59,31 @@ class Requirements(SuiteRequirements):
 
     @property
     def temporary_views(self):
-        """target database supports temporary views"""
+        """Temporary views are outside this dialect's Informix contract."""
 
         return exclusions.closed()
 
     @property
     def on_update_cascade(self):
-        """"target database must support ON UPDATE..CASCADE behavior in
-        foreign keys."""
+        """Informix foreign keys do not support ON UPDATE CASCADE."""
 
         return exclusions.closed()
 
     @property
     def datetime_microseconds(self):
-        """target dialect supports representation of Python
-        datetime.datetime() with microsecond objects."""
+        """The current Informix DATETIME mapping is second precision."""
 
         return exclusions.closed()
 
     @property
     def time_microseconds(self):
-        """target dialect supports representation of Python
-        datetime.time() with microsecond objects."""
+        """The current Informix TIME mapping is second precision."""
 
         return exclusions.closed()
 
     @property
     def unbounded_varchar(self):
-        """Target database must support VARCHAR with no length"""
+        """Informix VARCHAR requires an explicit length in DDL."""
 
         return exclusions.closed()
 
@@ -116,7 +115,7 @@ class Requirements(SuiteRequirements):
 
         """
         return exclusions.fails_if(lambda: True,
-                    "Throws error SQL0604N, regarding Decimal(38, 12)"
+                    "Current Informix test backend rejects DECIMAL(38, 12)"
             )
 
     @property

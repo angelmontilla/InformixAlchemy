@@ -317,3 +317,29 @@ def test_unquoted_name_does_not_find_quoted_mixed_case_temp_table(
             connection.commit()
         except Exception:
             connection.rollback()
+
+
+@pytest.mark.quoting
+@pytest.mark.temp_tables
+def test_quoted_temp_table_with_spaces_uses_explicit_quoted_lookup(
+    pinned_connection_session, name_factory, qident
+):
+    connection, _session = pinned_connection_session
+    table_name = f"Tmp Select {name_factory('qs_')[-6:]}"
+    quoted_table = qident(table_name)
+
+    try:
+        connection.exec_driver_sql(
+            f'CREATE TEMP TABLE {quoted_table} ("Select" INTEGER NOT NULL)'
+        )
+        connection.commit()
+
+        insp = inspect(connection)
+        assert insp.has_table(quoted_name(table_name, True)) is True
+        assert insp.has_table(table_name.upper()) is False
+    finally:
+        try:
+            connection.exec_driver_sql(f"DROP TABLE {quoted_table}")
+            connection.commit()
+        except Exception:
+            connection.rollback()
