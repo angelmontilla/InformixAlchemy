@@ -20,7 +20,7 @@
 """requirements.py
 
 Suite capability flags for the Informix fork targeting modern
-SQLAlchemy 2.x compatibility.
+SQLAlchemy 2.0.x compatibility.
 
 This module tells the SQLAlchemy test/provisioning helpers which
 optional behaviors are currently supported, unsupported, or
@@ -108,6 +108,24 @@ class Requirements(SuiteRequirements):
         """Informix views are reflected by the supported pyodbc dialect."""
 
         return exclusions.open()
+
+    @property
+    def materialized_views(self):
+        """Informix materialized views are outside this dialect contract."""
+
+        return exclusions.closed()
+
+    @property
+    def check_constraint_reflection(self):
+        """Informix CHECK constraint reflection is not implemented yet."""
+
+        return exclusions.closed()
+
+    @property
+    def inline_check_constraint_reflection(self):
+        """Informix inline CHECK constraint reflection is not implemented."""
+
+        return exclusions.closed()
 
     @property
     def table_reflection(self):

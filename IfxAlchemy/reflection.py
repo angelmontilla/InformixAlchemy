@@ -26,6 +26,7 @@ from sqlalchemy import sql, util
 from sqlalchemy.sql import quoted_name
 from sqlalchemy import Table, MetaData, Column
 from sqlalchemy.engine import reflection
+from sqlalchemy.engine.reflection import ObjectKind, ObjectScope
 import re
 
 class BaseReflector(object):
@@ -1045,11 +1046,46 @@ class IfxReflector(BaseReflector):
         rows = connection.exec_driver_sql(sql_text, (owner,)).fetchall()
         return [self.normalize_name(self._clean_str(r[0])) for r in rows]
 
-    def _table_names_for_multi(self, connection, schema=None, filter_names=None):
-        if filter_names is not None:
+    def _table_names_for_multi(
+        self,
+        connection,
+        schema=None,
+        filter_names=None,
+        kind=ObjectKind.TABLE,
+        scope=ObjectScope.DEFAULT,
+        **kw,
+    ):
+        if filter_names and scope is ObjectScope.ANY and kind is ObjectKind.ANY:
             return list(filter_names)
 
-        return self.get_table_names(connection, schema=schema)
+        names = []
+        if ObjectScope.DEFAULT in scope:
+            if ObjectKind.TABLE in kind:
+                names.extend(self.get_table_names(connection, schema=schema, **kw))
+            if ObjectKind.VIEW in kind:
+                names.extend(self.get_view_names(connection, schema=schema, **kw))
+            if ObjectKind.MATERIALIZED_VIEW in kind:
+                names.extend(
+                    self.get_materialized_view_names(
+                        connection, schema=schema, **kw
+                    )
+                )
+
+        if ObjectScope.TEMPORARY in scope:
+            if ObjectKind.TABLE in kind:
+                names.extend(
+                    self.get_temp_table_names(connection, schema=schema, **kw)
+                )
+            if ObjectKind.VIEW in kind:
+                names.extend(
+                    self.get_temp_view_names(connection, schema=schema, **kw)
+                )
+
+        if filter_names:
+            filter_names = set(filter_names)
+            names = [name for name in names if name in filter_names]
+
+        return list(dict.fromkeys(names))
 
     def get_materialized_view_names(self, connection, schema=None, **kw):
         # Informix does not expose a materialized-view concept through this
@@ -1541,19 +1577,19 @@ class IfxReflector(BaseReflector):
         *,
         schema=None,
         filter_names=None,
+        kind=ObjectKind.TABLE,
+        scope=ObjectScope.DEFAULT,
         **kw,
     ):
-        names = self._table_names_for_multi(
+        yield from self._multi_reflect(
             connection,
+            self.get_columns,
             schema=schema,
             filter_names=filter_names,
+            kind=kind,
+            scope=scope,
+            **kw,
         )
-
-        for name in names:
-            yield (
-                (schema, name),
-                self.get_columns(connection, name, schema=schema, **kw),
-            )
 
     def get_multi_pk_constraint(
         self,
@@ -1561,19 +1597,19 @@ class IfxReflector(BaseReflector):
         *,
         schema=None,
         filter_names=None,
+        kind=ObjectKind.TABLE,
+        scope=ObjectScope.DEFAULT,
         **kw,
     ):
-        names = self._table_names_for_multi(
+        yield from self._multi_reflect(
             connection,
+            self.get_pk_constraint,
             schema=schema,
             filter_names=filter_names,
+            kind=kind,
+            scope=scope,
+            **kw,
         )
-
-        for name in names:
-            yield (
-                (schema, name),
-                self.get_pk_constraint(connection, name, schema=schema, **kw),
-            )
 
     def get_multi_foreign_keys(
         self,
@@ -1581,19 +1617,19 @@ class IfxReflector(BaseReflector):
         *,
         schema=None,
         filter_names=None,
+        kind=ObjectKind.TABLE,
+        scope=ObjectScope.DEFAULT,
         **kw,
     ):
-        names = self._table_names_for_multi(
+        yield from self._multi_reflect(
             connection,
+            self.get_foreign_keys,
             schema=schema,
             filter_names=filter_names,
+            kind=kind,
+            scope=scope,
+            **kw,
         )
-
-        for name in names:
-            yield (
-                (schema, name),
-                self.get_foreign_keys(connection, name, schema=schema, **kw),
-            )
 
     def get_multi_indexes(
         self,
@@ -1601,19 +1637,19 @@ class IfxReflector(BaseReflector):
         *,
         schema=None,
         filter_names=None,
+        kind=ObjectKind.TABLE,
+        scope=ObjectScope.DEFAULT,
         **kw,
     ):
-        names = self._table_names_for_multi(
+        yield from self._multi_reflect(
             connection,
+            self.get_indexes,
             schema=schema,
             filter_names=filter_names,
+            kind=kind,
+            scope=scope,
+            **kw,
         )
-
-        for name in names:
-            yield (
-                (schema, name),
-                self.get_indexes(connection, name, schema=schema, **kw),
-            )
 
     def get_multi_unique_constraints(
         self,
@@ -1621,23 +1657,60 @@ class IfxReflector(BaseReflector):
         *,
         schema=None,
         filter_names=None,
+        kind=ObjectKind.TABLE,
+        scope=ObjectScope.DEFAULT,
         **kw,
     ):
+        yield from self._multi_reflect(
+            connection,
+            self.get_unique_constraints,
+            schema=schema,
+            filter_names=filter_names,
+            kind=kind,
+            scope=scope,
+            **kw,
+        )
+
+    def _multi_reflect(
+        self,
+        connection,
+        single_table_method,
+        *,
+        schema=None,
+        filter_names=None,
+        kind=ObjectKind.TABLE,
+        scope=ObjectScope.DEFAULT,
+        **kw,
+    ):
+        unreflectable = kw.pop("unreflectable", {})
         names = self._table_names_for_multi(
             connection,
             schema=schema,
             filter_names=filter_names,
+            kind=kind,
+            scope=scope,
+            **kw,
         )
 
         for name in names:
-            yield (
-                (schema, name),
-                self.get_unique_constraints(
+            key = (schema, name)
+            try:
+                reflected = single_table_method(
                     connection,
                     name,
                     schema=schema,
                     **kw,
-                ),
+                )
+            except exc.UnreflectableTableError as err:
+                if key not in unreflectable:
+                    unreflectable[key] = err
+                continue
+            except exc.NoSuchTableError:
+                continue
+
+            yield (
+                key,
+                reflected,
             )
 
     @reflection.cache

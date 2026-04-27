@@ -1088,6 +1088,11 @@ class IfxDialect(default.DefaultDialect):
             connection, sequence_name, schema=schema, **kw
         )
 
+    def get_sequence_names(self, connection, schema=None, **kw):
+        return self._reflector.get_sequence_names(
+            connection, schema=schema, **kw
+        )
+
     def get_schema_names(self, connection, **kw):
         return self._reflector.get_schema_names(connection, **kw)
 
@@ -1149,12 +1154,16 @@ class IfxDialect(default.DefaultDialect):
         *,
         schema=None,
         filter_names=None,
+        kind=ifx_reflection.ObjectKind.TABLE,
+        scope=ifx_reflection.ObjectScope.DEFAULT,
         **kw,
     ):
         return self._reflector.get_multi_columns(
             connection,
             schema=schema,
             filter_names=filter_names,
+            kind=kind,
+            scope=scope,
             **kw,
         )
 
@@ -1164,12 +1173,16 @@ class IfxDialect(default.DefaultDialect):
         *,
         schema=None,
         filter_names=None,
+        kind=ifx_reflection.ObjectKind.TABLE,
+        scope=ifx_reflection.ObjectScope.DEFAULT,
         **kw,
     ):
         return self._reflector.get_multi_pk_constraint(
             connection,
             schema=schema,
             filter_names=filter_names,
+            kind=kind,
+            scope=scope,
             **kw,
         )
 
@@ -1179,12 +1192,16 @@ class IfxDialect(default.DefaultDialect):
         *,
         schema=None,
         filter_names=None,
+        kind=ifx_reflection.ObjectKind.TABLE,
+        scope=ifx_reflection.ObjectScope.DEFAULT,
         **kw,
     ):
         return self._reflector.get_multi_foreign_keys(
             connection,
             schema=schema,
             filter_names=filter_names,
+            kind=kind,
+            scope=scope,
             **kw,
         )
 
@@ -1194,12 +1211,16 @@ class IfxDialect(default.DefaultDialect):
         *,
         schema=None,
         filter_names=None,
+        kind=ifx_reflection.ObjectKind.TABLE,
+        scope=ifx_reflection.ObjectScope.DEFAULT,
         **kw,
     ):
         return self._reflector.get_multi_indexes(
             connection,
             schema=schema,
             filter_names=filter_names,
+            kind=kind,
+            scope=scope,
             **kw,
         )
 
@@ -1209,12 +1230,16 @@ class IfxDialect(default.DefaultDialect):
         *,
         schema=None,
         filter_names=None,
+        kind=ifx_reflection.ObjectKind.TABLE,
+        scope=ifx_reflection.ObjectScope.DEFAULT,
         **kw,
     ):
         return self._reflector.get_multi_unique_constraints(
             connection,
             schema=schema,
             filter_names=filter_names,
+            kind=kind,
+            scope=scope,
             **kw,
         )
 

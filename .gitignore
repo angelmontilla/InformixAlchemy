@@ -14,8 +14,6 @@ IfxAlchemy.egg-info/
 *.user
 *.userosscache
 *.sln.docstates
-setup.cfg
-run_tests.py
 
 # Visual Studio cache/options directory
 .vs/
@@ -171,7 +169,5 @@ try.*
 # specific local project files
 Sample*.py
 try*.py
-setup.cfg
 run_test.py
-test/conftest.py
 

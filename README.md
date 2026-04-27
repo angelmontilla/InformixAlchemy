@@ -1,6 +1,6 @@
 # IfxAlchemy
 
-**IfxAlchemy** provides a SQLAlchemy 2.x dialect for IBM Informix.
+**IfxAlchemy** provides a SQLAlchemy 2.0.x dialect for IBM Informix.
 
 This fork's supported backend is **`informix+pyodbc`** with the IBM Informix
 ODBC driver. The old IfxPy module is kept only as legacy source compatibility
@@ -18,7 +18,10 @@ and is not part of the public entry-point contract.
 
 ## SQLAlchemy Support Policy
 
-This package supports SQLAlchemy `>=2.0,<2.1`.
+Compatible with SQLAlchemy 2.0.x. SQLAlchemy 2.1 is validated
+experimentally until the suite is green and the dependency range is widened.
+
+This package currently declares SQLAlchemy `>=2.0,<2.1`.
 
 SQLAlchemy 2.1 prereleases are tested in non-blocking CI so compatibility
 breakage is visible before the package widens its public dependency range.
@@ -32,6 +35,8 @@ Unsupported by contract:
 - schema-qualified SQLAlchemy ownership model: `supports_schemas = False`
 - temp table enumeration/reflection
 - temporary views
+- materialized views
+- check constraint reflection
 - `ON UPDATE CASCADE`
 - portable microsecond reflection for generic `DateTime`
 - unbounded `VARCHAR`

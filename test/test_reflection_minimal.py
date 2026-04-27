@@ -4,6 +4,7 @@ import uuid
 
 import pytest
 from sqlalchemy import inspect
+from sqlalchemy.engine.reflection import ObjectKind, ObjectScope
 from sqlalchemy.sql import sqltypes
 
 
@@ -217,6 +218,22 @@ def test_get_materialized_view_names_returns_empty_list(engine):
 
 
 @pytest.mark.reflection_minimal
+def test_get_sequence_names(engine, db_builder, name_factory):
+    sequence_name = name_factory("sa_seq_")
+
+    db_builder(
+        f"CREATE SEQUENCE {sequence_name} START WITH 1 INCREMENT BY 1",
+        f"DROP SEQUENCE {sequence_name}",
+    )
+
+    with engine.connect() as connection:
+        insp = inspect(connection)
+        sequence_names = insp.get_sequence_names()
+
+    assert sequence_name in sequence_names, sequence_names
+
+
+@pytest.mark.reflection_minimal
 def test_get_check_constraints_returns_empty_list(
     engine, basic_reflection_objects
 ):
@@ -292,6 +309,55 @@ def test_multi_columns_reflection(engine, basic_reflection_objects):
 
     assert (None, table_name) in result
     assert result[(None, table_name)]
+
+
+@pytest.mark.requires_informix
+@pytest.mark.reflection_minimal
+def test_multi_columns_reflection_honors_kind_and_scope(
+    engine, basic_reflection_objects
+):
+    table_name = basic_reflection_objects["table"]
+    view_name = basic_reflection_objects["view"]
+
+    with engine.connect() as conn:
+        default_tables = dict(
+            conn.dialect.get_multi_columns(
+                conn,
+                filter_names=[table_name, view_name],
+                kind=ObjectKind.TABLE,
+                scope=ObjectScope.DEFAULT,
+            )
+        )
+        views = dict(
+            conn.dialect.get_multi_columns(
+                conn,
+                filter_names=[table_name, view_name],
+                kind=ObjectKind.VIEW,
+                scope=ObjectScope.DEFAULT,
+            )
+        )
+        temporary = dict(
+            conn.dialect.get_multi_columns(
+                conn,
+                kind=ObjectKind.TABLE,
+                scope=ObjectScope.TEMPORARY,
+            )
+        )
+        view_pks = dict(
+            conn.dialect.get_multi_pk_constraint(
+                conn,
+                filter_names=[view_name],
+                kind=ObjectKind.VIEW,
+                scope=ObjectScope.DEFAULT,
+            )
+        )
+
+    assert (None, table_name) in default_tables
+    assert (None, view_name) not in default_tables
+    assert (None, view_name) in views
+    assert (None, table_name) not in views
+    assert temporary == {}
+    assert view_pks == {}
 
 
 @pytest.mark.reflection_minimal

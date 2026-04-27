@@ -3,7 +3,9 @@ from __future__ import annotations
 import inspect as pyinspect
 
 import pytest
+from sqlalchemy import exc
 from sqlalchemy import column, literal_column, select, table
+from sqlalchemy.engine.reflection import ObjectKind, ObjectScope
 from sqlalchemy.testing.provision import temp_table_keyword_args
 
 from IfxAlchemy.IfxPy import IfxDialect_IfxPy
@@ -68,6 +70,7 @@ def test_has_sequence_signature_accepts_kwargs():
     [
         "get_materialized_view_names",
         "get_check_constraints",
+        "get_sequence_names",
         "get_table_comment",
         "get_table_options",
     ],
@@ -104,6 +107,21 @@ def test_sqlalchemy_suite_temp_table_name_listing_requirement_is_closed():
 
 
 @pytest.mark.sqlalchemy_suite
+@pytest.mark.parametrize(
+    "requirement_name",
+    [
+        "check_constraint_reflection",
+        "inline_check_constraint_reflection",
+        "materialized_views",
+    ],
+)
+def test_unimplemented_reflection_requirements_are_closed(requirement_name):
+    requirements = Requirements()
+
+    assert getattr(requirements, requirement_name).enabled is False
+
+
+@pytest.mark.sqlalchemy_suite
 def test_select_private_api_contract_used_by_informix_compat_layer():
     stmt = (
         select(literal_column("1"))
@@ -127,6 +145,39 @@ def test_select_private_api_contract_used_by_informix_compat_layer():
     assert fetch_state.fetch_clause is not None
     assert fetch_state.fetch_options["percent"] is False
     assert fetch_state.fetch_options["with_ties"] is False
+
+
+@pytest.mark.sqlalchemy_suite
+@pytest.mark.parametrize(
+    ("helper_name", "args", "missing_name"),
+    [
+        ("clone_select", (), "_generate"),
+        ("simple_int_clause", (literal_column("1"),), "_simple_int_clause"),
+        (
+            "offset_or_limit_clause_asint",
+            (literal_column("1"), "limit"),
+            "_offset_or_limit_clause_asint",
+        ),
+        ("get_order_by_clauses", (), "_order_by_clauses"),
+    ],
+)
+def test_select_private_api_contract_fails_explicitly(
+    helper_name, args, missing_name
+):
+    from IfxAlchemy import sqla_compat
+
+    helper = getattr(sqla_compat, helper_name)
+
+    with pytest.raises(exc.CompileError, match=missing_name):
+        helper(object(), *args)
+
+
+@pytest.mark.sqlalchemy_suite
+def test_multi_reflection_signatures_expose_kind_and_scope():
+    sig = pyinspect.signature(IfxDialect.get_multi_columns)
+
+    assert sig.parameters["kind"].default is ObjectKind.TABLE
+    assert sig.parameters["scope"].default is ObjectScope.DEFAULT
 
 
 @pytest.mark.sqlalchemy_suite
@@ -164,6 +215,9 @@ def test_representative_select_has_cache_key():
         "temp_table_names",
         "temp_table_reflection",
         "temporary_views",
+        "materialized_views",
+        "check_constraint_reflection",
+        "inline_check_constraint_reflection",
         "on_update_cascade",
         "datetime_microseconds",
         "time_microseconds",
