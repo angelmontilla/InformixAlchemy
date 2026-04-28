@@ -1,34 +1,37 @@
 # IfxAlchemy
 
-**IfxAlchemy** provides a SQLAlchemy 2.0.x dialect for IBM Informix.
+**IfxAlchemy** provides a SQLAlchemy dialect for IBM Informix.
 
 This fork's supported backend is **`informix+pyodbc`** with the IBM Informix
-ODBC driver. The old IfxPy module is kept only as legacy source compatibility
-and is not part of the public entry-point contract.
+ODBC driver. The old IfxPy module is kept only for compatibility tests and is
+not part of the primary support contract.
 
 ## Support Matrix
 
 | Component | Supported baseline |
 | --- | --- |
 | Python | 3.10, 3.11, 3.12, 3.13 |
-| SQLAlchemy | 2.0.x stable. 2.1.x is validated only in prerelease CI until SQLAlchemy 2.1 is final. |
+| SQLAlchemy | `>=2.0.45,<2.2` |
 | DBAPI | `pyodbc>=5.0` |
 | Driver | IBM Informix ODBC Driver |
 | Protocol | Informix over `onsoctcp` |
 
 ## SQLAlchemy Support Policy
 
-Compatible with SQLAlchemy 2.0.x. SQLAlchemy 2.1 is validated
-experimentally until the suite is green and the dependency range is widened.
+Supported SQLAlchemy versions:
 
-This package currently declares SQLAlchemy `>=2.0,<2.1`.
+- SQLAlchemy `>=2.0.45,<2.2`
+- SQLAlchemy 2.0.x supported
+- SQLAlchemy 2.1.x supported
 
-SQLAlchemy 2.1 prereleases are tested in non-blocking CI so compatibility
-breakage is visible before the package widens its public dependency range.
+Supported backend:
 
-The supported public dialect is `informix+pyodbc`. The legacy `IfxPy` module
-remains importable for source compatibility but is not part of the SQLAlchemy
-2.1 support contract.
+- `informix+pyodbc`
+
+Legacy backend:
+
+- IfxPy is kept for compatibility tests only and is not part of the primary
+  support contract.
 
 Unsupported by contract:
 
@@ -91,11 +94,36 @@ environment.
 
 ## ODBC Type Reporting
 
-The dialect adds `NeedODBCTypesOnly=1` by default unless the URL already
-contains that keyword in any casing. IBM documents this setting for the
-Informix ODBC driver to report standard ODBC types where possible, which avoids
-pyodbc seeing Informix-specific type codes such as `SQL_INFX_BIGINT (-114)` for
-common SQLAlchemy result handling.
+`NeedODBCTypesOnly=1` is added by default for generated connection strings
+unless the URL already contains that keyword in any casing. IBM documents this
+setting for the Informix ODBC driver to report standard ODBC types where
+possible, which avoids pyodbc seeing Informix-specific type codes such as
+`SQL_INFX_BIGINT (-114)` for common SQLAlchemy result handling.
+
+When using `odbc_connect`, the connection string is passed through unchanged.
+If your environment requires `NeedODBCTypesOnly=1`, include it explicitly in
+the `odbc_connect` string.
+
+```python
+from urllib.parse import quote_plus
+
+from sqlalchemy import create_engine
+
+odbc_str = quote_plus(
+    "DRIVER={IBM INFORMIX ODBC DRIVER};"
+    "SERVER=informix_server;"
+    "DATABASE=mydb;"
+    "HOST=localhost;"
+    "SERVICE=9088;"
+    "PROTOCOL=onsoctcp;"
+    "UID=user;"
+    "PWD=password;"
+    "DELIMIDENT=Y;"
+    "NeedODBCTypesOnly=1;"
+)
+
+engine = create_engine(f"informix+pyodbc:///?odbc_connect={odbc_str}")
+```
 
 ## Runtime Contract
 
@@ -125,3 +153,21 @@ runner uses `INFORMIX_SQLALCHEMY_SUITE_URL` first, then falls back to
 
 Use an isolated database for the official suite. SQLAlchemy's multi-reflection
 tests expect the database under test to contain only suite fixtures.
+
+### Test with SQLAlchemy 2.0.x
+
+```bat
+env\scripts\activate
+python -m pytest -m "not requires_informix and not legacy_ifxpy" -W error
+python run_tests.py
+deactivate
+```
+
+### Test with SQLAlchemy 2.1.x
+
+```bat
+env2\scripts\activate
+python -m pytest -m "not requires_informix and not legacy_ifxpy" -W error
+python run_tests.py
+deactivate
+```

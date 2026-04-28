@@ -3,7 +3,9 @@ from __future__ import annotations
 import inspect as pyinspect
 
 import pytest
+import sqlalchemy
 from sqlalchemy import exc
+from sqlalchemy import Column, Integer, MetaData, Table
 from sqlalchemy import column, literal_column, select, table
 from sqlalchemy.engine.reflection import ObjectKind, ObjectScope
 from sqlalchemy.testing.provision import temp_table_keyword_args
@@ -73,6 +75,9 @@ def test_has_sequence_signature_accepts_kwargs():
         "get_sequence_names",
         "get_table_comment",
         "get_table_options",
+        "get_multi_check_constraints",
+        "get_multi_table_comment",
+        "get_multi_table_options",
     ],
 )
 def test_reflection_surface_methods_exist(method_name):
@@ -148,6 +153,25 @@ def test_select_private_api_contract_used_by_informix_compat_layer():
 
 
 @pytest.mark.sqlalchemy_suite
+def test_private_sqlalchemy_helpers_are_centralized_contract():
+    from IfxAlchemy import sqla_compat
+
+    metadata = MetaData()
+    tbl = Table("t", metadata, Column("id", Integer, primary_key=True))
+    for_update_stmt = select(tbl.c.id).with_for_update()
+    insert_stmt = tbl.insert().returning(tbl.c.id)
+    compiled = insert_stmt.compile(dialect=IfxDialect_pyodbc())
+    preparer = IfxDialect_pyodbc().identifier_preparer
+
+    assert sqla_compat.get_select_for_update_arg(for_update_stmt) is not None
+    assert sqla_compat.get_table_autoincrement_column(tbl) is tbl.c.id
+    assert tuple(sqla_compat.get_table_sorted_constraints(tbl))
+    assert sqla_compat.identifier_requires_quotes(preparer, "select") is True
+    assert sqla_compat.get_dml_compile_state(compiled) is not None
+    assert tuple(sqla_compat.get_statement_returning(insert_stmt))
+
+
+@pytest.mark.sqlalchemy_suite
 @pytest.mark.parametrize(
     ("helper_name", "args", "missing_name"),
     [
@@ -178,6 +202,53 @@ def test_multi_reflection_signatures_expose_kind_and_scope():
 
     assert sig.parameters["kind"].default is ObjectKind.TABLE
     assert sig.parameters["scope"].default is ObjectScope.DEFAULT
+
+
+@pytest.mark.sqlalchemy_suite
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "get_multi_columns",
+        "get_multi_pk_constraint",
+        "get_multi_foreign_keys",
+        "get_multi_indexes",
+        "get_multi_unique_constraints",
+        "get_multi_check_constraints",
+        "get_multi_table_comment",
+        "get_multi_table_options",
+    ],
+)
+def test_multi_reflection_methods_exist(method_name):
+    assert callable(getattr(IfxDialect, method_name))
+
+
+@pytest.mark.sqlalchemy_suite
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "get_multi_columns",
+        "get_multi_pk_constraint",
+        "get_multi_foreign_keys",
+        "get_multi_indexes",
+        "get_multi_unique_constraints",
+        "get_multi_check_constraints",
+        "get_multi_table_comment",
+        "get_multi_table_options",
+    ],
+)
+def test_multi_reflection_method_signature_contract(method_name):
+    sig = pyinspect.signature(getattr(IfxDialect, method_name))
+
+    assert "schema" in sig.parameters
+    assert "filter_names" in sig.parameters
+    assert "kind" in sig.parameters
+    assert "scope" in sig.parameters
+    assert sig.parameters["kind"].default is ObjectKind.TABLE
+    assert sig.parameters["scope"].default is ObjectScope.DEFAULT
+    assert any(
+        param.kind is pyinspect.Parameter.VAR_KEYWORD
+        for param in sig.parameters.values()
+    )
 
 
 @pytest.mark.sqlalchemy_suite
@@ -215,6 +286,7 @@ def test_representative_select_has_cache_key():
         "temp_table_names",
         "temp_table_reflection",
         "temporary_views",
+        "schemas",
         "materialized_views",
         "check_constraint_reflection",
         "inline_check_constraint_reflection",
@@ -244,3 +316,33 @@ def test_current_open_requirements_are_part_of_contract(requirement_name):
     requirements = Requirements()
 
     assert getattr(requirements, requirement_name).enabled is True
+
+
+@pytest.mark.sqlalchemy_suite
+def test_multi_check_constraints_requirement_contract():
+    assert Requirements().check_constraint_reflection.enabled is False
+
+
+@pytest.mark.sqlalchemy_suite
+def test_check_constraint_reflection_returns_stable_empty_structure():
+    dialect = IfxDialect()
+
+    assert dialect.get_check_constraints(object(), "tabla") == []
+
+
+@pytest.mark.sqlalchemy_suite
+def test_sqlalchemy_version_contract_for_current_validation_lane():
+    version = sqlalchemy.__version__
+
+    major, minor, patch = version.split(".", 2)
+
+    if (major, minor) == ("2", "1"):
+        return
+
+    assert (major, minor) == ("2", "0")
+    assert int(patch) >= 45
+
+def test_legacy_full_returning_flag_is_not_declared():
+    assert "full_returning" not in IfxDialect.__dict__
+    assert "full_returning" not in IfxDialect_pyodbc.__dict__
+    assert "full_returning" not in IfxDialect_IfxPy.__dict__

@@ -29,6 +29,8 @@ from sqlalchemy.engine import reflection
 from sqlalchemy.engine.reflection import ObjectKind, ObjectScope
 import re
 
+from . import sqla_compat
+
 class BaseReflector(object):
     def __init__(self, dialect):
         self.dialect = dialect
@@ -58,7 +60,9 @@ class BaseReflector(object):
         lowered = name.lower()
         if (
             name.upper() == name
-            and not self.identifier_preparer._requires_quotes(lowered)
+            and not sqla_compat.identifier_requires_quotes(
+                self.identifier_preparer, lowered
+            )
         ):
             return lowered
 
@@ -70,8 +74,8 @@ class BaseReflector(object):
             return None
 
         lowered = name.lower()
-        if lowered == name and not self.identifier_preparer._requires_quotes(
-            lowered
+        if lowered == name and not sqla_compat.identifier_requires_quotes(
+            self.identifier_preparer, lowered
         ):
             return name.upper()
 
@@ -88,6 +92,17 @@ class BaseReflector(object):
     @property
     def default_schema_name(self):
         return self.dialect.default_schema_name
+
+    def _normalize_filter_names(self, filter_names):
+        if not filter_names:
+            return None
+
+        normalized = set()
+        for name in filter_names:
+            normalized.add(self.normalize_name(name))
+            normalized.add(self.denormalize_name(name))
+            normalized.add(str(name))
+        return normalized
 
 class IfxReflector(BaseReflector):
     ischema = MetaData()
@@ -1081,9 +1096,15 @@ class IfxReflector(BaseReflector):
                     self.get_temp_view_names(connection, schema=schema, **kw)
                 )
 
-        if filter_names:
-            filter_names = set(filter_names)
-            names = [name for name in names if name in filter_names]
+        normalized_filters = self._normalize_filter_names(filter_names)
+
+        if normalized_filters:
+            names = [
+                name for name in names
+                if name in normalized_filters
+                or self.normalize_name(name) in normalized_filters
+                or self.denormalize_name(name) in normalized_filters
+            ]
 
         return list(dict.fromkeys(names))
 
@@ -1671,6 +1692,66 @@ class IfxReflector(BaseReflector):
             **kw,
         )
 
+    def get_multi_check_constraints(
+        self,
+        connection,
+        *,
+        schema=None,
+        filter_names=None,
+        kind=ObjectKind.TABLE,
+        scope=ObjectScope.DEFAULT,
+        **kw,
+    ):
+        yield from self._multi_reflect(
+            connection,
+            self.get_check_constraints,
+            schema=schema,
+            filter_names=filter_names,
+            kind=kind,
+            scope=scope,
+            **kw,
+        )
+
+    def get_multi_table_comment(
+        self,
+        connection,
+        *,
+        schema=None,
+        filter_names=None,
+        kind=ObjectKind.TABLE,
+        scope=ObjectScope.DEFAULT,
+        **kw,
+    ):
+        yield from self._multi_reflect(
+            connection,
+            self.get_table_comment,
+            schema=schema,
+            filter_names=filter_names,
+            kind=kind,
+            scope=scope,
+            **kw,
+        )
+
+    def get_multi_table_options(
+        self,
+        connection,
+        *,
+        schema=None,
+        filter_names=None,
+        kind=ObjectKind.TABLE,
+        scope=ObjectScope.DEFAULT,
+        **kw,
+    ):
+        yield from self._multi_reflect(
+            connection,
+            self.get_table_options,
+            schema=schema,
+            filter_names=filter_names,
+            kind=kind,
+            scope=scope,
+            **kw,
+        )
+
     def _multi_reflect(
         self,
         connection,
@@ -1706,7 +1787,19 @@ class IfxReflector(BaseReflector):
                     unreflectable[key] = err
                 continue
             except exc.NoSuchTableError:
-                continue
+                try:
+                    reflected = single_table_method(
+                        connection,
+                        quoted_name(name, True),
+                        schema=schema,
+                        **kw,
+                    )
+                except exc.UnreflectableTableError as err:
+                    if key not in unreflectable:
+                        unreflectable[key] = err
+                    continue
+                except exc.NoSuchTableError:
+                    continue
 
             yield (
                 key,

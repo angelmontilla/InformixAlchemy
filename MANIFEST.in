@@ -1,5 +1,3 @@
 recursive-include test *.py
-prune scratchpad
 
-include README* LICENSE distribute_setup.py CHANGES* run_tests.py
-
+include README* LICENSE run_tests.py

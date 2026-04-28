@@ -42,12 +42,21 @@ def main(argv: list[str] | None = None) -> int:
         file=sys.stderr,
     )
 
+    suite_targets = ["test/test_suite.py"]
+
+    if os.getenv("IFXALCHEMY_INCLUDE_OUTPARAMS", "1").lower() not in {
+        "0",
+        "false",
+        "no",
+    }:
+        suite_targets.append("test/test_out_parameters.py")
+
     args = [
         "-c",
         "pytest.ini",
         "-p",
         "sqlalchemy.testing.plugin.pytestplugin",
-        "test/test_suite.py",
+        *suite_targets,
         "--dburi",
         dburi,
         "-ra",

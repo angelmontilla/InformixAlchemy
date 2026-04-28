@@ -219,7 +219,7 @@ def _get_ifx_autoincrement_type_name(column):
         return type_name
 
     table = getattr(column, "table", None)
-    autoincrement_column = getattr(table, "_autoincrement_column", None)
+    autoincrement_column = sqla_compat.get_table_autoincrement_column(table)
     if autoincrement_column is not column:
         return type_name
 
@@ -425,7 +425,7 @@ class IfxCompiler(compiler.SQLCompiler):
         return "CURRENT_TIMESTAMP"
 
     def for_update_clause(self, select, **kw):
-        for_update = select._for_update_arg
+        for_update = sqla_compat.get_select_for_update(select)
 
         if for_update is None:
             return ''
@@ -459,13 +459,13 @@ class IfxCompiler(compiler.SQLCompiler):
         return "mod(%s, %s)" % (self.process(binary.left),
                                                 self.process(binary.right))
 
-    def _fetch_clause_options(self, select):
+    def _ifx_fetch_options(self, select):
         return sqla_compat.get_fetch_clause_options(select)
 
-    def _get_limit_or_fetch_clause(self, select):
+    def _ifx_limit_fetch_clause(self, select):
         fetch_clause = sqla_compat.get_fetch_clause(select)
         if fetch_clause is not None:
-            fetch_options = self._fetch_clause_options(select)
+            fetch_options = self._ifx_fetch_options(select)
 
             if fetch_options.get("with_ties"):
                 raise exc.CompileError(
@@ -481,7 +481,7 @@ class IfxCompiler(compiler.SQLCompiler):
 
         return sqla_compat.get_limit_clause(select)
 
-    def _get_limit_or_fetch_value(self, select, clause):
+    def _ifx_limit_fetch_value(self, select, clause):
         if clause is None:
             return None
 
@@ -502,7 +502,7 @@ class IfxCompiler(compiler.SQLCompiler):
         return clause
 
     def _row_limit_upper_bound(self, select, limit_clause, offset_clause):
-        limit_value = self._get_limit_or_fetch_value(select, limit_clause)
+        limit_value = self._ifx_limit_fetch_value(select, limit_clause)
         offset_value = sqla_compat.get_offset_value(select)
 
         if (
@@ -543,7 +543,7 @@ class IfxCompiler(compiler.SQLCompiler):
         ).select_from(translated).alias()
 
     def _translate_offset_select(self, select):
-        limit_clause = self._get_limit_or_fetch_clause(select)
+        limit_clause = self._ifx_limit_fetch_clause(select)
         offset_clause = sqla_compat.get_offset_clause(select)
 
         if offset_clause is None:
@@ -616,7 +616,7 @@ class IfxCompiler(compiler.SQLCompiler):
         **kw
     ):
         if sqla_compat.get_fetch_clause(select) is not None:
-            self._get_limit_or_fetch_clause(select)
+            self._ifx_limit_fetch_clause(select)
 
         return ""
 
@@ -675,8 +675,8 @@ class IfxCompiler(compiler.SQLCompiler):
 
     def get_select_precolumns(self, select, **kwargs):
         text = ""
-        limit_clause = self._get_limit_or_fetch_clause(select)
-        limit_value = self._get_limit_or_fetch_value(select, limit_clause)
+        limit_clause = self._ifx_limit_fetch_clause(select)
+        limit_value = self._ifx_limit_fetch_value(select, limit_clause)
 
         # Informix: SELECT FIRST n DISTINCT ...
         if (limit_clause is not None) and (
@@ -866,7 +866,7 @@ class IfxDDLCompiler(compiler.DDLCompiler):
 
     def create_table_constraints(self, table, **kw):
         if self._is_nullable_unique_constraint_supported(self.dialect):
-            for constraint in table._sorted_constraints:
+            for constraint in sqla_compat.get_table_sorted_constraints(table):
                 if isinstance(constraint, sa_schema.UniqueConstraint):
                     for column in constraint:
                         if column.nullable:
@@ -951,7 +951,7 @@ class _SelectLastRowIDMixin(object):
         if compiled is None:
             return None
 
-        dml_compile_state = getattr(compiled, "dml_compile_state", None)
+        dml_compile_state = sqla_compat.get_dml_compile_state(compiled)
         table = getattr(dml_compile_state, "dml_table", None)
         if table is not None:
             return table
@@ -959,16 +959,16 @@ class _SelectLastRowIDMixin(object):
         statement = getattr(compiled, "statement", None)
         return getattr(statement, "table", None)
 
-    def _has_effective_returning(self):
+    def _ifx_dml_returns_rows(self):
         compiled = getattr(self, "compiled", None)
         if compiled is None:
             return False
 
-        if getattr(compiled, "effective_returning", None):
+        if sqla_compat.compiled_returns_rows(compiled):
             return True
 
         statement = getattr(compiled, "statement", None)
-        return bool(getattr(statement, "_returning", None))
+        return bool(sqla_compat.get_statement_returning(statement))
 
     def pre_exec(self):
         self._lastrowid = None
@@ -980,7 +980,7 @@ class _SelectLastRowIDMixin(object):
             if tbl is None:
                 return
 
-            seq_column = getattr(tbl, "_autoincrement_column", None)
+            seq_column = sqla_compat.get_table_autoincrement_column(tbl)
             insert_has_sequence = seq_column is not None
             compiled_params = (
                 self.compiled_parameters[0] if self.compiled_parameters else {}
@@ -992,7 +992,7 @@ class _SelectLastRowIDMixin(object):
 
             self._select_lastrowid = insert_has_sequence and \
                                         not explicit_pk_value and \
-                                        not self._has_effective_returning() and \
+                                        not self._ifx_dml_returns_rows() and \
                                         not self.compiled.inline and \
                                         not self.executemany
             if self._select_lastrowid:
@@ -1028,7 +1028,6 @@ class IfxDialect(default.DefaultDialect):
     insert_returning = False
     update_returning = False
     delete_returning = False
-    full_returning = False
     supports_multivalues_insert = False
     use_insertmanyvalues = False
     use_insertmanyvalues_wo_returning = False
@@ -1235,6 +1234,63 @@ class IfxDialect(default.DefaultDialect):
         **kw,
     ):
         return self._reflector.get_multi_unique_constraints(
+            connection,
+            schema=schema,
+            filter_names=filter_names,
+            kind=kind,
+            scope=scope,
+            **kw,
+        )
+
+    def get_multi_check_constraints(
+        self,
+        connection,
+        *,
+        schema=None,
+        filter_names=None,
+        kind=ifx_reflection.ObjectKind.TABLE,
+        scope=ifx_reflection.ObjectScope.DEFAULT,
+        **kw,
+    ):
+        return self._reflector.get_multi_check_constraints(
+            connection,
+            schema=schema,
+            filter_names=filter_names,
+            kind=kind,
+            scope=scope,
+            **kw,
+        )
+
+    def get_multi_table_comment(
+        self,
+        connection,
+        *,
+        schema=None,
+        filter_names=None,
+        kind=ifx_reflection.ObjectKind.TABLE,
+        scope=ifx_reflection.ObjectScope.DEFAULT,
+        **kw,
+    ):
+        return self._reflector.get_multi_table_comment(
+            connection,
+            schema=schema,
+            filter_names=filter_names,
+            kind=kind,
+            scope=scope,
+            **kw,
+        )
+
+    def get_multi_table_options(
+        self,
+        connection,
+        *,
+        schema=None,
+        filter_names=None,
+        kind=ifx_reflection.ObjectKind.TABLE,
+        scope=ifx_reflection.ObjectScope.DEFAULT,
+        **kw,
+    ):
+        return self._reflector.get_multi_table_options(
             connection,
             schema=schema,
             filter_names=filter_names,

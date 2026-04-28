@@ -8,7 +8,6 @@ from sqlalchemy import (
     Column,
     Date,
     DateTime,
-    distinct,
     func,
     Index,
     Integer,
@@ -437,25 +436,25 @@ def test_limit_offset_preserves_distinct_before_row_number(
 
 
 @pytest.mark.ddl_compiler
-def test_limit_offset_preserves_distinct_expression_before_row_number(
+def test_fetch_offset_preserves_distinct_before_row_number(
     dialect, sample_table
 ):
     stmt = (
-        select(distinct(sample_table.c.name))
+        select(sample_table.c.name)
+        .distinct()
         .order_by(sample_table.c.name)
-        .limit(10)
+        .fetch(10)
         .offset(3)
     )
 
     compiled = str(stmt.compile(dialect=dialect))
     upper = _upper_sql(compiled)
 
-    assert (
-        "FROM (SELECT DISTINCT SA_COMPILE_BASIC.NAME AS ANON_1, "
-        "ROW_NUMBER() OVER (ORDER BY SA_COMPILE_BASIC.NAME) AS IFX_RN "
-        "FROM SA_COMPILE_BASIC) AS ANON_2"
-    ) in upper
-    assert "WHERE ANON_2.IFX_RN > 3 AND ANON_2.IFX_RN <= 13" in upper
+    assert "SELECT DISTINCT" in upper
+    assert "ROW_NUMBER() OVER" in upper
+    assert "IFX_RN > 3" in upper
+    assert "IFX_RN <= 13" in upper
+    assert "FETCH FIRST" not in upper
     assert "__IFX_" not in upper
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import inspect
+from sqlalchemy.sql import quoted_name
 
 
 @pytest.fixture
@@ -144,3 +145,84 @@ def test_get_indexes_reports_desc_sorting(engine, descending_index_objects):
     assert idx["column_names"] == ["payload", "code"], idx
     assert idx["unique"] is False, idx
     assert idx.get("column_sorting") == {"payload": ("desc",)}, idx
+
+
+@pytest.fixture
+def quoted_multi_reflection_objects(db_builder, name_factory, qident):
+    suffix = name_factory("qn_")[-8:]
+    normal_name = f"TablaNormal_{suffix}"
+    mixed_name = f"MixedCase_{suffix}"
+    lower_name = f"tabla_con_minusculas_{suffix}"
+    reserved_name = f"SELECT_{suffix}"
+
+    table_defs = [
+        (normal_name, normal_name),
+        (mixed_name, qident(mixed_name)),
+        (lower_name, qident(lower_name)),
+        (reserved_name, qident(reserved_name)),
+    ]
+
+    create_sqls = []
+    drop_sqls = []
+    for raw_name, rendered_name in table_defs:
+        index_name = qident(f"ix_{raw_name}_payload")
+        create_sqls.extend(
+            [
+                f"""
+                CREATE TABLE {rendered_name} (
+                    id INTEGER NOT NULL PRIMARY KEY,
+                    code VARCHAR(20) NOT NULL UNIQUE,
+                    payload VARCHAR(30),
+                    CHECK (id > 0)
+                )
+                """,
+                f"CREATE INDEX {index_name} ON {rendered_name} (payload)",
+            ]
+        )
+        drop_sqls.append(f"DROP TABLE {rendered_name}")
+
+    db_builder(create_sqls, drop_sqls)
+
+    return {
+        "normal": normal_name.lower(),
+        "mixed": mixed_name,
+        "lower": lower_name,
+        "reserved": reserved_name,
+    }
+
+
+def _multi_reflection_names(result):
+    return {key[1] for key in result}
+
+
+@pytest.mark.reflection_composite
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "get_multi_columns",
+        "get_multi_indexes",
+        "get_multi_foreign_keys",
+        "get_multi_unique_constraints",
+        "get_multi_check_constraints",
+        "get_multi_table_comment",
+        "get_multi_table_options",
+    ],
+)
+def test_multi_reflection_filter_names_handle_quoted_and_folded_names(
+    engine,
+    quoted_multi_reflection_objects,
+    method_name,
+):
+    names = quoted_multi_reflection_objects
+    filters = [
+        names["normal"].upper(),
+        quoted_name(names["mixed"], True),
+        quoted_name(names["lower"], True),
+        quoted_name(names["reserved"], True),
+    ]
+
+    with engine.connect() as connection:
+        insp = inspect(connection)
+        result = getattr(insp, method_name)(filter_names=filters)
+
+    assert _multi_reflection_names(result) == set(names.values())

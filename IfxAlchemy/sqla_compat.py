@@ -11,7 +11,35 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import sqlalchemy
 from sqlalchemy import exc
+
+try:
+    from packaging.version import Version
+except ImportError:  # pragma: no cover - exercised only without packaging
+
+    class Version:
+        def __init__(self, value):
+            self._parts = self._parse(value)
+
+        @staticmethod
+        def _parse(value):
+            head = str(value).split("+", 1)[0]
+            head = head.replace("b", ".")
+            parts = []
+            for token in head.split("."):
+                try:
+                    parts.append(int(token))
+                except ValueError:
+                    break
+            return tuple(parts)
+
+        def __ge__(self, other):
+            return self._parts >= other._parts
+
+
+SQLALCHEMY_VERSION = Version(sqlalchemy.__version__)
+SQLALCHEMY_IS_21_PLUS = SQLALCHEMY_VERSION >= Version("2.1.0b1")
 
 
 @dataclass(frozen=True)
@@ -29,7 +57,8 @@ class IfxSelectLimitState:
 def _missing_private_api(name: str) -> exc.CompileError:
     return exc.CompileError(
         "The Informix dialect requires SQLAlchemy Select private API "
-        f"{name!r}, which is not available in this SQLAlchemy version. "
+        f"{name!r}, which is not available in SQLAlchemy "
+        f"{sqlalchemy.__version__}. "
         "Update IfxAlchemy.sqla_compat for this SQLAlchemy release."
     )
 
@@ -55,6 +84,22 @@ def get_offset_clause(select):
 
 def get_distinct(select):
     return getattr(select, "_distinct", False)
+
+
+def get_select_for_update_arg(select):
+    """Return the private Select._for_update_arg value.
+
+    This is intentionally centralized because SQLAlchemy does not expose
+    a stable public accessor for this compiler-level state.
+    """
+
+    return getattr(select, "_for_update_arg", None)
+
+
+def get_select_for_update(select):
+    """Return compiler-level FOR UPDATE state for a Select."""
+
+    return get_select_for_update_arg(select)
 
 
 def get_offset_value(select):
@@ -97,6 +142,46 @@ def get_order_by_clauses(select):
         raise _missing_private_api("_order_by_clauses")
 
     return tuple(clauses)
+
+
+def get_table_autoincrement_column(table):
+    """Return SQLAlchemy's selected autoincrement column for a Table."""
+
+    return getattr(table, "_autoincrement_column", None)
+
+
+def get_table_sorted_constraints(table):
+    """Return SQLAlchemy's internally sorted constraints for DDL emission."""
+
+    return getattr(table, "_sorted_constraints", ())
+
+
+def identifier_requires_quotes(preparer, value):
+    """Return whether an identifier requires quoting.
+
+    SQLAlchemy exposes this as an internal preparer rule; keep the access
+    in one place so minor-version changes fail in the compatibility layer.
+    """
+
+    return preparer._requires_quotes(value)
+
+
+def get_dml_compile_state(compiled):
+    """Return the DML compile state associated with a compiled statement."""
+
+    return getattr(compiled, "dml_compile_state", None)
+
+
+def compiled_returns_rows(compiled):
+    """Return whether a compiled DML statement has effective RETURNING."""
+
+    return bool(getattr(compiled, "effective_returning", None))
+
+
+def get_statement_returning(statement):
+    """Return SQLAlchemy's private DML returning collection, if present."""
+
+    return getattr(statement, "_returning", None)
 
 
 def get_limit_state(select) -> IfxSelectLimitState:

@@ -93,7 +93,6 @@ class IfxDialect_IfxPy(IfxDialect):
     insert_returning = False
     update_returning = False
     delete_returning = False
-    full_returning = False
     supports_multivalues_insert = False
     use_insertmanyvalues = False
     use_insertmanyvalues_wo_returning = False

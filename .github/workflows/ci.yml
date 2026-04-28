@@ -10,15 +10,54 @@ on:
 
 jobs:
   unit:
-    name: Unit / compile (py${{ matrix.python-version }}, ${{ matrix.sqlalchemy }})
+    name: Unit / compile (py${{ matrix.python-version }}, ${{ matrix.label }})
     runs-on: ubuntu-latest
-    continue-on-error: false
+    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
-        sqlalchemy:
-          - "SQLAlchemy>=2.0,<2.1"
+        include:
+          - python-version: "3.10"
+            sqlalchemy: "SQLAlchemy>=2.0.45,<2.1"
+            pip-pre: ""
+            experimental: false
+            label: "SQLAlchemy 2.0.x"
+          - python-version: "3.11"
+            sqlalchemy: "SQLAlchemy>=2.0.45,<2.1"
+            pip-pre: ""
+            experimental: false
+            label: "SQLAlchemy 2.0.x"
+          - python-version: "3.12"
+            sqlalchemy: "SQLAlchemy>=2.0.45,<2.1"
+            pip-pre: ""
+            experimental: false
+            label: "SQLAlchemy 2.0.x"
+          - python-version: "3.13"
+            sqlalchemy: "SQLAlchemy>=2.0.45,<2.1"
+            pip-pre: ""
+            experimental: false
+            label: "SQLAlchemy 2.0.x"
+
+          - python-version: "3.10"
+            sqlalchemy: "SQLAlchemy>=2.1.0b2,<2.2"
+            pip-pre: "--pre"
+            experimental: false
+            label: "SQLAlchemy 2.1.x"
+          - python-version: "3.11"
+            sqlalchemy: "SQLAlchemy>=2.1.0b2,<2.2"
+            pip-pre: "--pre"
+            experimental: false
+            label: "SQLAlchemy 2.1.x"
+          - python-version: "3.12"
+            sqlalchemy: "SQLAlchemy>=2.1.0b2,<2.2"
+            pip-pre: "--pre"
+            experimental: false
+            label: "SQLAlchemy 2.1.x"
+          - python-version: "3.13"
+            sqlalchemy: "SQLAlchemy>=2.1.0b2,<2.2"
+            pip-pre: "--pre"
+            experimental: false
+            label: "SQLAlchemy 2.1.x"
 
     steps:
       - uses: actions/checkout@v4
@@ -31,47 +70,46 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e . --no-deps
-          python -m pip install "${{ matrix.sqlalchemy }}" "pyodbc>=5.0" pytest
+          python -m pip install ${{ matrix.pip-pre }} "${{ matrix.sqlalchemy }}" "pyodbc>=5.0" pytest
+
+      - name: Show SQLAlchemy version
+        run: python -c "import sqlalchemy; print(sqlalchemy.__version__)"
 
       - name: Run tests without Informix
-        run: python -m pytest -m "not requires_informix and not legacy_ifxpy and not sqlalchemy_suite"
+        run: python -m pytest -m "not requires_informix and not legacy_ifxpy and not sqlalchemy_suite" -W error
 
-  unit-prerelease:
-    name: Unit / compile prerelease (py${{ matrix.python-version }}, ${{ matrix.sqlalchemy }})
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.12", "3.13"]
-        sqlalchemy:
-          - "SQLAlchemy>=2.1,<2.2"
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install package
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e . --no-deps
-          python -m pip install --pre "${{ matrix.sqlalchemy }}" "pyodbc>=5.0" pytest
-
-      - name: Run tests without Informix
-        run: python -m pytest -m "not requires_informix and not legacy_ifxpy and not sqlalchemy_suite"
+      - name: Run SQLAlchemy contract gates
+        run: python -m pytest test/test_sqlalchemy_suite_gate.py test/test_sqlalchemy21_constructs.py -m "not requires_informix" -W error
 
   integration:
-    name: Informix integration (py${{ matrix.python-version }}, ${{ matrix.sqlalchemy }})
+    name: Informix integration (py${{ matrix.python-version }}, ${{ matrix.label }})
     runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13"]
-        sqlalchemy:
-          - "SQLAlchemy>=2.0,<2.1"
+        include:
+          - python-version: "3.12"
+            sqlalchemy: "SQLAlchemy>=2.0.45,<2.1"
+            pip-pre: ""
+            experimental: false
+            label: "SQLAlchemy 2.0.x"
+          - python-version: "3.13"
+            sqlalchemy: "SQLAlchemy>=2.0.45,<2.1"
+            pip-pre: ""
+            experimental: false
+            label: "SQLAlchemy 2.0.x"
+
+          - python-version: "3.12"
+            sqlalchemy: "SQLAlchemy>=2.1.0b2,<2.2"
+            pip-pre: "--pre"
+            experimental: false
+            label: "SQLAlchemy 2.1.x"
+          - python-version: "3.13"
+            sqlalchemy: "SQLAlchemy>=2.1.0b2,<2.2"
+            pip-pre: "--pre"
+            experimental: false
+            label: "SQLAlchemy 2.1.x"
     env:
       INFORMIX_SQLALCHEMY_URL: ${{ secrets.INFORMIX_SQLALCHEMY_URL }}
       INFORMIX_SQLALCHEMY_SUITE_URL: ${{ secrets.INFORMIX_SQLALCHEMY_SUITE_URL || secrets.INFORMIX_SQLALCHEMY_URL }}
@@ -94,54 +132,32 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e . --no-deps
-          python -m pip install "${{ matrix.sqlalchemy }}" "pyodbc>=5.0" pytest
+          python -m pip install ${{ matrix.pip-pre }} "${{ matrix.sqlalchemy }}" "pyodbc>=5.0" pytest
+
+      - name: Show SQLAlchemy version
+        if: ${{ env.INFORMIX_SQLALCHEMY_URL != '' }}
+        run: python -c "import sqlalchemy; print(sqlalchemy.__version__)"
 
       - name: Run package integration tests
         if: ${{ env.INFORMIX_SQLALCHEMY_URL != '' }}
-        run: python -m pytest -m "requires_informix and not legacy_ifxpy"
+        run: python -m pytest -m "requires_informix and not legacy_ifxpy" -W error
 
       - name: Run official SQLAlchemy suite
         if: ${{ env.INFORMIX_SQLALCHEMY_URL != '' }}
-        run: SQLALCHEMY_SUITE_JUNIT=sqlalchemy-suite.xml python run_tests.py
+        run: SQLALCHEMY_SUITE_JUNIT=sqlalchemy-suite-${{ matrix.python-version }}.xml python run_tests.py
 
-  integration-prerelease:
-    name: Informix integration prerelease (py${{ matrix.python-version }}, ${{ matrix.sqlalchemy }})
+  package:
+    name: Package metadata
     runs-on: ubuntu-latest
-    continue-on-error: true
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.12", "3.13"]
-        sqlalchemy:
-          - "SQLAlchemy>=2.1,<2.2"
-    env:
-      INFORMIX_SQLALCHEMY_URL: ${{ secrets.INFORMIX_SQLALCHEMY_URL }}
-      INFORMIX_SQLALCHEMY_SUITE_URL: ${{ secrets.INFORMIX_SQLALCHEMY_SUITE_URL || secrets.INFORMIX_SQLALCHEMY_URL }}
-
     steps:
-      - name: Skip when no Informix URL is configured
-        if: ${{ env.INFORMIX_SQLALCHEMY_URL == '' }}
-        run: echo "INFORMIX_SQLALCHEMY_URL is not configured; skipping integration prerelease layer."
-
       - uses: actions/checkout@v4
-        if: ${{ env.INFORMIX_SQLALCHEMY_URL != '' }}
 
       - uses: actions/setup-python@v5
-        if: ${{ env.INFORMIX_SQLALCHEMY_URL != '' }}
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
 
-      - name: Install package
-        if: ${{ env.INFORMIX_SQLALCHEMY_URL != '' }}
+      - name: Build package
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e . --no-deps
-          python -m pip install --pre "${{ matrix.sqlalchemy }}" "pyodbc>=5.0" pytest
-
-      - name: Run package integration tests
-        if: ${{ env.INFORMIX_SQLALCHEMY_URL != '' }}
-        run: python -m pytest -m "requires_informix and not legacy_ifxpy"
-
-      - name: Run official SQLAlchemy suite
-        if: ${{ env.INFORMIX_SQLALCHEMY_URL != '' }}
-        run: SQLALCHEMY_SUITE_JUNIT=sqlalchemy-suite-prerelease.xml python run_tests.py
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check dist/*

@@ -23,9 +23,18 @@ def test_pyproject_uses_readme_md_as_package_description():
     assert 'readme = "README.md"' in contents
 
 
-def test_pyproject_sqlalchemy_range_is_stable_20_only():
+def test_pyproject_sqlalchemy_range_supports_20_and_21():
     contents = _pyproject_text()
 
-    assert '"SQLAlchemy>=2.0,<2.1"' in contents
+    assert '"SQLAlchemy>=2.0.45,<2.2"' in contents
+    assert '"SQLAlchemy>=2.0.20,<2.2"' not in contents
     assert '"SQLAlchemy>=2.0,<2.2"' not in contents
+    assert '"SQLAlchemy>=2.0.45,<2.1"' not in contents
     assert '"SQLAlchemy>=2.0,<2.3"' not in contents
+
+
+def test_pyproject_does_not_pin_sqlalchemy_beta():
+    contents = _pyproject_text()
+
+    assert "SQLAlchemy==2.1.0b2" not in contents
+    assert "--pre" not in contents

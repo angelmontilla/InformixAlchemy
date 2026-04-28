@@ -4,16 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "IfxAlchemy"
-version = "1.0.2"
+version = "1.1.0"
 description = "Informix dialect for SQLAlchemy using pyodbc"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
     { name = "Angel Montilla" },
 ]
-license = { file = "LICENSE" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 dependencies = [
-    "SQLAlchemy>=2.0,<2.1",
+    "SQLAlchemy>=2.0.45,<2.2",
     "pyodbc>=5.0",
 ]
 
