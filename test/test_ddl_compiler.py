@@ -118,7 +118,7 @@ def test_constraint_backing_index_appends_exclude_null_keys(dialect):
         Column("name", String(50)),
     )
     index = Index("ix_sa_compile_unique_name", table.c.name, unique=True)
-    index.uConstraint_as_index = True
+    index.info["informix_unique_constraint_as_index"] = True
 
     compiled = str(CreateIndex(index).compile(dialect=dialect))
     upper = _upper_sql(compiled)

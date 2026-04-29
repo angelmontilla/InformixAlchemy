@@ -1123,15 +1123,37 @@ class IfxReflector(BaseReflector):
                 names.extend(getter(connection, schema=schema, **kw))
 
     def _filtered_unique_names(self, names, filter_names):
-        normalized_filters = self._normalize_filter_names(filter_names)
-        if normalized_filters:
-            names = [
-                name for name in names
-                if name in normalized_filters
-                or self.normalize_name(name) in normalized_filters
-                or self.denormalize_name(name) in normalized_filters
-            ]
-        return list(dict.fromkeys(names))
+        if not filter_names:
+            return list(dict.fromkeys(names))
+
+        filtered_names = []
+        for name in names:
+            reflected_name = self._matched_filter_name(name, filter_names)
+            if reflected_name is not None:
+                filtered_names.append(reflected_name)
+        return list(dict.fromkeys(filtered_names))
+
+    def _matched_filter_name(self, name, filter_names):
+        name_variants = {
+            name,
+            self.normalize_name(name),
+            self.denormalize_name(name),
+        }
+
+        for filter_name in filter_names:
+            filter_variants = {
+                self.normalize_name(filter_name),
+                self.denormalize_name(filter_name),
+                str(filter_name),
+            }
+            if name_variants.isdisjoint(filter_variants):
+                continue
+
+            if getattr(filter_name, "quote", None) is True:
+                return quoted_name(str(filter_name), True)
+            return name
+
+        return None
 
     def _table_names_for_multi(
         self,

@@ -45,6 +45,7 @@ _IFX_LASTROWID_DBINFO_BY_TYPE = {
     "BIGSERIAL": "bigserial",
     "SERIAL8": "serial8",
 }
+_IFX_UNIQUE_CONSTRAINT_AS_INDEX = "informix_unique_constraint_as_index"
 
 # as documented from:
 RESERVED_WORDS = {
@@ -532,7 +533,11 @@ class IfxCompiler(compiler.SQLCompiler):
 
         adapter = sql_util.ClauseAdapter(translated)
         translated_order_by = [
-            adapter.traverse(elem) for elem in order_by_clauses
+            elem
+            for elem in (
+                adapter.traverse(elem) for elem in order_by_clauses
+            )
+            if elem is not None
         ]
 
         return sql.select(
@@ -672,7 +677,10 @@ class IfxCompiler(compiler.SQLCompiler):
             sqla_compat.get_offset_clause(select) is None
         ):
             limit_expression = self._row_limit_expression(select, limit_clause)
-            text += "FIRST %s " % self.process(limit_expression, **kwargs)
+            if limit_expression is not None:
+                text += "FIRST %s " % self.process(
+                    limit_expression, **kwargs
+                )
 
         distinct = sqla_compat.get_distinct(select)
         if isinstance(distinct, str):
@@ -800,6 +808,50 @@ class IfxDDLCompiler(compiler.DDLCompiler):
         text += self.define_constraint_deferrability(constraint)
         return text
 
+    def _mark_unique_constraint_as_index(self, schema_item):
+        schema_item.info[_IFX_UNIQUE_CONSTRAINT_AS_INDEX] = True
+
+    def _is_unique_constraint_as_index(self, schema_item):
+        return bool(
+            getattr(schema_item, "info", {}).get(
+                _IFX_UNIQUE_CONSTRAINT_AS_INDEX
+            )
+        )
+
+    def _has_nullable_column(self, constraint):
+        return any(column.nullable for column in constraint)
+
+    def _should_use_nullable_unique_index(self, constraint):
+        return (
+            self._is_nullable_unique_constraint_supported(self.dialect)
+            and isinstance(constraint, sa_schema.UniqueConstraint)
+            and self._has_nullable_column(constraint)
+        )
+
+    def _unique_index_name(self, constraint, prefix):
+        if isinstance(constraint.name, str) and constraint.name:
+            return constraint.name
+
+        return "%s_%s_%s" % (
+            prefix,
+            self.preparer.format_table(constraint.table),
+            "_".join(column.name for column in constraint),
+        )
+
+    def _create_unique_index_for_constraint(self, constraint, prefix):
+        index = sa_schema.Index(
+            self._unique_index_name(constraint, prefix),
+            *constraint
+        )
+        index.unique = True
+        self._mark_unique_constraint_as_index(index)
+        return index
+
+    def _defer_unique_constraint_to_index(self, constraint, prefix):
+        setattr(constraint, "use_alter", True)
+        self._mark_unique_constraint_as_index(constraint)
+        return self._create_unique_index_for_constraint(constraint, prefix)
+
     def visit_unique_constraint(self, constraint, **kw):
         if len(constraint) == 0:
             return ""
@@ -833,18 +885,15 @@ class IfxDDLCompiler(compiler.DDLCompiler):
             const = ""
         elif isinstance(constraint, sa_schema.UniqueConstraint):
             qual = "UNIQUE "
-            if self._is_nullable_unique_constraint_supported(self.dialect):
-                for column in constraint:
-                    if column.nullable:
-                        constraint.uConstraint_as_index = True
-                if getattr(constraint, 'uConstraint_as_index', None):
-                    qual = "INDEX "
+            if self._should_use_nullable_unique_index(constraint):
+                self._mark_unique_constraint_as_index(constraint)
+                qual = "INDEX "
             const = self.preparer.format_constraint(constraint)
         else:
             qual = ""
             const = self.preparer.format_constraint(constraint)
 
-        if hasattr(constraint, 'uConstraint_as_index') and constraint.uConstraint_as_index:
+        if self._is_unique_constraint_as_index(constraint):
             return "DROP %s%s" % \
                                 (qual, const)
         return "ALTER TABLE %s DROP %s%s" % \
@@ -852,22 +901,10 @@ class IfxDDLCompiler(compiler.DDLCompiler):
                                 qual, const)
 
     def create_table_constraints(self, table, **kw):
-        if self._is_nullable_unique_constraint_supported(self.dialect):
-            for constraint in sqla_compat.get_table_sorted_constraints(table):
-                if isinstance(constraint, sa_schema.UniqueConstraint):
-                    for column in constraint:
-                        if column.nullable:
-                            constraint.use_alter = True
-                            constraint.uConstraint_as_index = True
-                            break
-                    if getattr(constraint, 'uConstraint_as_index', None):
-                        if not constraint.name:
-                            index_name = "%s_%s_%s" % ('ukey', self.preparer.format_table(constraint.table), '_'.join(column.name for column in constraint))
-                        else:
-                            index_name = constraint.name
-                        index = sa_schema.Index(index_name, *constraint)
-                        index.unique = True
-                        index.uConstraint_as_index = True
+        for constraint in sqla_compat.get_table_sorted_constraints(table):
+            if self._should_use_nullable_unique_index(constraint):
+                self._defer_unique_constraint_to_index(constraint, "ukey")
+
         result = super( IfxDDLCompiler, self ).create_table_constraints(table, **kw)
         return result
 
@@ -880,27 +917,17 @@ class IfxDDLCompiler(compiler.DDLCompiler):
             include_table_schema=include_table_schema,
             **kw
         )
-        if getattr(create.element, 'uConstraint_as_index', None):
+        if self._is_unique_constraint_as_index(create.element):
             sql += ' EXCLUDE NULL KEYS'
         return sql
 
     def visit_add_constraint(self, create, **kw):
-        if self._is_nullable_unique_constraint_supported(self.dialect):
-            if isinstance(create.element, sa_schema.UniqueConstraint):
-                for column in create.element:
-                    if column.nullable:
-                        create.element.uConstraint_as_index = True
-                        break
-                if getattr(create.element, 'uConstraint_as_index', None):
-                    if not create.element.name:
-                        index_name = "%s_%s_%s" % ('uk_index', self.preparer.format_table(create.element.table), '_'.join(column.name for column in create.element))
-                    else:
-                        index_name = create.element.name
-                    index = sa_schema.Index(index_name, *create.element)
-                    index.unique = True
-                    index.uConstraint_as_index = True
-                    sql = self.visit_create_index(sa_schema.CreateIndex(index))
-                    return sql
+        if self._should_use_nullable_unique_index(create.element):
+            index = self._defer_unique_constraint_to_index(
+                create.element, "uk_index"
+            )
+            return self.visit_create_index(sa_schema.CreateIndex(index))
+
         sql = "ALTER TABLE %s ADD CONSTRAINT %s" % (
             self.preparer.format_table(create.element.table),
             self.process(create.element),
@@ -962,33 +989,38 @@ class _SelectLastRowIDMixin(object):
         self._select_lastrowid = False
         self._lastrowid_query = None
 
-        if self.isinsert:
+        if getattr(self, "isinsert", False):
             tbl = self._get_lastrowid_dml_table()
             if tbl is None:
                 return
 
             seq_column = sqla_compat.get_table_autoincrement_column(tbl)
             insert_has_sequence = seq_column is not None
+            compiled_parameters = getattr(self, "compiled_parameters", None)
             compiled_params = (
-                self.compiled_parameters[0] if self.compiled_parameters else {}
+                compiled_parameters[0] if compiled_parameters else {}
             )
             explicit_pk_value = (
                 seq_column is not None
                 and compiled_params.get(seq_column.key) is not None
             )
+            compiled = getattr(self, "compiled", None)
 
             self._select_lastrowid = insert_has_sequence and \
                                         not explicit_pk_value and \
                                         not self._ifx_dml_returns_rows() and \
-                                        not self.compiled.inline and \
-                                        not self.executemany
+                                        not getattr(compiled, "inline", False) and \
+                                        not getattr(self, "executemany", False)
             if self._select_lastrowid:
                 self._lastrowid_query = _get_ifx_lastrowid_query(seq_column)
 
     def post_exec(self):
         if self._select_lastrowid and self._lastrowid_query:
-            self.cursor.execute(self._lastrowid_query)
-            row = self.cursor.fetchone()
+            cursor = getattr(self, "cursor", None)
+            if cursor is None:
+                return
+            cursor.execute(self._lastrowid_query)
+            row = cursor.fetchone()
             if row is None:
                 return
             if row[0] is not None:
