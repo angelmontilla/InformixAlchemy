@@ -47,8 +47,8 @@ _IFX_LASTROWID_DBINFO_BY_TYPE = {
 }
 
 # as documented from:
-RESERVED_WORDS = set(
-   ['activate', 'disallow', 'locale', 'result', 'add', 'disconnect', 'localtime',
+RESERVED_WORDS = {
+    'activate', 'disallow', 'locale', 'result', 'add', 'disconnect', 'localtime',
     'result_set_locator', 'after', 'distinct', 'localtimestamp', 'return', 'alias',
     'do', 'locator', 'returns', 'all', 'double', 'locators', 'revoke', 'allocate', 'drop',
     'lock', 'right', 'allow', 'dssize', 'lockmax', 'rollback', 'alter', 'dynamic',
@@ -115,10 +115,10 @@ RESERVED_WORDS = set(
     'unnest', 'element', 'percentile_disc', 'upper', 'exec', 'power', 'var_pop', 'exp',
     'real', 'var_samp', 'false', 'recursive', 'varchar', 'filter', 'ref', 'varying',
     'float', 'regr_avgx', 'width_bucket', 'floor', 'regr_avgy', 'window', 'fusion',
-    'regr_count', 'within', 'asc'])
+    'regr_count', 'within', 'asc'}
 
 
-class _IFX_Boolean(sa_types.Boolean):
+class _IFXBoolean(sa_types.Boolean):
 
     def result_processor(self, dialect, coltype):
         def process(value):
@@ -139,7 +139,7 @@ class _IFX_Boolean(sa_types.Boolean):
         return process
 
 
-class _IFX_Date(sa_types.Date):
+class _IFXDate(sa_types.Date):
 
     def result_processor(self, dialect, coltype):
         def process(value):
@@ -245,8 +245,8 @@ def _get_ifx_lastrowid_query(column):
 
 
 colspecs = {
-    sa_types.Boolean: _IFX_Boolean,
-    sa_types.Date: _IFX_Date
+    sa_types.Boolean: _IFXBoolean,
+    sa_types.Date: _IFXDate
 }
 
 ischema_names = {
@@ -276,64 +276,98 @@ ischema_names = {
     'VARGRAPHIC': VARGRAPHIC,
     'LONGVARGRAPHIC': LONGVARGRAPHIC,
     'DBCLOB': DBCLOB,
-    'BOOLEAN': _IFX_Boolean,
+    'BOOLEAN': _IFXBoolean,
     'BYTE': sa_types.LargeBinary,
     'TEXT': sa_types.Text,
     'LVARCHAR': VARCHAR,
 }
 
 
+_IFX_TYPE_VISITOR_ALIASES = {
+    "visit_TIMESTAMP": "visit_timestamp",
+    "visit_DATE": "visit_date",
+    "visit_TIME": "visit_time",
+    "visit_DATETIME": "visit_datetime",
+    "visit_SMALLINT": "visit_smallint",
+    "visit_INT": "visit_int",
+    "visit_BIGINT": "visit_bigint",
+    "visit_SERIAL": "visit_serial",
+    "visit_SERIAL8": "visit_serial8",
+    "visit_BIGSERIAL": "visit_bigserial",
+    "visit_FLOAT": "visit_float",
+    "visit_DOUBLE": "visit_double",
+    "visit_XML": "visit_xml",
+    "visit_CLOB": "visit_clob",
+    "visit_BLOB": "visit_blob",
+    "visit_DBCLOB": "visit_dbclob",
+    "visit_VARCHAR": "visit_varchar",
+    "visit_LONGVARCHAR": "visit_longvarchar",
+    "visit_VARGRAPHIC": "visit_vargraphic",
+    "visit_LONGVARGRAPHIC": "visit_longvargraphic",
+    "visit_CHAR": "visit_char",
+    "visit_GRAPHIC": "visit_graphic",
+    "visit_DECIMAL": "visit_decimal",
+    "visit_TEXT": "visit_text",
+}
+
+
 class IfxTypeCompiler(compiler.GenericTypeCompiler):
 
-    def visit_TIMESTAMP(self, type_):
+    def __getattr__(self, name):
+        alias = _IFX_TYPE_VISITOR_ALIASES.get(name)
+        if alias is not None:
+            return getattr(self, alias)
+        raise AttributeError(name)
+
+    def visit_timestamp(self, type_):
         return "TIMESTAMP"
 
-    def visit_DATE(self, type_):
+    def visit_date(self, type_):
         return "DATE"
 
-    def visit_TIME(self, type_):
+    def visit_time(self, type_):
         return "TIME"
 
-    def visit_DATETIME(self, type_):
+    def visit_datetime(self, type_):
         return "DATETIME YEAR TO SECOND"
 
-    def visit_SMALLINT(self, type_):
+    def visit_smallint(self, type_):
         return "SMALLINT"
 
-    def visit_INT(self, type_):
+    def visit_int(self, type_):
         return "INTEGER"
 
-    def visit_BIGINT(self, type_):
+    def visit_bigint(self, type_):
         return "BIGINT"
 
-    def visit_SERIAL(self, type_):
+    def visit_serial(self, type_):
         return "SERIAL"
 
-    def visit_SERIAL8(self, type_):
+    def visit_serial8(self, type_):
         return "SERIAL8"
 
-    def visit_BIGSERIAL(self, type_):
+    def visit_bigserial(self, type_):
         return "BIGSERIAL"
 
-    def visit_FLOAT(self, type_):
+    def visit_float(self, type_):
         return "FLOAT" if type_.precision is None else \
                 "FLOAT(%(precision)s)" % {'precision': type_.precision}
 
-    def visit_DOUBLE(self, type_):
+    def visit_double(self, type_):
         return "DOUBLE"
 
-    def visit_XML(self, type_):
+    def visit_xml(self, type_):
         return "XML"
 
-    def visit_CLOB(self, type_):
+    def visit_clob(self, type_):
         return "CLOB"
 
-    def visit_BLOB(self, type_):
+    def visit_blob(self, type_):
         # Informix accepts BLOB in DDL, while the legacy BLOB(1M) form
         # raises -201 on the target server used by the SQLAlchemy suite.
         return "BLOB"
 
-    def visit_DBCLOB(self, type_):
+    def visit_dbclob(self, type_):
         return "DBCLOB"
 
     def _require_length(self, type_, type_name):
@@ -343,29 +377,29 @@ class IfxTypeCompiler(compiler.GenericTypeCompiler):
             )
         return type_.length
 
-    def visit_VARCHAR(self, type_):
+    def visit_varchar(self, type_):
         length = self._require_length(type_, "VARCHAR")
         return "VARCHAR(%(length)s)" % {"length": length}
 
-    def visit_LONGVARCHAR(self, type_):
+    def visit_longvarchar(self, type_):
         return "LONG VARCHAR"
 
-    def visit_VARGRAPHIC(self, type_):
+    def visit_vargraphic(self, type_):
         length = self._require_length(type_, "VARGRAPHIC")
         return "VARGRAPHIC(%(length)s)" % {"length": length}
 
-    def visit_LONGVARGRAPHIC(self, type_):
+    def visit_longvargraphic(self, type_):
         return "LONG VARGRAPHIC"
 
-    def visit_CHAR(self, type_):
+    def visit_char(self, type_):
         return "CHAR" if type_.length in (None, 0) else \
                 "CHAR(%(length)s)" % {'length': type_.length}
 
-    def visit_GRAPHIC(self, type_):
+    def visit_graphic(self, type_):
         return "GRAPHIC" if type_.length in (None, 0) else \
                 "GRAPHIC(%(length)s)" % {'length': type_.length}
 
-    def visit_DECIMAL(self, type_):
+    def visit_decimal(self, type_):
         if not type_.precision:
             return "DECIMAL(31, 0)"
         elif not type_.scale:
@@ -375,37 +409,25 @@ class IfxTypeCompiler(compiler.GenericTypeCompiler):
                             'precision': type_.precision, 'scale': type_.scale}
 
     def visit_numeric(self, type_):
-        return self.visit_DECIMAL(type_)
-
-    def visit_datetime(self, type_):
-        return self.visit_DATETIME(type_)
-
-    def visit_date(self, type_):
-        return self.visit_DATE(type_)
-
-    def visit_time(self, type_):
-        return self.visit_TIME(type_)
+        return self.visit_decimal(type_)
 
     def visit_integer(self, type_):
-        return self.visit_INT(type_)
+        return self.visit_int(type_)
 
     def visit_boolean(self, type_):
-        return self.visit_SMALLINT(type_)
-
-    def visit_float(self, type_):
-        return self.visit_FLOAT(type_)
+        return self.visit_smallint(type_)
 
     def visit_unicode(self, type_):
-        return self.visit_VARGRAPHIC(type_)
+        return self.visit_vargraphic(type_)
 
     def visit_unicode_text(self, type_):
-        return self.visit_LONGVARGRAPHIC(type_)
+        return self.visit_longvargraphic(type_)
 
     def visit_string(self, type_):
-        return self.visit_VARCHAR(type_)
+        return self.visit_varchar(type_)
 
-    def visit_TEXT(self, type_):
-        return self.visit_CLOB(type_)
+    def visit_text(self, type_):
+        return self.visit_clob(type_)
 
     def visit_large_binary(self, type_):
         return "BYTE"
@@ -481,40 +503,23 @@ class IfxCompiler(compiler.SQLCompiler):
 
         return sqla_compat.get_limit_clause(select)
 
-    def _ifx_limit_fetch_value(self, select, clause):
-        if clause is None:
-            return None
-
-        if sqla_compat.get_fetch_clause(select) is clause:
-            return sqla_compat.offset_or_limit_clause_asint(
-                select, clause, "fetch"
-            )
-
-        return sqla_compat.get_limit_value(select)
-
-    def _row_limit_expression(self, select, clause, value):
+    def _row_limit_expression(self, select, clause):
         if clause is None:
             return None
 
         if sqla_compat.simple_int_clause(select, clause):
-            return sql.literal_column(str(value))
+            return clause.render_literal_execute()
 
         return clause
 
     def _row_limit_upper_bound(self, select, limit_clause, offset_clause):
-        limit_value = self._ifx_limit_fetch_value(select, limit_clause)
-        offset_value = sqla_compat.get_offset_value(select)
+        limit_expression = self._row_limit_expression(select, limit_clause)
+        offset_expression = self._row_limit_expression(select, offset_clause)
 
-        if (
-            sqla_compat.simple_int_clause(select, limit_clause)
-            and sqla_compat.simple_int_clause(select, offset_clause)
-        ):
-            return sql.literal_column(str(limit_value + offset_value))
+        if offset_expression is None:
+            return limit_expression
 
-        return (
-            self._row_limit_expression(select, limit_clause, limit_value)
-            + self._row_limit_expression(select, offset_clause, offset_value)
-        )
+        return limit_expression + offset_expression
 
     def _translate_distinct_offset_select(self, select, order_by_clauses):
         translated = (
@@ -581,18 +586,9 @@ class IfxCompiler(compiler.SQLCompiler):
             .order_by(row_number_col)
         )
 
-        if not (
-            sqla_compat.simple_int_clause(select, offset_clause)
-            and sqla_compat.get_offset_value(select) == 0
-        ):
-            paged = paged.where(
-                row_number_col
-                > self._row_limit_expression(
-                    select,
-                    offset_clause,
-                    sqla_compat.get_offset_value(select),
-                )
-            )
+        paged = paged.where(
+            row_number_col > self._row_limit_expression(select, offset_clause)
+        )
 
         if limit_clause is not None:
             paged = paged.where(
@@ -644,12 +640,6 @@ class IfxCompiler(compiler.SQLCompiler):
                 add_to_result_map=add_to_result_map,
                 **kwargs
             )
-    # TODO: this is wrong but need to know what Informix is expecting here
-    #    if func.name.upper() == "LENGTH":
-    #        return "LENGTH('%s')" % func.compile().params[func.name + '_1']
-    #    else:
-    #        return compiler.SQLCompiler.visit_function(self, func, **kwargs)
-
 
     def visit_cast(self, cast, **kw):
         type_ = cast.typeclause.type
@@ -676,16 +666,13 @@ class IfxCompiler(compiler.SQLCompiler):
     def get_select_precolumns(self, select, **kwargs):
         text = ""
         limit_clause = self._ifx_limit_fetch_clause(select)
-        limit_value = self._ifx_limit_fetch_value(select, limit_clause)
 
         # Informix: SELECT FIRST n DISTINCT ...
         if (limit_clause is not None) and (
             sqla_compat.get_offset_clause(select) is None
         ):
-            if sqla_compat.simple_int_clause(select, limit_clause):
-                text += "FIRST %s " % limit_value
-            else:
-                text += "FIRST %s " % self.process(limit_clause, **kwargs)
+            limit_expression = self._row_limit_expression(select, limit_clause)
+            text += "FIRST %s " % self.process(limit_expression, **kwargs)
 
         distinct = sqla_compat.get_distinct(select)
         if isinstance(distinct, str):
@@ -878,7 +865,7 @@ class IfxDDLCompiler(compiler.DDLCompiler):
                             index_name = "%s_%s_%s" % ('ukey', self.preparer.format_table(constraint.table), '_'.join(column.name for column in constraint))
                         else:
                             index_name = constraint.name
-                        index = sa_schema.Index(index_name, *(column for column in constraint))
+                        index = sa_schema.Index(index_name, *constraint)
                         index.unique = True
                         index.uConstraint_as_index = True
         result = super( IfxDDLCompiler, self ).create_table_constraints(table, **kw)
@@ -909,7 +896,7 @@ class IfxDDLCompiler(compiler.DDLCompiler):
                         index_name = "%s_%s_%s" % ('uk_index', self.preparer.format_table(create.element.table), '_'.join(column.name for column in create.element))
                     else:
                         index_name = create.element.name
-                    index = sa_schema.Index(index_name, *(column for column in create.element))
+                    index = sa_schema.Index(index_name, *create.element)
                     index.unique = True
                     index.uConstraint_as_index = True
                     sql = self.visit_create_index(sa_schema.CreateIndex(index))
@@ -1042,10 +1029,7 @@ class IfxDialect(default.DefaultDialect):
 
     supports_default_values = False
     supports_empty_insert = False
-    # Keep disabled until the compiler's LIMIT/OFFSET/FETCH rewrites and
-    # Informix-specific DDL paths are validated with SQLAlchemy's statement
-    # cache test coverage.
-    supports_statement_cache = False
+    supports_statement_cache = True
 
     two_phase_transactions = False
     savepoints = True

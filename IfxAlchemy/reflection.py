@@ -86,7 +86,12 @@ class BaseReflector(object):
         default_schema_name = connection.exec_driver_sql(
                     'SELECT USER FROM systables WHERE tabid = 1').scalar()
         if default_schema_name is not None:
-            default_schema_name = self._coerce_name(default_schema_name).strip()
+            coerced_schema_name = self._coerce_name(default_schema_name)
+            default_schema_name = (
+                coerced_schema_name.strip()
+                if coerced_schema_name is not None
+                else None
+            )
         return self.normalize_name(default_schema_name)
 
     @property
@@ -108,6 +113,7 @@ class IfxReflector(BaseReflector):
     ischema = MetaData()
 
     _INDEX_PART_COUNT = 16
+    _MISSING = object()
 
     # Informix syscolumns.coltype base codes
     _COLTYPE_CODE_MAP = {
@@ -142,6 +148,24 @@ class IfxReflector(BaseReflector):
         "clob": "CLOB",
         "boolean": "BOOLEAN",
         "lvarchar": "LVARCHAR",
+    }
+
+    _CHAR_FALLBACK_TYPES = {"CHAR", "NCHAR"}
+    _VARCHAR_FALLBACK_TYPES = {"VARCHAR", "NVARCHAR", "LVARCHAR"}
+    _INTEGER_FALLBACK_TYPES = {"INTEGER", "SERIAL"}
+    _BIG_INTEGER_FALLBACK_TYPES = {"INT8", "SERIAL8", "BIGINT", "BIGSERIAL"}
+    _NUMERIC_FALLBACK_TYPES = {"DECIMAL", "NUMERIC", "MONEY"}
+    _SIMPLE_FALLBACK_FACTORIES = {
+        "SMALLINT": sa_types.SmallInteger,
+        "FLOAT": sa_types.Float,
+        "SMALLFLOAT": sa_types.Float,
+        "DATE": sa_types.Date,
+        "DATETIME": sa_types.DateTime,
+        "INTERVAL": sa_types.Interval,
+        "TEXT": sa_types.Text,
+        "BYTE": sa_types.LargeBinary,
+        "BOOLEAN": sa_types.Boolean,
+        "NULL": sa_types.NullType,
     }
 
     _DATETIME_QUALIFIERS = {
@@ -354,56 +378,142 @@ class IfxReflector(BaseReflector):
 
         return colnames, column_sorting
 
-    def _get_pk_columns_via_odbc(self, connection, table_name, schema=None):
-        dbapi_connection = getattr(connection.connection, "dbapi_connection", None)
+    def _dbapi_connection(self, connection):
+        raw_connection = getattr(connection, "connection", None)
+        if raw_connection is None:
+            return None
+        return getattr(raw_connection, "dbapi_connection", None)
+
+    def _close_cursor(self, cursor):
+        if cursor is None:
+            return
+
+        try:
+            cursor.close()
+        except Exception:
+            pass
+
+    def _fetch_odbc_rows(self, connection, method_name, kwargs):
+        dbapi_connection = self._dbapi_connection(connection)
         if dbapi_connection is None:
             return []
 
         cursor = None
         try:
             cursor = dbapi_connection.cursor()
-            if not hasattr(cursor, "primaryKeys"):
+            method = getattr(cursor, method_name, None)
+            if method is None:
                 return []
-
-            kwargs = {"table": table_name}
-            if schema is not None:
-                kwargs["schema"] = schema
-
-            rows = cursor.primaryKeys(**kwargs).fetchall()
+            return method(**kwargs).fetchall()
         except Exception:
             return []
         finally:
-            if cursor is not None:
-                try:
-                    cursor.close()
-                except Exception:
-                    pass
+            self._close_cursor(cursor)
 
-        if not rows:
-            return []
+    def _row_value(self, row, attr_names, index, default=_MISSING):
+        for attr_name in attr_names:
+            value = getattr(row, attr_name, None)
+            if value is not None:
+                return value
 
+        try:
+            return row[index]
+        except Exception:
+            if default is self._MISSING:
+                raise
+            return default
+
+    def _normalized_clean_name(self, value):
+        cleaned = self._clean_str(value)
+        if cleaned is None:
+            return None
+        return self.normalize_name(cleaned)
+
+    def _int_or_default(self, value, default):
+        try:
+            return int(value)
+        except Exception:
+            return default
+
+    def _odbc_primary_key_entry(self, row):
+        column_name = self._row_value(row, ("column_name", "COLUMN_NAME"), 3)
+        key_seq = self._row_value(row, ("key_seq", "KEY_SEQ"), 4)
+        clean_key_seq = self._clean_str(key_seq)
+        if clean_key_seq is None:
+            return None
+        return int(clean_key_seq), self._normalized_clean_name(column_name)
+
+    def _get_pk_columns_via_odbc(self, connection, table_name, schema=None):
+        kwargs = {"table": table_name}
+        if schema is not None:
+            kwargs["schema"] = schema
+
+        rows = self._fetch_odbc_rows(connection, "primaryKeys", kwargs)
         by_seq = []
         for row in rows:
             try:
-                key_seq = getattr(row, "key_seq", None)
-                if key_seq is None:
-                    key_seq = getattr(row, "KEY_SEQ", None)
-
-                column_name = getattr(row, "column_name", None)
-                if column_name is None:
-                    column_name = getattr(row, "COLUMN_NAME", None)
-
-                if column_name is None:
-                    column_name = row[3]
-                if key_seq is None:
-                    key_seq = row[4]
-
-                by_seq.append((int(key_seq), self.normalize_name(self._clean_str(column_name))))
+                pk_entry = self._odbc_primary_key_entry(row)
+                if pk_entry is not None:
+                    by_seq.append(pk_entry)
             except Exception:
                 continue
 
         by_seq.sort(key=lambda item: item[0])
         return [name for _, name in by_seq if name]
+
+    def _odbc_index_entry(self, row):
+        return (
+            self._row_value(row, ("index_name", "INDEX_NAME"), 5),
+            self._row_value(row, ("column_name", "COLUMN_NAME"), 8),
+            self._row_value(row, ("ordinal_position", "ORDINAL_POSITION"), 7),
+            self._row_value(row, ("non_unique", "NON_UNIQUE"), 3),
+        )
+
+    def _odbc_unique_filter_allows(self, raw_non_unique, unique_only):
+        if unique_only is True:
+            return not bool(raw_non_unique)
+        if unique_only is False:
+            return bool(raw_non_unique)
+        return True
+
+    def _group_odbc_index_columns(self, rows, unique_only):
+        grouped = {}
+
+        for row in rows:
+            try:
+                (
+                    raw_index_name,
+                    raw_column_name,
+                    raw_ordinal,
+                    raw_non_unique,
+                ) = self._odbc_index_entry(row)
+            except Exception:
+                continue
+
+            normalized_index_name = self._normalized_clean_name(raw_index_name)
+            column_name = self._normalized_clean_name(raw_column_name)
+            if not normalized_index_name or not column_name:
+                continue
+
+            if not self._odbc_unique_filter_allows(raw_non_unique, unique_only):
+                continue
+
+            ordinal = self._int_or_default(
+                raw_ordinal,
+                len(grouped.get(normalized_index_name, [])) + 1,
+            )
+            grouped.setdefault(normalized_index_name, []).append(
+                (ordinal, column_name)
+            )
+
+        return grouped
+
+    def _select_grouped_entries(self, grouped, wanted_name=None):
+        if wanted_name:
+            return grouped.get(wanted_name)
+        if len(grouped) == 1:
+            return next(iter(grouped.values()))
+        return None
 
     def _get_index_columns_via_odbc(
         self,
@@ -413,92 +523,62 @@ class IfxReflector(BaseReflector):
         index_name=None,
         unique_only=None,
     ):
-        dbapi_connection = getattr(connection.connection, "dbapi_connection", None)
-        if dbapi_connection is None:
-            return []
+        kwargs = {"table": table_name, "unique": bool(unique_only), "quick": True}
+        if schema is not None:
+            kwargs["schema"] = schema
 
-        cursor = None
-        try:
-            cursor = dbapi_connection.cursor()
-            if not hasattr(cursor, "statistics"):
-                return []
-
-            kwargs = {"table": table_name, "unique": bool(unique_only), "quick": True}
-            if schema is not None:
-                kwargs["schema"] = schema
-
-            rows = cursor.statistics(**kwargs).fetchall()
-        except Exception:
-            return []
-        finally:
-            if cursor is not None:
-                try:
-                    cursor.close()
-                except Exception:
-                    pass
-
-        grouped = {}
+        rows = self._fetch_odbc_rows(connection, "statistics", kwargs)
         wanted_name = self.normalize_name(self._clean_str(index_name)) if index_name else None
-
-        for row in rows:
-            try:
-                raw_index_name = getattr(row, "index_name", None)
-                if raw_index_name is None:
-                    raw_index_name = getattr(row, "INDEX_NAME", None)
-                if raw_index_name is None:
-                    raw_index_name = row[5]
-
-                raw_column_name = getattr(row, "column_name", None)
-                if raw_column_name is None:
-                    raw_column_name = getattr(row, "COLUMN_NAME", None)
-                if raw_column_name is None:
-                    raw_column_name = row[8]
-
-                raw_ordinal = getattr(row, "ordinal_position", None)
-                if raw_ordinal is None:
-                    raw_ordinal = getattr(row, "ORDINAL_POSITION", None)
-                if raw_ordinal is None:
-                    raw_ordinal = row[7]
-
-                raw_non_unique = getattr(row, "non_unique", None)
-                if raw_non_unique is None:
-                    raw_non_unique = getattr(row, "NON_UNIQUE", None)
-                if raw_non_unique is None:
-                    raw_non_unique = row[3]
-            except Exception:
-                continue
-
-            normalized_index_name = self.normalize_name(self._clean_str(raw_index_name))
-            column_name = self.normalize_name(self._clean_str(raw_column_name))
-            if not normalized_index_name or not column_name:
-                continue
-
-            if unique_only is True and bool(raw_non_unique):
-                continue
-            if unique_only is False and not bool(raw_non_unique):
-                continue
-
-            try:
-                ordinal = int(raw_ordinal)
-            except Exception:
-                ordinal = len(grouped.get(normalized_index_name, [])) + 1
-
-            grouped.setdefault(normalized_index_name, []).append((ordinal, column_name))
-
-        if not grouped:
-            return []
-
-        if wanted_name and wanted_name in grouped:
-            selected = grouped[wanted_name]
-        elif wanted_name:
-            return []
-        elif len(grouped) == 1:
-            selected = next(iter(grouped.values()))
-        else:
+        grouped = self._group_odbc_index_columns(rows, unique_only)
+        selected = self._select_grouped_entries(grouped, wanted_name)
+        if selected is None:
             return []
 
         selected.sort(key=lambda item: item[0])
         return [column_name for _, column_name in selected]
+
+    def _odbc_foreign_key_entry(self, row):
+        return (
+            self._row_value(row, ("fk_name", "FK_NAME"), 11),
+            self._row_value(row, ("key_seq", "KEY_SEQ"), 13),
+            self._row_value(row, ("fkcolumn_name", "FKCOLUMN_NAME"), 7),
+            self._row_value(row, ("pkcolumn_name", "PKCOLUMN_NAME"), 3),
+        )
+
+    def _group_odbc_foreign_key_columns(self, rows, wanted_name=None):
+        grouped = {}
+
+        for row in rows:
+            try:
+                (
+                    raw_fk_name,
+                    raw_key_seq,
+                    raw_fk_column,
+                    raw_pk_column,
+                ) = self._odbc_foreign_key_entry(row)
+            except Exception:
+                continue
+
+            normalized_fk_name = self._normalized_clean_name(raw_fk_name)
+            if wanted_name and normalized_fk_name != wanted_name:
+                continue
+
+            if not normalized_fk_name:
+                normalized_fk_name = "__unnamed_fk__"
+
+            key_seq = self._int_or_default(
+                raw_key_seq,
+                len(grouped.get(normalized_fk_name, [])) + 1,
+            )
+            grouped.setdefault(normalized_fk_name, []).append(
+                (
+                    key_seq,
+                    self._normalized_clean_name(raw_fk_column),
+                    self._normalized_clean_name(raw_pk_column),
+                )
+            )
+
+        return grouped
 
     def _get_foreign_key_columns_via_odbc(
         self,
@@ -507,91 +587,15 @@ class IfxReflector(BaseReflector):
         schema=None,
         fk_name=None,
     ):
-        dbapi_connection = getattr(connection.connection, "dbapi_connection", None)
-        if dbapi_connection is None:
-            return [], []
+        kwargs = {"foreignTable": table_name}
+        if schema is not None:
+            kwargs["foreignSchema"] = schema
 
-        cursor = None
-        try:
-            cursor = dbapi_connection.cursor()
-            if not hasattr(cursor, "foreignKeys"):
-                return [], []
-
-            kwargs = {"foreignTable": table_name}
-            if schema is not None:
-                kwargs["foreignSchema"] = schema
-
-            rows = cursor.foreignKeys(**kwargs).fetchall()
-        except Exception:
-            return [], []
-        finally:
-            if cursor is not None:
-                try:
-                    cursor.close()
-                except Exception:
-                    pass
-
+        rows = self._fetch_odbc_rows(connection, "foreignKeys", kwargs)
         wanted_name = self.normalize_name(self._clean_str(fk_name)) if fk_name else None
-        grouped = {}
-
-        for row in rows:
-            try:
-                raw_fk_name = getattr(row, "fk_name", None)
-                if raw_fk_name is None:
-                    raw_fk_name = getattr(row, "FK_NAME", None)
-                if raw_fk_name is None:
-                    raw_fk_name = row[11]
-
-                raw_key_seq = getattr(row, "key_seq", None)
-                if raw_key_seq is None:
-                    raw_key_seq = getattr(row, "KEY_SEQ", None)
-                if raw_key_seq is None:
-                    raw_key_seq = row[13]
-
-                raw_fk_column = getattr(row, "fkcolumn_name", None)
-                if raw_fk_column is None:
-                    raw_fk_column = getattr(row, "FKCOLUMN_NAME", None)
-                if raw_fk_column is None:
-                    raw_fk_column = row[7]
-
-                raw_pk_column = getattr(row, "pkcolumn_name", None)
-                if raw_pk_column is None:
-                    raw_pk_column = getattr(row, "PKCOLUMN_NAME", None)
-                if raw_pk_column is None:
-                    raw_pk_column = row[3]
-            except Exception:
-                continue
-
-            normalized_fk_name = self.normalize_name(self._clean_str(raw_fk_name))
-            if wanted_name and normalized_fk_name != wanted_name:
-                continue
-
-            if not normalized_fk_name:
-                normalized_fk_name = "__unnamed_fk__"
-
-            try:
-                key_seq = int(raw_key_seq)
-            except Exception:
-                key_seq = len(grouped.get(normalized_fk_name, [])) + 1
-
-            grouped.setdefault(normalized_fk_name, []).append(
-                (
-                    key_seq,
-                    self.normalize_name(self._clean_str(raw_fk_column)),
-                    self.normalize_name(self._clean_str(raw_pk_column)),
-                )
-            )
-
-        if not grouped:
-            return [], []
-
-        if wanted_name and wanted_name in grouped:
-            selected = grouped[wanted_name]
-        elif wanted_name:
-            return [], []
-        elif len(grouped) == 1:
-            selected = next(iter(grouped.values()))
-        else:
+        grouped = self._group_odbc_foreign_key_columns(rows, wanted_name)
+        selected = self._select_grouped_entries(grouped, wanted_name)
+        if selected is None:
             return [], []
 
         selected.sort(key=lambda item: item[0])
@@ -599,101 +603,100 @@ class IfxReflector(BaseReflector):
         referred_columns = [pk_col for _, _, pk_col in selected if pk_col]
         return constrained_columns, referred_columns
 
-    def _has_table_via_odbc(self, connection, table_name, schema=None):
-        dbapi_connection = getattr(connection.connection, "dbapi_connection", None)
-        if dbapi_connection is None:
-            return False
+    def _odbc_lookup_token(self, value):
+        cleaned = self._clean_str(value)
+        if cleaned is None:
+            return None
 
+        if getattr(value, "quote", None) is True:
+            return {
+                "lookup": cleaned,
+                "wanted": cleaned,
+                "quoted": True,
+            }
+
+        lookup = self._fold_unquoted_lookup_name(cleaned)
+        return {
+            "lookup": lookup,
+            "wanted": self._normalized_clean_name(lookup),
+            "quoted": False,
+        }
+
+    def _odbc_table_lookup(self, table_name, schema=None):
         cleaned_name = self._clean_str(table_name)
         if not cleaned_name:
+            return None
+
+        table_token = self._odbc_lookup_token(table_name)
+        if table_token is None:
+            return None
+
+        schema_token = (
+            self._odbc_lookup_token(schema) if schema is not None else None
+        )
+        return {
+            "table_lookup": table_token["lookup"],
+            "wanted_name": table_token["wanted"],
+            "table_quoted": table_token["quoted"],
+            "schema_lookup": (
+                schema_token["lookup"] if schema_token is not None else None
+            ),
+            "wanted_schema": (
+                schema_token["wanted"] if schema_token is not None else None
+            ),
+            "schema_quoted": (
+                schema_token["quoted"] if schema_token is not None else False
+            ),
+        }
+
+    def _odbc_table_rows(self, connection, lookup):
+        kwargs = {"table": lookup["table_lookup"]}
+        if lookup["schema_lookup"] is not None:
+            kwargs["schema"] = lookup["schema_lookup"]
+        return self._fetch_odbc_rows(connection, "tables", kwargs)
+
+    def _odbc_names_match(self, raw_value, wanted_value, quoted):
+        if quoted:
+            return raw_value == wanted_value
+        return self.normalize_name(raw_value) == wanted_value
+
+    def _odbc_table_row_matches(self, row, lookup):
+        raw_name = self._clean_str(
+            self._row_value(row, ("table_name", "TABLE_NAME"), 2, default=None)
+        )
+        if raw_name is None:
             return False
 
-        is_explicitly_quoted = getattr(table_name, "quote", None) is True
-        if is_explicitly_quoted:
-            metadata_lookup_name = cleaned_name
-            wanted_name = cleaned_name
-        else:
-            metadata_lookup_name = self._fold_unquoted_lookup_name(cleaned_name)
-            wanted_name = self.normalize_name(self._clean_str(metadata_lookup_name))
-
-        wanted_schema = None
-        metadata_lookup_schema = None
-        if schema is not None:
-            cleaned_schema = self._clean_str(schema)
-            if getattr(schema, "quote", None) is True:
-                metadata_lookup_schema = cleaned_schema
-                wanted_schema = cleaned_schema
-            else:
-                metadata_lookup_schema = self._fold_unquoted_lookup_name(cleaned_schema)
-                wanted_schema = self.normalize_name(self._clean_str(metadata_lookup_schema))
-
-        cursor = None
-        try:
-            cursor = dbapi_connection.cursor()
-            if not hasattr(cursor, "tables"):
-                return False
-
-            kwargs = {"table": metadata_lookup_name}
-            if metadata_lookup_schema is not None:
-                kwargs["schema"] = metadata_lookup_schema
-
-            rows = cursor.tables(**kwargs).fetchall()
-        except Exception:
+        if not self._odbc_names_match(
+            raw_name,
+            lookup["wanted_name"],
+            lookup["table_quoted"],
+        ):
             return False
-        finally:
-            if cursor is not None:
-                try:
-                    cursor.close()
-                except Exception:
-                    pass
 
-        for row in rows:
-            try:
-                raw_name = getattr(row, "table_name", None)
-                if raw_name is None:
-                    raw_name = getattr(row, "TABLE_NAME", None)
-                if raw_name is None:
-                    raw_name = row[2]
-            except Exception:
-                continue
-
-            raw_name = self._clean_str(raw_name)
-            if raw_name is None:
-                continue
-
-            if is_explicitly_quoted:
-                name_matches = raw_name == wanted_name
-            else:
-                name_matches = self.normalize_name(raw_name) == wanted_name
-
-            if not name_matches:
-                continue
-
-            if wanted_schema is not None:
-                try:
-                    raw_schema = getattr(row, "table_schem", None)
-                    if raw_schema is None:
-                        raw_schema = getattr(row, "TABLE_SCHEM", None)
-                    if raw_schema is None:
-                        raw_schema = row[1]
-                except Exception:
-                    raw_schema = None
-
-                raw_schema = self._clean_str(raw_schema)
-                if raw_schema is None:
-                    continue
-
-                if getattr(schema, "quote", None) is True:
-                    schema_matches = raw_schema == wanted_schema
-                else:
-                    schema_matches = self.normalize_name(raw_schema) == wanted_schema
-
-                if not schema_matches:
-                    continue
-
+        if lookup["wanted_schema"] is None:
             return True
 
-        return False
+        raw_schema = self._clean_str(
+            self._row_value(row, ("table_schem", "TABLE_SCHEM"), 1, default=None)
+        )
+        if raw_schema is None:
+            return False
+
+        return self._odbc_names_match(
+            raw_schema,
+            lookup["wanted_schema"],
+            lookup["schema_quoted"],
+        )
+
+    def _has_table_via_odbc(self, connection, table_name, schema=None):
+        lookup = self._odbc_table_lookup(table_name, schema=schema)
+        if lookup is None:
+            return False
+        return any(
+            self._odbc_table_row_matches(row, lookup)
+            for row in self._odbc_table_rows(connection, lookup)
+        )
 
     def _render_probe_identifier(self, schema_token, table_token, quoted):
         table_identifier = (
@@ -742,70 +745,73 @@ class IfxReflector(BaseReflector):
         module_name = type(error).__module__.split(".", 1)[0].lower()
         return module_name in {"pyodbc", "ifxpy", "ifxpydbi"}
 
-    def _has_table_via_sql_probe(self, connection, table_name, schema=None):
+    def _iter_probe_identifiers(self, table_name, schema=None):
         name_candidates = self._probe_table_candidates(table_name)
         if not name_candidates:
-            return False
+            return
 
         schema_candidates = self._probe_schema_candidates(schema)
 
         for schema_token in schema_candidates:
             for table_token, quoted in name_candidates:
-                from_token = self._render_probe_identifier(
+                yield self._render_probe_identifier(
                     schema_token,
                     table_token,
                     quoted,
                 )
-                sql_text = "SELECT COUNT(*) FROM %s" % from_token
 
-                try:
-                    connection.exec_driver_sql(sql_text).scalar()
-                    return True
-                except exc.DBAPIError:
-                    continue
+    def _has_table_via_sql_probe(self, connection, table_name, schema=None):
+        for from_token in self._iter_probe_identifiers(table_name, schema=schema):
+            sql_text = "SELECT COUNT(*) FROM %s" % from_token
+
+            try:
+                connection.exec_driver_sql(sql_text).scalar()
+                return True
+            except exc.DBAPIError:
+                continue
 
         return False
 
-    def _has_table_via_dbapi_probe(self, connection, table_name, schema=None):
-        dbapi_connection = getattr(connection.connection, "dbapi_connection", None)
+    def _open_dbapi_cursor(self, connection):
+        dbapi_connection = self._dbapi_connection(connection)
         if dbapi_connection is None:
-            return False
+            return None
+        return dbapi_connection.cursor()
 
-        name_candidates = self._probe_table_candidates(table_name)
-        if not name_candidates:
-            return False
-
-        schema_candidates = self._probe_schema_candidates(schema)
-
-        cursor = None
+    def _execute_dbapi_probe(self, cursor, from_token):
+        sql_text = "SELECT COUNT(*) FROM %s" % from_token
         try:
-            cursor = dbapi_connection.cursor()
-            for schema_token in schema_candidates:
-                for table_token, quoted in name_candidates:
-                    from_token = self._render_probe_identifier(
-                        schema_token,
-                        table_token,
-                        quoted,
-                    )
-                    sql_text = "SELECT COUNT(*) FROM %s" % from_token
-                    try:
-                        cursor.execute(sql_text)
-                        cursor.fetchone()
-                        return True
-                    except Exception as err:
-                        if not self._is_dbapi_probe_error(err):
-                            raise
-                        continue
+            cursor.execute(sql_text)
+            cursor.fetchone()
+            return True
         except Exception as err:
             if not self._is_dbapi_probe_error(err):
                 raise
             return False
+
+    def _has_table_via_dbapi_probe(self, connection, table_name, schema=None):
+        probe_identifiers = tuple(
+            self._iter_probe_identifiers(table_name, schema=schema)
+        )
+        if not probe_identifiers:
+            return False
+
+        try:
+            cursor = self._open_dbapi_cursor(connection)
+        except Exception as err:
+            if not self._is_dbapi_probe_error(err):
+                raise
+            return False
+
+        if cursor is None:
+            return False
+
+        try:
+            for from_token in probe_identifiers:
+                if self._execute_dbapi_probe(cursor, from_token):
+                    return True
         finally:
-            if cursor is not None:
-                try:
-                    cursor.close()
-                except Exception:
-                    pass
+            self._close_cursor(cursor)
 
         return False
 
@@ -831,57 +837,144 @@ class IfxReflector(BaseReflector):
 
         return default_value
 
-    def _instantiate_ischema_type(self, type_name, *args):
-        entry = self.ischema_names.get(type_name)
+    def _instantiate_registered_type(self, type_name, args):
+        entry = self.ischema_names.get(type_name, self._MISSING)
+        if entry is self._MISSING or entry is None:
+            return self._MISSING
 
-        if entry is not None:
-            try:
-                if isinstance(entry, type):
-                    return entry(*args)
-                if callable(entry):
-                    return entry(*args)
-                return entry
-            except TypeError:
-                try:
-                    if isinstance(entry, type):
-                        return entry()
-                except Exception:
-                    pass
+        try:
+            if isinstance(entry, type) or callable(entry):
+                return entry(*args)
+            return entry
+        except TypeError:
+            return self._instantiate_registered_without_args(entry)
 
-        # Fallbacks genéricos
-        if type_name in ("CHAR", "NCHAR"):
+    def _instantiate_registered_without_args(self, entry):
+        if not isinstance(entry, type):
+            return self._MISSING
+
+        try:
+            return entry()
+        except Exception:
+            return self._MISSING
+
+    def _instantiate_fallback_type(self, type_name, args):
+        if type_name in self._CHAR_FALLBACK_TYPES:
             return sa_types.CHAR(args[0] if args else None)
-        if type_name in ("VARCHAR", "NVARCHAR", "LVARCHAR"):
+        if type_name in self._VARCHAR_FALLBACK_TYPES:
             return sa_types.VARCHAR(args[0] if args else None)
-        if type_name == "SMALLINT":
-            return sa_types.SmallInteger()
-        if type_name in ("INTEGER", "SERIAL"):
+        if type_name in self._INTEGER_FALLBACK_TYPES:
             return sa_types.Integer()
-        if type_name in ("INT8", "SERIAL8", "BIGINT", "BIGSERIAL"):
+        if type_name in self._BIG_INTEGER_FALLBACK_TYPES:
             return sa_types.BigInteger()
-        if type_name in ("DECIMAL", "NUMERIC", "MONEY"):
-            if len(args) >= 2:
-                return sa_types.Numeric(args[0], args[1])
-            return sa_types.Numeric()
-        if type_name in ("FLOAT", "SMALLFLOAT"):
-            return sa_types.Float()
-        if type_name == "DATE":
-            return sa_types.Date()
-        if type_name == "DATETIME":
-            return sa_types.DateTime()
-        if type_name == "INTERVAL":
-            return sa_types.Interval()
-        if type_name == "TEXT":
-            return sa_types.Text()
-        if type_name == "BYTE":
-            return sa_types.LargeBinary()
-        if type_name == "BOOLEAN":
-            return sa_types.Boolean()
-        if type_name == "NULL":
-            return sa_types.NullType()
+        if type_name in self._NUMERIC_FALLBACK_TYPES:
+            return self._instantiate_numeric_fallback(args)
+
+        factory = self._SIMPLE_FALLBACK_FACTORIES.get(type_name)
+        return factory() if factory is not None else self._MISSING
+
+    def _instantiate_numeric_fallback(self, args):
+        if len(args) >= 2:
+            return sa_types.Numeric(args[0], args[1])
+        return sa_types.Numeric()
+
+    def _instantiate_ischema_type(self, type_name, *args):
+        registered = self._instantiate_registered_type(type_name, args)
+        if registered is not self._MISSING:
+            return registered
+
+        fallback = self._instantiate_fallback_type(type_name, args)
+        if fallback is not self._MISSING:
+            return fallback
 
         util.warn(f"Did not recognize Informix type '{type_name}'")
         return sa_types.NullType()
+
+    def _normalized_encoded_length(self, collength):
+        encoded_len = int(collength) if collength is not None else 0
+        if encoded_len < 0:
+            encoded_len += 65536
+        return encoded_len
+
+    def _ifx_type_result(self, type_name, autoincrement, nullable, *args):
+        return (
+            self._instantiate_ischema_type(type_name, *args),
+            autoincrement,
+            nullable,
+        )
+
+    def _unknown_ifx_type_result(
+        self,
+        coltype,
+        base_code,
+        extended_id,
+        autoincrement,
+        nullable,
+    ):
+        util.warn(
+            "Did not recognize Informix coltype code "
+            f"{coltype!r} (base={base_code}, extended_id={extended_id!r})"
+        )
+        return sa_types.NullType(), autoincrement, nullable
+
+    def _decode_opaque_ifx_type(
+        self,
+        base_code,
+        encoded_len,
+        extended_id,
+        extended_type_name,
+        extended_maxlen,
+        autoincrement,
+        nullable,
+    ):
+        opaque_type_name = self._resolve_opaque_type_name(
+            extended_type_name,
+            base_code,
+        )
+
+        if opaque_type_name is None:
+            util.warn(
+                "Did not recognize Informix opaque type "
+                f"extended_id={extended_id!r}, "
+                f"name={extended_type_name!r}"
+            )
+            return sa_types.NullType(), autoincrement, nullable
+
+        if opaque_type_name == "LVARCHAR":
+            length = extended_maxlen or encoded_len or None
+            if length is not None:
+                length = self._int_or_default(length, None)
+            return self._ifx_type_result(
+                "VARCHAR",
+                autoincrement,
+                nullable,
+                length,
+            )
+
+        return self._ifx_type_result(opaque_type_name, autoincrement, nullable)
+
+    def _decode_temporal_ifx_type(
+        self,
+        type_name,
+        encoded_len,
+        autoincrement,
+        nullable,
+    ):
+        qualifiers = self._decode_datetime_qualifiers(encoded_len)
+        satype = self._instantiate_ischema_type(type_name)
+        # Preserve Informix metadata without pretending SQLAlchemy has a
+        # portable generic representation for every Informix qualifier.
+        setattr(satype, "_informix_qualifiers", qualifiers)
+        return satype, autoincrement, nullable
+
+    def _ifx_type_args(self, base_code, encoded_len):
+        if base_code in (0, 15):
+            return [encoded_len]
+        if base_code in (13, 16):
+            return [encoded_len & 0x00FF]
+        if base_code in (5, 8):
+            return [encoded_len >> 8, encoded_len & 0x00FF]
+        return []
 
     def _decode_ifx_type(
         self,
@@ -891,96 +984,50 @@ class IfxReflector(BaseReflector):
         extended_type_name=None,
         extended_maxlen=None,
     ):
-        nullable = not bool(int(coltype) & 0x0100)
-        base_code = int(coltype) & 0x00FF
-        encoded_len = int(collength) if collength is not None else 0
-
-        # Normaliza SMALLINT signed -> unsigned 16-bit cuando aplique
-        if encoded_len < 0:
-            encoded_len += 65536
-
+        coltype_int = int(coltype)
+        nullable = not bool(coltype_int & 0x0100)
+        base_code = coltype_int & 0x00FF
+        encoded_len = self._normalized_encoded_length(collength)
         type_name = self._COLTYPE_CODE_MAP.get(base_code)
         autoincrement = base_code in (6, 18, 53)
 
         if type_name is None:
-            util.warn(
-                "Did not recognize Informix coltype code "
-                f"{coltype!r} (base={base_code}, extended_id={extended_id!r})"
+            return self._unknown_ifx_type_result(
+                coltype,
+                base_code,
+                extended_id,
+                autoincrement,
+                nullable,
             )
-            return sa_types.NullType(), autoincrement, nullable
 
         if base_code in (40, 41, 45):
-            opaque_type_name = self._resolve_opaque_type_name(
-                extended_type_name,
+            return self._decode_opaque_ifx_type(
                 base_code,
-            )
-
-            if opaque_type_name is None:
-                util.warn(
-                    "Did not recognize Informix opaque type "
-                    f"extended_id={extended_id!r}, "
-                    f"name={extended_type_name!r}"
-                )
-                return sa_types.NullType(), autoincrement, nullable
-
-            if opaque_type_name == "LVARCHAR":
-                length = extended_maxlen or encoded_len or None
-                if length is not None:
-                    length = int(length)
-                return (
-                    self._instantiate_ischema_type("VARCHAR", length),
-                    autoincrement,
-                    nullable,
-                )
-
-            return (
-                self._instantiate_ischema_type(opaque_type_name),
+                encoded_len,
+                extended_id,
+                extended_type_name,
+                extended_maxlen,
                 autoincrement,
                 nullable,
             )
 
         if base_code in (10, 14):
-            qualifiers = self._decode_datetime_qualifiers(encoded_len)
-            satype = self._instantiate_ischema_type(type_name)
-            # Preserve Informix metadata without pretending SQLAlchemy has a
-            # portable generic representation for every Informix qualifier.
-            satype._informix_qualifiers = qualifiers
-            return satype, autoincrement, nullable
-
-        # CHAR / NCHAR
-        if base_code in (0, 15):
-            return (
-                self._instantiate_ischema_type(type_name, encoded_len),
+            return self._decode_temporal_ifx_type(
+                type_name,
+                encoded_len,
                 autoincrement,
                 nullable,
             )
 
-        # VARCHAR / NVARCHAR
-        if base_code in (13, 16):
-            length = encoded_len & 0x00FF
-            return (
-                self._instantiate_ischema_type(type_name, length),
-                autoincrement,
-                nullable,
-            )
-
-        # DECIMAL / MONEY: precision * 256 + scale
-        if base_code in (5, 8):
-            precision = encoded_len >> 8
-            scale = encoded_len & 0x00FF
-            return (
-                self._instantiate_ischema_type(type_name, precision, scale),
-                autoincrement,
-                nullable,
-            )
-
-        return (
-            self._instantiate_ischema_type(type_name),
+        return self._ifx_type_result(
+            type_name,
             autoincrement,
             nullable,
+            *self._ifx_type_args(base_code, encoded_len),
         )
 
     def has_table(self, connection, table_name, schema=None, **kw):
+        _ = kw
         row = self._get_table_row(
             connection,
             table_name,
@@ -1001,6 +1048,7 @@ class IfxReflector(BaseReflector):
         return self._has_table_via_dbapi_probe(connection, table_name, schema=schema)
 
     def has_sequence(self, connection, sequence_name, schema=None, **kw):
+        _ = kw
         owner = self._resolved_owner(schema)
         sql_text = """
             SELECT FIRST 1 s.seqid
@@ -1015,6 +1063,7 @@ class IfxReflector(BaseReflector):
 
     @reflection.cache
     def get_schema_names(self, connection, **kw):
+        _ = kw
         sql_text = """
             SELECT DISTINCT t.owner
             FROM systables t
@@ -1026,6 +1075,7 @@ class IfxReflector(BaseReflector):
 
     @reflection.cache
     def get_table_names(self, connection, schema=None, **kw):
+        _ = kw
         owner = self._resolved_owner(schema)
         sql_text = """
             SELECT t.tabname
@@ -1038,17 +1088,23 @@ class IfxReflector(BaseReflector):
         rows = connection.exec_driver_sql(sql_text, (owner,)).fetchall()
         return [self.normalize_name(self._clean_str(r[0])) for r in rows]
 
+    def _empty_reflection_names(self, object_kind):
+        _ = object_kind
+        return []
+
     def get_temp_table_names(self, connection, schema=None, **kw):
+        _ = (connection, schema, kw)
         # Informix temp tables are connection-local and, with the ODBC
         # driver used by this dialect, are not exposed through a stable
         # catalog query or metadata API that lets us enumerate them
         # reliably. We therefore keep the contract explicit: has_table()
         # works for known temp names on the same connection, but listing
         # temp table names is not supported and returns an empty list.
-        return []
+        return self._empty_reflection_names("temporary tables")
 
     @reflection.cache
     def get_view_names(self, connection, schema=None, **kw):
+        _ = kw
         owner = self._resolved_owner(schema)
         sql_text = """
             SELECT t.tabname
@@ -1060,6 +1116,22 @@ class IfxReflector(BaseReflector):
         """
         rows = connection.exec_driver_sql(sql_text, (owner,)).fetchall()
         return [self.normalize_name(self._clean_str(r[0])) for r in rows]
+
+    def _extend_names_for_kinds(self, names, connection, schema, kind, getters, kw):
+        for object_kind, getter in getters:
+            if object_kind in kind:
+                names.extend(getter(connection, schema=schema, **kw))
+
+    def _filtered_unique_names(self, names, filter_names):
+        normalized_filters = self._normalize_filter_names(filter_names)
+        if normalized_filters:
+            names = [
+                name for name in names
+                if name in normalized_filters
+                or self.normalize_name(name) in normalized_filters
+                or self.denormalize_name(name) in normalized_filters
+            ]
+        return list(dict.fromkeys(names))
 
     def _table_names_for_multi(
         self,
@@ -1075,67 +1147,68 @@ class IfxReflector(BaseReflector):
 
         names = []
         if ObjectScope.DEFAULT in scope:
-            if ObjectKind.TABLE in kind:
-                names.extend(self.get_table_names(connection, schema=schema, **kw))
-            if ObjectKind.VIEW in kind:
-                names.extend(self.get_view_names(connection, schema=schema, **kw))
-            if ObjectKind.MATERIALIZED_VIEW in kind:
-                names.extend(
-                    self.get_materialized_view_names(
-                        connection, schema=schema, **kw
-                    )
-                )
+            self._extend_names_for_kinds(
+                names,
+                connection,
+                schema,
+                kind,
+                (
+                    (ObjectKind.TABLE, self.get_table_names),
+                    (ObjectKind.VIEW, self.get_view_names),
+                    (ObjectKind.MATERIALIZED_VIEW, self.get_materialized_view_names),
+                ),
+                kw,
+            )
 
         if ObjectScope.TEMPORARY in scope:
-            if ObjectKind.TABLE in kind:
-                names.extend(
-                    self.get_temp_table_names(connection, schema=schema, **kw)
-                )
-            if ObjectKind.VIEW in kind:
-                names.extend(
-                    self.get_temp_view_names(connection, schema=schema, **kw)
-                )
+            self._extend_names_for_kinds(
+                names,
+                connection,
+                schema,
+                kind,
+                (
+                    (ObjectKind.TABLE, self.get_temp_table_names),
+                    (ObjectKind.VIEW, self.get_temp_view_names),
+                ),
+                kw,
+            )
 
-        normalized_filters = self._normalize_filter_names(filter_names)
-
-        if normalized_filters:
-            names = [
-                name for name in names
-                if name in normalized_filters
-                or self.normalize_name(name) in normalized_filters
-                or self.denormalize_name(name) in normalized_filters
-            ]
-
-        return list(dict.fromkeys(names))
+        return self._filtered_unique_names(names, filter_names)
 
     def get_materialized_view_names(self, connection, schema=None, **kw):
+        _ = (connection, schema, kw)
         # Informix does not expose a materialized-view concept through this
         # dialect, so the contract is explicit and empty.
-        return []
+        return self._empty_reflection_names("materialized views")
 
     def get_check_constraints(self, connection, table_name, schema=None, **kw):
+        _ = (connection, table_name, schema, kw)
         # Explicit contract for a reflection surface we don't currently
         # implement for Informix in this dialect.
         return []
 
     def get_table_comment(self, connection, table_name, schema=None, **kw):
+        _ = (connection, table_name, schema, kw)
         # Informix table comments are not currently reflected by this
         # dialect; return the stable SQLAlchemy structure explicitly.
         return {"text": None}
 
     def get_table_options(self, connection, table_name, schema=None, **kw):
+        _ = (connection, table_name, schema, kw)
         # Informix-specific table options are not currently reflected by
         # this dialect; return the stable SQLAlchemy structure explicitly.
         return {}
 
     def get_temp_view_names(self, connection, schema=None, **kw):
+        _ = (connection, schema, kw)
         # Informix does not support TEMP VIEW creation in the same way as
         # PostgreSQL/SQLite, so temp view enumeration is intentionally
         # unsupported for this dialect.
-        return []
+        return self._empty_reflection_names("temporary views")
 
     @reflection.cache
     def get_view_definition(self, connection, viewname, schema=None, **kw):
+        _ = kw
         view_row = self._get_table_row(
             connection,
             viewname,
@@ -1161,6 +1234,7 @@ class IfxReflector(BaseReflector):
 
     @reflection.cache
     def get_columns(self, connection, table_name, schema=None, **kw):
+        _ = kw
         table_row = self._require_table_row(
             connection,
             table_name,
@@ -1225,6 +1299,7 @@ class IfxReflector(BaseReflector):
 
     @reflection.cache
     def get_pk_constraint(self, connection, table_name, schema=None, **kw):
+        _ = kw
         table_row = self._require_table_row(
             connection,
             table_name,
@@ -1281,6 +1356,7 @@ class IfxReflector(BaseReflector):
 
     @reflection.cache
     def get_foreign_keys(self, connection, table_name, schema=None, **kw):
+        _ = kw
         table_row = self._require_table_row(
             connection,
             table_name,
@@ -1380,6 +1456,7 @@ class IfxReflector(BaseReflector):
 
     @reflection.cache
     def get_incoming_foreign_keys(self, connection, table_name, schema=None, **kw):
+        _ = kw
         table_row = self._require_table_row(
             connection,
             table_name,
@@ -1463,17 +1540,7 @@ class IfxReflector(BaseReflector):
 
         return incoming
 
-    @reflection.cache
-    def get_indexes(self, connection, table_name, schema=None, **kw):
-        table_row = self._require_table_row(
-            connection,
-            table_name,
-            schema=schema,
-            tabtypes=("T",),
-        )
-        tabid = int(table_row[0])
-
-        # Mapa de índices que duplican constraints
+    def _constraint_duplicates_by_index(self, connection, tabid):
         constr_sql = """
             SELECT constrtype, constrname, idxname
             FROM sysconstraints
@@ -1484,12 +1551,15 @@ class IfxReflector(BaseReflector):
         constr_rows = connection.exec_driver_sql(constr_sql, (tabid,)).fetchall()
         constraint_by_index = {}
         for ctype, cname, idxname in constr_rows:
-            if idxname:
-                constraint_by_index[self._clean_str(idxname).lower()] = (
+            clean_idxname = self._clean_str(idxname)
+            if clean_idxname:
+                constraint_by_index[clean_idxname.lower()] = (
                     self._clean_str(ctype),
                     self.normalize_name(self._clean_str(cname)),
                 )
+        return constraint_by_index
 
+    def _index_rows(self, connection, tabid):
         idx_sql = f"""
             SELECT
                 i.idxname,
@@ -1500,48 +1570,70 @@ class IfxReflector(BaseReflector):
             WHERE i.tabid = ?
             ORDER BY i.idxname
         """
-        rows = connection.exec_driver_sql(idx_sql, (tabid,)).fetchall()
+        return connection.exec_driver_sql(idx_sql, (tabid,)).fetchall()
+
+    def _index_info_from_row(self, connection, tabid, row, constraint_by_index):
+        idxname = self._clean_str(row[0])
+        owner = self._clean_str(row[1])
+        idxtype = self._clean_str(row[2])
+
+        key = idxname.lower() if idxname else None
+        duplicated = constraint_by_index.get(key) if key else None
+
+        if duplicated and duplicated[0] == "P":
+            return None
+
+        colnames, column_sorting = self._get_index_columns(
+            connection,
+            tabid,
+            idxname,
+            owner=owner,
+        )
+        if not colnames:
+            return None
+
+        idx_info = {
+            "name": self.normalize_name(idxname),
+            "column_names": colnames,
+            "unique": idxtype in ("U", "u"),
+        }
+
+        if column_sorting:
+            idx_info["column_sorting"] = column_sorting
+
+        if duplicated and duplicated[0] == "U":
+            idx_info["duplicates_constraint"] = duplicated[1]
+
+        return idx_info
+
+    @reflection.cache
+    def get_indexes(self, connection, table_name, schema=None, **kw):
+        _ = kw
+        table_row = self._require_table_row(
+            connection,
+            table_name,
+            schema=schema,
+            tabtypes=("T",),
+        )
+        tabid = int(table_row[0])
+        constraint_by_index = self._constraint_duplicates_by_index(connection, tabid)
 
         indexes = []
-        for row in rows:
-            idxname = self._clean_str(row[0])
-            owner = self._clean_str(row[1])
-            idxtype = self._clean_str(row[2])
-
-            key = idxname.lower() if idxname else None
-            duplicated = constraint_by_index.get(key)
-
-            # No duplicar el índice implícito de la PK
-            if duplicated and duplicated[0] == "P":
-                continue
-
-            colnames, column_sorting = self._get_index_columns(
+        for row in self._index_rows(connection, tabid):
+            idx_info = self._index_info_from_row(
                 connection,
                 tabid,
-                idxname,
-                owner=owner,
+                row,
+                constraint_by_index,
             )
-            if not colnames:
-                continue
-
-            idx_info = {
-                "name": self.normalize_name(idxname),
-                "column_names": colnames,
-                "unique": idxtype in ("U", "u"),
-            }
-
-            if column_sorting:
-                idx_info["column_sorting"] = column_sorting
-
-            if duplicated and duplicated[0] == "U":
-                idx_info["duplicates_constraint"] = duplicated[1]
-
-            indexes.append(idx_info)
+            if idx_info is not None:
+                indexes.append(idx_info)
 
         return indexes
 
     @reflection.cache
     def get_unique_constraints(self, connection, table_name, schema=None, **kw):
+        _ = kw
         table_row = self._require_table_row(
             connection,
             table_name,
@@ -1752,6 +1844,36 @@ class IfxReflector(BaseReflector):
             **kw,
         )
 
+    def _remember_unreflectable(self, unreflectable, key, error):
+        if key not in unreflectable:
+            unreflectable[key] = error
+
+    def _multi_reflect_one(
+        self,
+        connection,
+        single_table_method,
+        name,
+        schema,
+        unreflectable,
+        kw,
+    ):
+        key = (schema, name)
+        for candidate_name in (name, quoted_name(name, True)):
+            try:
+                return single_table_method(
+                    connection,
+                    candidate_name,
+                    schema=schema,
+                    **kw,
+                )
+            except exc.UnreflectableTableError as err:
+                self._remember_unreflectable(unreflectable, key, err)
+                return self._MISSING
+            except exc.NoSuchTableError:
+                continue
+
+        return self._MISSING
+
     def _multi_reflect(
         self,
         connection,
@@ -1775,31 +1897,16 @@ class IfxReflector(BaseReflector):
 
         for name in names:
             key = (schema, name)
-            try:
-                reflected = single_table_method(
-                    connection,
-                    name,
-                    schema=schema,
-                    **kw,
-                )
-            except exc.UnreflectableTableError as err:
-                if key not in unreflectable:
-                    unreflectable[key] = err
+            reflected = self._multi_reflect_one(
+                connection,
+                single_table_method,
+                name,
+                schema,
+                unreflectable,
+                kw,
+            )
+            if reflected is self._MISSING:
                 continue
-            except exc.NoSuchTableError:
-                try:
-                    reflected = single_table_method(
-                        connection,
-                        quoted_name(name, True),
-                        schema=schema,
-                        **kw,
-                    )
-                except exc.UnreflectableTableError as err:
-                    if key not in unreflectable:
-                        unreflectable[key] = err
-                    continue
-                except exc.NoSuchTableError:
-                    continue
 
             yield (
                 key,
@@ -1808,6 +1915,7 @@ class IfxReflector(BaseReflector):
 
     @reflection.cache
     def get_sequence_names(self, connection, schema=None, **kw):
+        _ = kw
         owner = self._resolved_owner(schema)
         sql_text = """
             SELECT t.tabname

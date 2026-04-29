@@ -17,10 +17,10 @@ from IfxAlchemy.requirements import Requirements
 
 
 @pytest.mark.sqlalchemy_suite
-def test_statement_cache_stays_disabled_until_suite_passes():
-    assert IfxDialect().supports_statement_cache is False
-    assert IfxDialect_pyodbc().supports_statement_cache is False
-    assert IfxDialect_IfxPy().supports_statement_cache is False
+def test_statement_cache_is_enabled_for_dialects():
+    assert IfxDialect().supports_statement_cache is True
+    assert IfxDialect_pyodbc().supports_statement_cache is True
+    assert IfxDialect_IfxPy().supports_statement_cache is True
 
 
 @pytest.mark.sqlalchemy_suite
@@ -36,10 +36,10 @@ def test_supported_dialect_contract():
 
 
 @pytest.mark.legacy_ifxpy
-def test_legacy_ifxpy_is_not_part_of_supported_sqlalchemy21_contract():
+def test_legacy_ifxpy_keeps_statement_cache_contract():
     dialect = IfxDialect_IfxPy()
 
-    assert dialect.supports_statement_cache is False
+    assert dialect.supports_statement_cache is True
 
 
 @pytest.mark.sqlalchemy_suite
@@ -277,6 +277,35 @@ def test_representative_select_has_cache_key():
     cache_key = stmt._generate_cache_key()
 
     assert cache_key is not None
+
+
+@pytest.mark.sqlalchemy_suite
+def test_limit_offset_compilation_is_statement_cache_safe():
+    tbl = table("t", column("id"), column("name"))
+    dialect = IfxDialect_pyodbc()
+
+    first_stmt = (
+        select(tbl.c.id, tbl.c.name)
+        .order_by(tbl.c.id)
+        .limit(5)
+        .offset(2)
+    )
+    second_stmt = (
+        select(tbl.c.id, tbl.c.name)
+        .order_by(tbl.c.id)
+        .limit(10)
+        .offset(4)
+    )
+
+    first_compiled = first_stmt.compile(dialect=dialect)
+    second_compiled = second_stmt.compile(dialect=dialect)
+
+    assert first_stmt._generate_cache_key().key == (
+        second_stmt._generate_cache_key().key
+    )
+    assert str(first_compiled) == str(second_compiled)
+    assert "__[POSTCOMPILE_" in str(first_compiled)
+    assert first_compiled.params != second_compiled.params
 
 
 @pytest.mark.sqlalchemy_suite

@@ -77,7 +77,8 @@ def test_order_by_limit_offset_uses_row_number_upper_bound():
     assert not _has_word(sql, "FIRST"), sql
     assert _has_word(sql, "ROW_NUMBER"), sql
     assert "OVER (ORDER BY t.id)" in sql
-    assert "<= 7" in sql
+    assert "<= __[POSTCOMPILE_" in sql
+    assert " + __[POSTCOMPILE_" in sql
 
 
 def test_distinct_order_by_offset_keeps_distinct_inside_row_number_rewrite():

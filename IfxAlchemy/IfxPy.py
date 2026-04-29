@@ -97,7 +97,7 @@ class IfxDialect_IfxPy(IfxDialect):
     use_insertmanyvalues = False
     use_insertmanyvalues_wo_returning = False
     supports_identity_columns = False
-    supports_statement_cache = False
+    supports_statement_cache = True
 
     execution_ctx_cls = IfxExecutionContext_IfxPy
 

@@ -59,6 +59,15 @@ def _upper_sql(sql_text: str) -> str:
     return " ".join(sql_text.upper().split())
 
 
+def _assert_row_number_lower_bound(sql_text: str) -> None:
+    assert "IFX_RN > __[POSTCOMPILE_" in sql_text
+
+
+def _assert_row_number_upper_bound(sql_text: str) -> None:
+    assert "IFX_RN <= __[POSTCOMPILE_" in sql_text
+    assert " + __[POSTCOMPILE_" in sql_text
+
+
 @pytest.mark.ddl_compiler
 def test_create_table_compiles_basic_types(dialect, sample_table):
     compiled = str(CreateTable(sample_table).compile(dialect=dialect))
@@ -149,7 +158,7 @@ def test_limit_compiles_as_first(dialect, sample_table):
     compiled = str(stmt.compile(dialect=dialect))
     upper = _upper_sql(compiled)
 
-    assert "SELECT FIRST 5" in upper
+    assert "SELECT FIRST __[POSTCOMPILE_" in upper
     assert "FROM SA_COMPILE_BASIC" in upper
 
 
@@ -160,7 +169,7 @@ def test_fetch_compiles_as_first(dialect, sample_table):
     compiled = str(stmt.compile(dialect=dialect))
     upper = _upper_sql(compiled)
 
-    assert "SELECT FIRST 5" in upper
+    assert "SELECT FIRST __[POSTCOMPILE_" in upper
     assert "FETCH FIRST" not in upper
     assert "FROM SA_COMPILE_BASIC" in upper
 
@@ -179,8 +188,8 @@ def test_limit_offset_compiles_with_row_number_wrapper(dialect, sample_table):
 
     assert "ROW_NUMBER() OVER (ORDER BY SA_COMPILE_BASIC.ID)" in upper
     assert "IFX_RN" in upper
-    assert "> 10" in upper
-    assert "<= 15" in upper
+    _assert_row_number_lower_bound(upper)
+    _assert_row_number_upper_bound(upper)
 
 
 @pytest.mark.ddl_compiler
@@ -197,8 +206,8 @@ def test_fetch_offset_compiles_with_row_number_wrapper(dialect, sample_table):
 
     assert "ROW_NUMBER() OVER (ORDER BY SA_COMPILE_BASIC.ID)" in upper
     assert "IFX_RN" in upper
-    assert "> 10" in upper
-    assert "<= 15" in upper
+    _assert_row_number_lower_bound(upper)
+    _assert_row_number_upper_bound(upper)
     assert "FETCH FIRST" not in upper
 
 
@@ -216,12 +225,12 @@ def test_limit_offset_with_bound_parameters_compiles(dialect, sample_table):
 
     assert "ROW_NUMBER()" in upper
     assert "IFX_RN" in upper
-    assert "> 2" in upper
-    assert "<= 7" in upper
+    _assert_row_number_lower_bound(upper)
+    _assert_row_number_upper_bound(upper)
 
 
 @pytest.mark.ddl_compiler
-def test_offset_zero_does_not_emit_lower_bound(dialect, sample_table):
+def test_offset_zero_keeps_cache_safe_lower_bound(dialect, sample_table):
     stmt = (
         select(sample_table.c.id)
         .order_by(sample_table.c.id)
@@ -233,8 +242,8 @@ def test_offset_zero_does_not_emit_lower_bound(dialect, sample_table):
     upper = _upper_sql(compiled)
 
     assert "ROW_NUMBER()" in upper
-    assert "<= 5" in upper
-    assert " > 0" not in upper
+    _assert_row_number_lower_bound(upper)
+    _assert_row_number_upper_bound(upper)
 
 
 @pytest.mark.ddl_compiler
@@ -337,7 +346,7 @@ def test_offset_keeps_unlabeled_replace_projection_intact_without_limit(
 
     assert "FROM (SELECT REPLACE(SA_COMPILE_BASIC.NAME, :REPLACE_" in upper
     assert ") AS REPLACE_1, ROW_NUMBER() OVER () AS IFX_RN" in upper
-    assert "WHERE ANON_1.IFX_RN > 2" in upper
+    assert "WHERE ANON_1.IFX_RN > __[POSTCOMPILE_" in upper
     assert "__IFX_" not in upper
 
 
@@ -385,7 +394,8 @@ def test_limit_offset_keeps_direct_cte_projection_intact(
         "FROM (SELECT CTE1.ID AS ID, CTE1.NAME AS NAME, "
         "ROW_NUMBER() OVER () AS IFX_RN FROM CTE1) AS ANON_1"
     ) in upper
-    assert "WHERE ANON_1.IFX_RN > 2 AND ANON_1.IFX_RN <= 7" in upper
+    _assert_row_number_lower_bound(upper)
+    _assert_row_number_upper_bound(upper)
     assert "__IFX_" not in upper
 
 
@@ -407,7 +417,7 @@ def test_offset_with_order_by_compiles_with_row_number_wrapper(
         "SA_COMPILE_BASIC.ID)"
     ) in upper
     assert "ORDER BY ANON_1.IFX_RN" in upper
-    assert "> 10" in upper
+    _assert_row_number_lower_bound(upper)
     assert "<=" not in upper
 
 
@@ -431,8 +441,8 @@ def test_limit_offset_preserves_distinct_before_row_number(
         "FROM SA_COMPILE_BASIC) AS ANON_2"
     ) in upper
     assert "ROW_NUMBER() OVER (ORDER BY ANON_2.NAME)" in upper
-    assert "> 10" in upper
-    assert "<= 15" in upper
+    _assert_row_number_lower_bound(upper)
+    _assert_row_number_upper_bound(upper)
 
 
 @pytest.mark.ddl_compiler
@@ -452,8 +462,8 @@ def test_fetch_offset_preserves_distinct_before_row_number(
 
     assert "SELECT DISTINCT" in upper
     assert "ROW_NUMBER() OVER" in upper
-    assert "IFX_RN > 3" in upper
-    assert "IFX_RN <= 13" in upper
+    _assert_row_number_lower_bound(upper)
+    _assert_row_number_upper_bound(upper)
     assert "FETCH FIRST" not in upper
     assert "__IFX_" not in upper
 

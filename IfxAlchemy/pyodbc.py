@@ -67,9 +67,8 @@ class IfxDialect_pyodbc(PyODBCConnector, IfxDialect):
     supports_unicode_statements = True
     supports_char_length = True
     supports_native_decimal = False
-    # Must be declared locally on the concrete dialect class. Keep disabled
-    # until cache-key safety is proven for informix+pyodbc.
-    supports_statement_cache = False
+    # SQLAlchemy requires concrete third-party dialects to opt in locally.
+    supports_statement_cache = True
 
     execution_ctx_cls = IfxExecutionContext_pyodbc
 

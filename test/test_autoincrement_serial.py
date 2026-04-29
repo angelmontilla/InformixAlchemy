@@ -26,6 +26,7 @@ def dialect():
 
 
 def _assert_generated_lastrowid_roundtrip(engine, name_factory, prefix, type_):
+    
     table_name = name_factory(prefix)
     metadata = MetaData()
     table = Table(
@@ -78,15 +79,17 @@ class _LastrowidContext(_SelectLastRowIDMixin):
     pass
 
 
+def _unexpected_cursor_execute(*args, **kwargs):
+    raise AssertionError("_cursor_execute should not be used")
+
+
 @pytest.mark.serial_identity
 def test_lastrowid_post_exec_uses_direct_cursor_execute():
     cursor = _RecordingCursor((42,))
     context = _LastrowidContext()
     context.cursor = cursor
     context.root_connection = SimpleNamespace(
-        _cursor_execute=lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("_cursor_execute should not be used")
-        )
+        _cursor_execute=_unexpected_cursor_execute
     )
     context._select_lastrowid = True
     context._lastrowid_query = "SELECT DBINFO('sqlca.sqlerrd1') FROM systables WHERE tabid = 1"
