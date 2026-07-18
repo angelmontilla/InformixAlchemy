@@ -142,22 +142,45 @@ class _IFXBoolean(sa_types.Boolean):
 
 class _IFXDate(sa_types.Date):
 
+    cache_ok = True
+
     def result_processor(self, dialect, coltype):
         def process(value):
             if value is None:
                 return None
+
+            # Some drivers may return a datetime value for a DATE column.
             if isinstance(value, datetime.datetime):
-                value = datetime.date(value.year, value.month, value.day)
-            return value
+                return value.date()
+
+            # pyodbc usually returns a `datetime.date`.
+            if isinstance(value, datetime.date):
+                return value
+
+            raise TypeError(
+                "Informix DATE returned an incompatible value: "
+                f"{value!r} ({type(value).__name__})"
+            )
+
         return process
 
     def bind_processor(self, dialect):
         def process(value):
             if value is None:
                 return None
+
+            # DATE should not store the time.
             if isinstance(value, datetime.datetime):
-                value = datetime.date(value.year, value.month, value.day)
-            return str(value)
+                return value.date()
+
+            if isinstance(value, datetime.date):
+                return value
+
+            raise TypeError(
+                "Informix DATE columns require datetime.date or "
+                f"datetime.datetime; received {type(value).__name__}"
+            )
+
         return process
 
 
