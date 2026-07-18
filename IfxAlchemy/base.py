@@ -772,34 +772,27 @@ class IfxDDLCompiler(compiler.DDLCompiler):
 
     def get_column_specification(self, column, **kw):
         col_spec = [self.preparer.format_column(column)]
+
         rendered_type = self.dialect.type_compiler.process(
             column.type,
-            type_expression=column
+            type_expression=column,
         )
 
         autoincrement_type_name = _get_ifx_autoincrement_type_name(column)
-        if autoincrement_type_name == "SERIAL":
-            rendered_type = "SERIAL"
-        elif autoincrement_type_name == "SERIAL8":
-            rendered_type = "SERIAL8"
-        elif autoincrement_type_name == "BIGSERIAL":
-            rendered_type = "BIGSERIAL"
+
+        if autoincrement_type_name in {"SERIAL", "SERIAL8", "BIGSERIAL"}:
+            rendered_type = autoincrement_type_name
 
         col_spec.append(rendered_type)
 
-
-        # column-options: "NOT NULL"
-        if not column.nullable or column.primary_key:
-            col_spec.append('NOT NULL')
-
-        # default-clause:
         default = self.get_column_default_string(column)
         if default is not None:
-            col_spec.append('WITH DEFAULT')
-            col_spec.append(default)
+            col_spec.extend(("DEFAULT", default))
 
-        column_spec = ' '.join(col_spec)
-        return column_spec
+        if not column.nullable or column.primary_key:
+            col_spec.append("NOT NULL")
+
+        return " ".join(col_spec)
 
     def define_constraint_cascades(self, constraint):
         text = ""
