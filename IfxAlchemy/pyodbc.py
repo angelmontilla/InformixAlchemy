@@ -24,11 +24,20 @@
 
 from urllib.parse import unquote
 
+from sqlalchemy import types as sa_types
 from sqlalchemy import util
 from sqlalchemy.connectors.pyodbc import PyODBCConnector
+from sqlalchemy.engine import BindTyping
 
 from . import reflection as ifx_reflection
-from .base import _SelectLastRowIDMixin, IfxDialect, IfxExecutionContext
+from .base import (
+    DBCLOB,
+    LONGVARGRAPHIC,
+    XML,
+    _SelectLastRowIDMixin,
+    IfxDialect,
+    IfxExecutionContext,
+)
 
 
 SQL_INFX_BIGINT = -114
@@ -184,6 +193,13 @@ def _handle_infx_bigint(value):
         ) from exc
 
 
+class _IFXText_pyodbc(sa_types.Text):
+    """Informix TEXT bound as ODBC SQL_LONGVARCHAR through pyodbc."""
+
+    def get_dbapi_type(self, dbapi):
+        return dbapi.SQL_LONGVARCHAR
+
+
 class IfxExecutionContext_pyodbc(
     _SelectLastRowIDMixin,
     IfxExecutionContext,
@@ -192,6 +208,28 @@ class IfxExecutionContext_pyodbc(
 
 
 class IfxDialect_pyodbc(PyODBCConnector, IfxDialect):
+    # Informix TEXT parameters must be described to the ODBC driver as
+    # SQL_LONGVARCHAR. Restrict setinputsizes() to that DBAPI type so that
+    # ordinary parameters continue to use pyodbc's normal type inference.
+    bind_typing = BindTyping.SETINPUTSIZES
+    include_set_input_sizes = frozenset()
+
+    colspecs = dict(IfxDialect.colspecs)
+    colspecs.update(
+        {
+            sa_types.Text: _IFXText_pyodbc,
+
+            # CLOB, UnicodeText and the Informix-specific derived types are
+            # subclasses of Text. Exact mappings prevent SQLAlchemy from
+            # adapting them accidentally to _IFXText_pyodbc.
+            sa_types.CLOB: sa_types.CLOB,
+            sa_types.UnicodeText: sa_types.UnicodeText,
+            DBCLOB: DBCLOB,
+            LONGVARGRAPHIC: LONGVARGRAPHIC,
+            XML: XML,
+        }
+    )
+
     driver = "pyodbc"
     supports_unicode_statements = True
     supports_char_length = True
@@ -203,6 +241,44 @@ class IfxDialect_pyodbc(PyODBCConnector, IfxDialect):
     execution_ctx_cls = IfxExecutionContext_pyodbc
 
     pyodbc_driver_name = "IBM INFORMIX ODBC DRIVER (64-bit)"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+        if self.dbapi is not None:
+            sql_longvarchar = getattr(
+                self.dbapi,
+                "SQL_LONGVARCHAR",
+                None,
+            )
+
+            if sql_longvarchar is not None:
+                self.include_set_input_sizes = {
+                    sql_longvarchar,
+                }
+
+    def do_set_input_sizes(
+        self,
+        cursor,
+        list_of_tuples,
+        context,
+    ):
+        # SQLAlchemy includes one entry per bound parameter. Parameters not
+        # selected by include_set_input_sizes carry dbtype=None.
+        #
+        # Avoid calling cursor.setinputsizes() unless the statement contains
+        # at least one Informix TEXT parameter.
+        if not any(
+            dbtype is not None
+            for _, dbtype, _ in list_of_tuples
+        ):
+            return
+
+        super().do_set_input_sizes(
+            cursor,
+            list_of_tuples,
+            context,
+        )
 
     @classmethod
     def import_dbapi(cls):
@@ -286,7 +362,10 @@ class IfxDialect_pyodbc(PyODBCConnector, IfxDialect):
             "unicode_results",
             "autocommit",
         ):
-            value = _pop_key_case_insensitive(opts, param)
+            value = _pop_key_case_insensitive(
+                opts,
+                param,
+            )
 
             if value is not None:
                 connect_args[param] = util.asbool(value)
@@ -487,6 +566,7 @@ class IfxDialect_pyodbc(PyODBCConnector, IfxDialect):
                 "PWD=%s"
                 % _quote_odbc_value(password)
             )
+
         elif trusted_context_enabled:
             connectors.append("TCTX=1")
 

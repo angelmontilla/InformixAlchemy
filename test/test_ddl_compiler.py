@@ -4,6 +4,7 @@ import pytest
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    CLOB,
     LargeBinary,
     Column,
     Date,
@@ -15,6 +16,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Table,
+    Text,
     Unicode,
     select,
 )
@@ -717,3 +719,10 @@ def test_savepoint_clauses_compile_with_informix_syntax(dialect):
     assert savepoint == "SAVEPOINT SA_SAVEPOINT_1"
     assert rollback == "ROLLBACK TO SAVEPOINT SA_SAVEPOINT_1"
     assert release == "RELEASE SAVEPOINT SA_SAVEPOINT_1"
+
+@pytest.mark.ddl_compiler
+def test_text_and_clob_compile_as_distinct_informix_types(dialect):
+    type_compiler = dialect.type_compiler
+
+    assert type_compiler.process(Text()).upper() == "TEXT"
+    assert type_compiler.process(CLOB()).upper() == "CLOB"

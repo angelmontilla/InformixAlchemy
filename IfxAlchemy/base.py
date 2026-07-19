@@ -451,7 +451,7 @@ class IfxTypeCompiler(compiler.GenericTypeCompiler):
         return self.visit_varchar(type_)
 
     def visit_text(self, type_):
-        return self.visit_clob(type_)
+        return "TEXT"
 
     def visit_large_binary(self, type_):
         return "BYTE"
