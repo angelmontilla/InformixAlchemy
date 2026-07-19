@@ -165,3 +165,22 @@ def test_connection_string_escapes_values_with_special_characters():
     assert "PWD={p}}wd}" in connstr
     assert "SERVER={srv;one}" in connstr
     assert "SERVICE={ 9088 }" in connstr
+
+
+def test_generated_connection_string_includes_standard_odbc_types():
+    dialect = IfxDialect_pyodbc()
+
+    url = make_url(
+        "informix+pyodbc://informix:in4mix@127.0.0.1/faempre_dev"
+        "?driver=IBM+INFORMIX+ODBC+DRIVER+(64-bit)"
+        "&server=informix"
+        "&service=9088"
+        "&protocol=onsoctcp"
+    )
+
+    args, kwargs = dialect.create_connect_args(url)
+    connection_string = args[0]
+
+    assert "NeedODBCTypesOnly=1" in connection_string
+    assert "DATABASE=faempre_dev" in connection_string
+    assert "SERVER=informix" in connection_string
