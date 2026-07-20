@@ -36,8 +36,8 @@ from sqlalchemy.engine import default
 from . import reflection as ifx_reflection
 from . import sqla_compat
 
-from sqlalchemy.types import BLOB, CHAR, CLOB, DATE, DATETIME, INTEGER,\
-    SMALLINT, BIGINT, DECIMAL, NUMERIC, REAL, TIME, TIMESTAMP,\
+from sqlalchemy.types import BLOB, CHAR, CLOB, DATE, DATETIME, INTEGER, \
+    SMALLINT, BIGINT, DECIMAL, NUMERIC, REAL, TIME, TIMESTAMP, \
     VARCHAR, FLOAT
 
 _IFX_SINGLE_ROW_FROM = " FROM systables WHERE tabid = 1"
@@ -266,6 +266,123 @@ def _get_ifx_lastrowid_query(column):
         expr = "DBINFO('sqlca.sqlerrd1')"
 
     return "SELECT %s%s" % (expr, _IFX_SINGLE_ROW_FROM)
+
+
+_IFX_UNENCODED_DEFAULT_SQL_KEYWORDS = frozenset(
+    {
+        "CURRENT",
+        "CURRENT_DATE",
+        "CURRENT_TIME",
+        "CURRENT_TIMESTAMP",
+        "CURRENT_USER",
+        "DBSERVERNAME",
+        "FALSE",
+        "NULL",
+        "SYSDATE",
+        "TODAY",
+        "TRUE",
+        "USER",
+    }
+)
+
+
+_IFX_DEFAULT_ENCODING_CHARACTERS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "abcdefghijklmnopqrstuvwxyz"
+    "0123456789+/"
+)
+
+
+def _normalize_ifx_reflected_default(raw_default, reflected_type):
+    """Normalize a DEFAULT value obtained from Informix system catalogs.
+
+    For most non-character types, Informix stores literal defaults in
+    ``sysdefaults.default`` using this format::
+
+        <encoded-6-bit-value> <SQL-literal>
+
+    Examples::
+
+        gAAAAAAAAAAA 0.000
+        AAAAAA 0
+        AACOrQ 2000-01-01
+
+    Character-family and BOOLEAN defaults contain only their textual
+    representation and must not have their first token removed.
+
+    SQL expressions such as ``CURRENT YEAR TO SECOND`` must also remain
+    unchanged.
+    """
+    if raw_default is None:
+        return None
+
+    value = str(raw_default).strip()
+
+    if not value:
+        return value
+
+    # Informix stores these families directly as their ASCII
+    # representation, without the internal 6-bit prefix.
+    if isinstance(
+        reflected_type,
+        (
+            sa_types.String,
+            sa_types.Boolean,
+        ),
+    ):
+        return value
+
+    encoded_prefix, separator, sql_literal = value.partition(" ")
+
+    # A value without a separator cannot contain both the internal
+    # representation and the textual SQL literal.
+    if not separator:
+        return value
+
+    # Do not damage native SQL default expressions, for example:
+    #
+    #     CURRENT YEAR TO SECOND
+    #
+    # The first token of these expressions is not an encoded value.
+    if encoded_prefix.upper() in _IFX_UNENCODED_DEFAULT_SQL_KEYWORDS:
+        return value
+
+    # Informix's internal representation uses a base64-like alphabet.
+    # Requiring at least six characters avoids interpreting ordinary
+    # short SQL tokens as encoded catalog data.
+    is_encoded_prefix = (
+        len(encoded_prefix) >= 6
+        and all(
+            character in _IFX_DEFAULT_ENCODING_CHARACTERS
+            for character in encoded_prefix
+        )
+    )
+
+    if not is_encoded_prefix:
+        return value
+
+    normalized = sql_literal.strip()
+
+    # Defensive behavior: never replace a non-empty catalog value with
+    # an empty result merely because it happened to contain a space.
+    return normalized if normalized else value
+
+
+def _normalize_ifx_reflected_column(column):
+    """Return an independent reflected-column dictionary with a clean default.
+
+    A copy is created because reflection results can be cached by SQLAlchemy
+    or by the Informix reflector. Mutating the original dictionary could
+    contaminate subsequent reflection calls.
+    """
+    normalized_column = dict(column)
+
+    normalized_column["default"] = _normalize_ifx_reflected_default(
+        normalized_column.get("default"),
+        normalized_column.get("type"),
+    )
+
+    return normalized_column
 
 
 colspecs = {
@@ -503,7 +620,7 @@ class IfxCompiler(compiler.SQLCompiler):
 
     def visit_mod_binary(self, binary, operator, **kw):
         return "mod(%s, %s)" % (self.process(binary.left),
-                                                self.process(binary.right))
+                                self.process(binary.right))
 
     def _ifx_fetch_options(self, select):
         return sqla_compat.get_fetch_clause_options(select)
@@ -628,8 +745,8 @@ class IfxCompiler(compiler.SQLCompiler):
 
         return paged
 
-    def limit_clause(self, select,**kwargs):
-            return ""
+    def limit_clause(self, select, **kwargs):
+        return ""
 
     def fetch_clause(
         self,
@@ -749,6 +866,7 @@ class IfxCompiler(compiler.SQLCompiler):
 
         return usql
 
+
 class IfxDDLCompiler(compiler.DDLCompiler):
 
     def get_server_version_info(self, dialect):
@@ -765,7 +883,7 @@ class IfxDDLCompiler(compiler.DDLCompiler):
 
         dbms_name = getattr(dialect, 'dbms_name', None)
         if hasattr(dialect, 'dbms_name'):
-           if dbms_name != None and (dbms_name.find('Informix/') != -1):
+            if dbms_name is not None and (dbms_name.find('Informix/') != -1):
                 return self.get_server_version_info(dialect) >= [10, 5]
         else:
             return False
@@ -912,22 +1030,20 @@ class IfxDDLCompiler(compiler.DDLCompiler):
         if self._is_unique_constraint_as_index(constraint):
             return "DROP %s%s" % \
                                 (qual, const)
-        return "ALTER TABLE %s DROP %s%s" % \
-                                (self.preparer.format_table(constraint.table),
-                                qual, const)
+        return "ALTER TABLE %s DROP %s%s" % (self.preparer.format_table(constraint.table), qual, const)
 
     def create_table_constraints(self, table, **kw):
         for constraint in sqla_compat.get_table_sorted_constraints(table):
             if self._should_use_nullable_unique_index(constraint):
                 self._defer_unique_constraint_to_index(constraint, "ukey")
 
-        result = super( IfxDDLCompiler, self ).create_table_constraints(table, **kw)
+        result = super(IfxDDLCompiler, self).create_table_constraints(table, **kw)
         return result
 
     def visit_create_index(
         self, create, include_schema=False, include_table_schema=True, **kw
     ):
-        sql = super( IfxDDLCompiler, self ).visit_create_index(
+        sql = super(IfxDDLCompiler, self).visit_create_index(
             create,
             include_schema=include_schema,
             include_table_schema=include_table_schema,
@@ -950,6 +1066,7 @@ class IfxDDLCompiler(compiler.DDLCompiler):
         )
         return sql
 
+
 class IfxIdentifierPreparer(compiler.IdentifierPreparer):
 
     reserved_words = RESERVED_WORDS
@@ -971,7 +1088,6 @@ class _SelectLastRowIDMixin(object):
     _select_lastrowid = False
     _lastrowid = None
     _lastrowid_query = None
-
 
     def get_lastrowid(self):
         return self._lastrowid
@@ -1023,10 +1139,10 @@ class _SelectLastRowIDMixin(object):
             compiled = getattr(self, "compiled", None)
 
             self._select_lastrowid = insert_has_sequence and \
-                                        not explicit_pk_value and \
-                                        not self._ifx_dml_returns_rows() and \
-                                        not getattr(compiled, "inline", False) and \
-                                        not getattr(self, "executemany", False)
+                not explicit_pk_value and \
+                not self._ifx_dml_returns_rows() and \
+                not getattr(compiled, "inline", False) and \
+                not getattr(self, "executemany", False)
             if self._select_lastrowid:
                 self._lastrowid_query = _get_ifx_lastrowid_query(seq_column)
 
@@ -1127,7 +1243,6 @@ class IfxDialect(default.DefaultDialect):
     def get_schema_names(self, connection, **kw):
         return self._reflector.get_schema_names(connection, **kw)
 
-
     def get_table_names(self, connection, schema=None, **kw):
         return self._reflector.get_table_names(connection, schema=schema, **kw)
 
@@ -1151,9 +1266,11 @@ class IfxDialect(default.DefaultDialect):
         return self._reflector.get_view_definition(
                                 connection, viewname, schema=schema, **kw)
 
-    def get_columns(self, connection, table_name, schema=None, **kw):
-        return self._reflector.get_columns(
-                                connection, table_name, schema=schema, **kw)
+    def get_columns(self, connection, table_name, schema=None, **kw,):
+        """Reflect columns and normalize Informix catalog defaults."""
+        reflected_columns = self._reflector.get_columns(connection, table_name, schema=schema, **kw,)
+
+        return [_normalize_ifx_reflected_column(column) for column in reflected_columns]
 
     def get_pk_constraint(self, connection, table_name, schema=None, **kw):
         return self._reflector.get_pk_constraint(
@@ -1189,7 +1306,8 @@ class IfxDialect(default.DefaultDialect):
         scope=ifx_reflection.ObjectScope.DEFAULT,
         **kw,
     ):
-        return self._reflector.get_multi_columns(
+        """Reflect multiple tables and normalize every column default."""
+        reflected = self._reflector.get_multi_columns(
             connection,
             schema=schema,
             filter_names=filter_names,
@@ -1197,6 +1315,28 @@ class IfxDialect(default.DefaultDialect):
             scope=scope,
             **kw,
         )
+
+        def normalize_columns(columns):
+            return [
+                _normalize_ifx_reflected_column(column)
+                for column in columns
+            ]
+
+        # Defensive compatibility: custom reflectors can return a mapping,
+        # although SQLAlchemy normally expects an iterable of key/value pairs.
+        if isinstance(reflected, dict):
+            return {
+                table_key: normalize_columns(columns)
+                for table_key, columns in reflected.items()
+            }
+
+        return [
+            (
+                table_key,
+                normalize_columns(columns),
+            )
+            for table_key, columns in reflected
+        ]
 
     def get_multi_pk_constraint(
         self,

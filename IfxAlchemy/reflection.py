@@ -22,14 +22,15 @@
 # limitations under the License.
 from sqlalchemy import exc
 from sqlalchemy import types as sa_types
-from sqlalchemy import sql, util
+from sqlalchemy import util
 from sqlalchemy.sql import quoted_name
-from sqlalchemy import Table, MetaData, Column
+from sqlalchemy import MetaData
 from sqlalchemy.engine import reflection
 from sqlalchemy.engine.reflection import ObjectKind, ObjectScope
 import re
 
 from . import sqla_compat
+
 
 class BaseReflector(object):
     def __init__(self, dialect):
@@ -109,11 +110,21 @@ class BaseReflector(object):
             normalized.add(str(name))
         return normalized
 
+
 class IfxReflector(BaseReflector):
     ischema = MetaData()
 
     _INDEX_PART_COUNT = 16
     _MISSING = object()
+
+    _PLAIN_LITERAL_DEFAULT_TYPES = {
+        0,   # CHAR
+        13,  # VARCHAR
+        15,  # NCHAR
+        16,  # NVARCHAR
+        40,  # LVARCHAR
+        45,  # BOOLEAN
+    }
 
     # Informix syscolumns.coltype base codes
     _COLTYPE_CODE_MAP = {
@@ -815,7 +826,22 @@ class IfxReflector(BaseReflector):
 
         return False
 
-    def _decode_default(self, default_type, default_value):
+    def _decode_literal_default(self, default_value, base_code):
+        value = self._clean_str(default_value)
+        if value is None:
+            return None
+
+        if base_code in self._PLAIN_LITERAL_DEFAULT_TYPES:
+            return value
+
+        parts = value.split(maxsplit=1)
+        if len(parts) != 2:
+            return value
+
+        _encoded_value, sql_value = parts
+        return sql_value.strip() or value
+
+    def _decode_default(self, default_type, default_value, base_code):
         default_type = self._clean_str(default_type)
         default_value = self._clean_str(default_value)
 
@@ -823,15 +849,20 @@ class IfxReflector(BaseReflector):
             return None
 
         if default_type == "L":
-            return default_value
+            return self._decode_literal_default(default_value, base_code)
+
         if default_type == "T":
             return "TODAY"
+
         if default_type == "U":
             return "USER"
+
         if default_type == "C":
             return default_value or "CURRENT"
+
         if default_type == "S":
             return default_value or "DBSERVERNAME"
+
         if default_type == "N":
             return None
 
@@ -1292,6 +1323,7 @@ class IfxReflector(BaseReflector):
         for row in rows:
             colname = self._clean_str(row[0])
             coltype = int(row[2])
+            base_code = coltype & 0x00FF
             collength = int(row[3]) if row[3] is not None else 0
             extended_id = row[4]
             extended_type_name = row[5]
@@ -1312,7 +1344,7 @@ class IfxReflector(BaseReflector):
                     "name": self.normalize_name(colname),
                     "type": satype,
                     "nullable": nullable,
-                    "default": self._decode_default(default_type, default_value),
+                    "default": self._decode_default(default_type, default_value, base_code),
                     "autoincrement": autoincrement,
                 }
             )
