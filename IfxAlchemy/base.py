@@ -33,6 +33,8 @@ from sqlalchemy.sql import compiler
 from sqlalchemy.sql import operators
 from sqlalchemy.sql import util as sql_util
 from sqlalchemy.engine import default
+from .temporal import IFXDateTime
+from .temporal import IFXTime
 from . import reflection as ifx_reflection
 from . import sqla_compat
 
@@ -40,7 +42,7 @@ from sqlalchemy.types import BLOB, CHAR, CLOB, DATE, DATETIME, INTEGER, \
     SMALLINT, BIGINT, DECIMAL, NUMERIC, REAL, TIME, TIMESTAMP, \
     VARCHAR, FLOAT
 
-_IFX_SINGLE_ROW_FROM = " FROM systables WHERE tabid = 1"
+_IFX_SINGLE_ROW_FROM = " FROM sysmaster:informix.sysdual"
 _IFX_LASTROWID_DBINFO_BY_TYPE = {
     "BIGSERIAL": "bigserial",
     "SERIAL8": "serial8",
@@ -139,6 +141,71 @@ class _IFXBoolean(sa_types.Boolean):
                 return '0'
         return process
 
+
+class _IFXTime(sa_types.Time):
+    cache_ok = True
+
+    def bind_processor(self, dialect):
+        def process(value):
+            if value is None:
+                return None
+
+            if isinstance(value, datetime.datetime):
+                return value
+
+            if isinstance(value, datetime.time):
+                return datetime.datetime.combine(
+                    datetime.date(1900, 1, 1),
+                    value.replace(tzinfo=None),
+                )
+
+            raise TypeError(
+                "Informix TIME expects datetime.time or datetime.datetime, "
+                f"not {type(value).__name__}"
+            )
+
+        return process
+
+    def result_processor(self, dialect, coltype):
+        def process(value):
+            if value is None:
+                return None
+
+            if isinstance(value, datetime.time):
+                return value.replace(tzinfo=None)
+
+            if isinstance(value, datetime.datetime):
+                return value.time().replace(tzinfo=None)
+
+            return datetime.time.fromisoformat(str(value).strip())
+
+        return process
+
+
+class _IFXNumeric(sa_types.Numeric):
+    cache_ok = True
+
+    def result_processor(self, dialect, coltype):
+        if self.asdecimal:
+            return super().result_processor(dialect, coltype)
+
+        def process(value):
+            return None if value is None else float(value)
+
+        return process
+
+
+class _IFXFloat(sa_types.Float):
+    cache_ok = True
+
+    def result_processor(self, dialect, coltype):
+        if self.asdecimal:
+            return super().result_processor(dialect, coltype)
+
+        def process(value):
+            return None if value is None else float(value)
+
+        return process
 
 class _IFXDate(sa_types.Date):
 
@@ -387,7 +454,11 @@ def _normalize_ifx_reflected_column(column):
 
 colspecs = {
     sa_types.Boolean: _IFXBoolean,
-    sa_types.Date: _IFXDate
+    sa_types.Date: _IFXDate,
+    sa_types.Time: _IFXTime,
+    sa_types.Numeric: _IFXNumeric,
+    sa_types.DECIMAL: _IFXNumeric,
+    sa_types.Float: _IFXFloat
 }
 
 ischema_names = {
@@ -466,11 +537,36 @@ class IfxTypeCompiler(compiler.GenericTypeCompiler):
     def visit_date(self, type_):
         return "DATE"
 
-    def visit_time(self, type_):
-        return "TIME"
+    def visit_time(self, type_, **kw):
+        fraction_digits = getattr(
+            type_,
+            "fraction_digits",
+            5,
+        )
 
-    def visit_datetime(self, type_):
-        return "DATETIME YEAR TO SECOND"
+        if fraction_digits == 0:
+            return "DATETIME HOUR TO SECOND"
+
+        return (
+            "DATETIME HOUR TO "
+            f"FRACTION({fraction_digits})"
+        )
+
+
+    def visit_datetime(self, type_, **kw):
+        fraction_digits = getattr(
+            type_,
+            "fraction_digits",
+            5,
+        )
+
+        if fraction_digits == 0:
+            return "DATETIME YEAR TO SECOND"
+
+        return (
+            "DATETIME YEAR TO "
+            f"FRACTION({fraction_digits})"
+        )
 
     def visit_smallint(self, type_):
         return "SMALLINT"
@@ -575,6 +671,9 @@ class IfxTypeCompiler(compiler.GenericTypeCompiler):
 
 
 class IfxCompiler(compiler.SQLCompiler):
+    def default_from(self):
+        return _IFX_SINGLE_ROW_FROM
+
     def visit_false(self, expr, **kw):
         return '0'
 
@@ -822,12 +921,8 @@ class IfxCompiler(compiler.SQLCompiler):
                     limit_expression, **kwargs
                 )
 
-        distinct = sqla_compat.get_distinct(select)
-        if isinstance(distinct, str):
-            text += distinct.upper() + " "
-        elif distinct:
-            text += "DISTINCT "
-
+        # SQLAlchemy conserva aquí su advertencia oficial para DISTINCT ON.
+        text += super().get_select_precolumns(select, **kwargs)
         return text
 
     def visit_savepoint(self, savepoint_stmt, **kw):

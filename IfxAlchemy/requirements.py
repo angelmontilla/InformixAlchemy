@@ -74,14 +74,24 @@ class Requirements(SuiteRequirements):
     # precision only. Informix-specific qualifier metadata is preserved on
     # reflected types.
     @property
-    def datetime_microseconds(self):
-        """The current Informix DATETIME mapping is second precision."""
+    def time_microseconds(self):
+        """Informix preserves at most five fractional digits.
+
+        Python datetime.time supports six microsecond digits. The dialect
+        offers deterministic FRACTION(5) truncation, but it cannot promise
+        exact six-digit microsecond round trips.
+        """
 
         return exclusions.closed()
 
     @property
-    def time_microseconds(self):
-        """The current Informix TIME mapping is second precision."""
+    def datetime_microseconds(self):
+        """Informix preserves at most five fractional digits.
+
+        Python datetime.datetime supports six microsecond digits. The
+        dialect offers deterministic FRACTION(5) truncation, but it cannot
+        promise exact six-digit microsecond round trips.
+        """
 
         return exclusions.closed()
 
@@ -151,9 +161,107 @@ class Requirements(SuiteRequirements):
 
         return exclusions.open()
 
-    #@property
-    #def offset(self):
-    #    return exclusions.closed()
+    @property
+    def reflects_pk_names(self):
+        """Informix devuelve el nombre de la clave primaria."""
+
+        return exclusions.open()
+
+    @property
+    def reflect_table_options(self):
+        """La reflexión de opciones físicas de tabla no está implementada."""
+
+        return exclusions.closed()
+
+    @property
+    def unicode_data(self):
+        """El contrato actual no garantiza Unicode arbitrario extremo a extremo."""
+
+        return exclusions.closed()
+
+    @property
+    def unicode_data_no_special_types(self):
+        """VARCHAR/TEXT no garantizan todos los caracteres Unicode del test."""
+
+        return exclusions.closed()
+
+    @property
+    def time(self):
+        """Time se representa como DATETIME HOUR TO SECOND."""
+
+        return exclusions.open()
+
+    @property
+    def time_implicit_bound(self):
+        """Un parámetro TIME aislado carece de contexto de tipo fiable en ODBC."""
+
+        return exclusions.closed()
+
+    @property
+    def date_implicit_bound(self):
+        """Un parámetro DATE aislado no se tipa de forma fiable."""
+
+        return exclusions.closed()
+
+    @property
+    def datetime_implicit_bound(self):
+        """Un parámetro DATETIME aislado no se tipa de forma fiable."""
+
+        return exclusions.closed()
+
+    @property
+    def standalone_null_binds_whereclause(self):
+        """Un NULL sin columna asociada no tiene tipo ODBC determinable."""
+
+        return exclusions.closed()
+
+    @property
+    def implicit_decimal_binds(self):
+        """DECIMAL seleccionado como parámetro aislado no está garantizado."""
+
+        return exclusions.closed()
+
+    @property
+    def literal_float_coercion(self):
+        """FLOAT seleccionado como parámetro aislado no está garantizado."""
+
+        return exclusions.closed()
+
+    @property
+    def expressions_against_unbounded_text(self):
+        """Informix TEXT es un LOB y no admite comparaciones ordinarias."""
+
+        return exclusions.closed()
+
+    @property
+    def parens_in_union_contained_select_w_limit_offset(self):
+        """Informix no admite el SQL parentetizado generado en estas ramas."""
+
+        return exclusions.closed()
+
+    @property
+    def parens_in_union_contained_select_wo_limit_offset(self):
+        """No se garantiza SELECT parentetizado dentro de UNION."""
+
+        return exclusions.closed()
+
+    @property
+    def sql_expression_limit_offset(self):
+        """FIRST/SKIP requieren valores enteros compatibles, no expresiones."""
+
+        return exclusions.closed()
+
+    @property
+    def group_by_complex_expression(self):
+        """No se garantiza GROUP BY sobre expresiones compuestas."""
+
+        return exclusions.closed()
+
+    @property
+    def insert_from_select(self):
+        """No se garantiza INSERT FROM SELECT con defaults SQLAlchemy."""
+
+        return exclusions.closed()
 
     @property
     def window_functions(self):
@@ -178,9 +286,7 @@ class Requirements(SuiteRequirements):
         such as 319438950232418390.273596, 87673.594069654243
 
         """
-        return exclusions.fails_if(lambda: True,
-                    "Current Informix test backend rejects DECIMAL(38, 12)"
-            )
+        return exclusions.fails_if(lambda: True, "Current Informix test backend rejects DECIMAL(38, 12)")
 
     @property
     def precision_numerics_retains_significant_digits(self):

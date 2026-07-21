@@ -140,11 +140,16 @@ celerybeat-schedule
 
 # dotenv
 .env
+.env.official-suites.example
+.env.official-suites
 
 # virtualenv
 .venv
 venv/
 ENV/
+
+# Dependencies
+requirements-dev.txt
 
 # Spyder project settings
 .spyderproject
@@ -172,3 +177,8 @@ Sample*.py
 try*.py
 run_test.py
 
+# Official suite output
+artifacts/*.xml
+artifacts/*.log
+.pytest_cache/
+test/.pytest_cache/
