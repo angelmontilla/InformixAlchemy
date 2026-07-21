@@ -83,9 +83,27 @@ _INFORMIX_FIXTURES = {
 }
 
 
-def _is_sqlalchemy_suite_run(config) -> bool:
-    if config.pluginmanager.hasplugin("sqlalchemy.testing.plugin.pytestplugin"):
+_OFFICIAL_SUITE_FILES = {
+    "test_out_parameters.py",
+    "test_suite.py",
+    "test_suite_alembic.py",
+}
+
+
+def _is_official_suite_run(config) -> bool:
+    """
+    Indica si pytest se está ejecutando mediante uno de los runners
+    de las suites oficiales.
+
+    Tanto la suite de SQLAlchemy como la suite externa de Alembic
+    utilizan sqlalchemy.testing.plugin.pytestplugin y reciben la URL
+    de la base de datos mediante la opción --dburi.
+    """
+    if config.pluginmanager.hasplugin(
+        "sqlalchemy.testing.plugin.pytestplugin"
+    ):
         return True
+
     try:
         return bool(config.getoption("dburi"))
     except (AttributeError, ValueError):
@@ -93,8 +111,16 @@ def _is_sqlalchemy_suite_run(config) -> bool:
 
 
 def pytest_ignore_collect(collection_path, config):
-    if collection_path.name in {"test_out_parameters.py", "test_suite.py"}:
-        return not _is_sqlalchemy_suite_run(config)
+    """
+    Evita que una ejecución normal de pytest recoja accidentalmente
+    las suites oficiales.
+
+    Los runners run_tests.py y run_alembic_tests.py cargan el plugin
+    oficial y, por tanto, sí pueden recoger sus ficheros respectivos.
+    """
+    if collection_path.name in _OFFICIAL_SUITE_FILES:
+        return not _is_official_suite_run(config)
+
     return False
 
 

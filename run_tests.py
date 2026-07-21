@@ -5,51 +5,75 @@ import sys
 
 import pytest
 from sqlalchemy.dialects import registry
-from sqlalchemy.engine import make_url
 
-
-DEFAULT_INFORMIX_SQLALCHEMY_URL = (
-    "informix+pyodbc://informix:in4mix@127.0.0.1/prueba4db"
-    "?driver=IBM+INFORMIX+ODBC+DRIVER+(64-bit)"
-    "&protocol=onsoctcp"
-    "&server=informix"
-    "&service=9088"
-    "&DELIMIDENT=Y"
+from tools.official_suite_support import (
+    load_official_suite_environment,
+    official_suite_dburi,
+    resolve_junit_file,
+    verify_official_suite_database,
 )
 
 
-def _normalized_dburi() -> str:
-    url = (
-        os.getenv("INFORMIX_SQLALCHEMY_SUITE_URL")
-        or os.getenv("INFORMIX_SQLALCHEMY_URL")
-        or DEFAULT_INFORMIX_SQLALCHEMY_URL
-    )
-    if "delimident=" not in url.lower():
-        separator = "&" if "?" in url else "?"
-        url = f"{url}{separator}DELIMIDENT=Y"
-    return url
+def main(
+    argv: list[str] | None = None,
+) -> int:
+    registry.register("informix", "IfxAlchemy.pyodbc", "IfxDialect_pyodbc",)
 
+    registry.register("informix.pyodbc", "IfxAlchemy.pyodbc", "IfxDialect_pyodbc",)
 
-def main(argv: list[str] | None = None) -> int:
-    registry.register("informix", "IfxAlchemy.pyodbc", "IfxDialect_pyodbc")
-    registry.register("informix.pyodbc", "IfxAlchemy.pyodbc", "IfxDialect_pyodbc")
+    try:
+        env_file = (
+            load_official_suite_environment()
+        )
 
-    dburi = _normalized_dburi()
-    safe_dburi = make_url(dburi).render_as_string(hide_password=True)
+        dburi = official_suite_dburi()
+
+        target = (
+            verify_official_suite_database(
+                dburi
+            )
+        )
+
+    except Exception as exc:
+        print(
+            f"ERROR: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
     print(
-        "Running the official SQLAlchemy suite for informix+pyodbc "
-        f"against {safe_dburi}",
+        "Running the official SQLAlchemy "
+        "dialect compliance suite",
         file=sys.stderr,
     )
 
-    suite_targets = ["test/test_suite.py"]
+    print(
+        f"Environment: {env_file}",
+        file=sys.stderr,
+    )
 
-    if os.getenv("IFXALCHEMY_INCLUDE_OUTPARAMS", "1").lower() not in {
+    print(
+        f"Target: {target['safe_url']}",
+        file=sys.stderr,
+    )
+
+    suite_targets = [
+        "test/test_suite.py",
+    ]
+
+    include_outparams = os.getenv(
+        "IFXALCHEMY_INCLUDE_OUTPARAMS",
+        "0",
+    ).casefold() not in {
         "0",
         "false",
         "no",
-    }:
-        suite_targets.append("test/test_out_parameters.py")
+    }
+
+    if include_outparams:
+        suite_targets.append(
+            "test/test_out_parameters.py"
+        )
 
     args = [
         "-c",
@@ -62,9 +86,20 @@ def main(argv: list[str] | None = None) -> int:
         "-ra",
     ]
 
-    junit_path = os.getenv("SQLALCHEMY_SUITE_JUNIT")
-    if junit_path:
-        args.extend(["--junitxml", junit_path])
+    junit_file = resolve_junit_file(
+        os.getenv(
+            "SQLALCHEMY_SUITE_JUNIT",
+            "",
+        ),
+        "sqlalchemy-suite.xml",
+    )
+
+    args.extend(
+        [
+            "--junitxml",
+            str(junit_file),
+        ]
+    )
 
     if argv:
         args.extend(argv)
@@ -73,4 +108,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    raise SystemExit(
+        main(sys.argv[1:])
+    )

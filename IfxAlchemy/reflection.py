@@ -27,6 +27,8 @@ from sqlalchemy.sql import quoted_name
 from sqlalchemy import MetaData
 from sqlalchemy.engine import reflection
 from sqlalchemy.engine.reflection import ObjectKind, ObjectScope
+from .temporal import IFXDateTime
+from .temporal import IFXTime
 import re
 
 from . import sqla_compat
@@ -991,11 +993,34 @@ class IfxReflector(BaseReflector):
         autoincrement,
         nullable,
     ):
-        qualifiers = self._decode_datetime_qualifiers(encoded_len)
-        satype = self._instantiate_ischema_type(type_name)
-        # Preserve Informix metadata without pretending SQLAlchemy has a
-        # portable generic representation for every Informix qualifier.
-        setattr(satype, "_informix_qualifiers", qualifiers)
+        qualifiers = self._decode_datetime_qualifiers(
+            encoded_len
+        )
+
+        first_code = qualifiers["first_code"]
+        last_code = qualifiers["last_code"]
+
+        if 11 <= last_code <= 15:
+            fraction_digits = last_code - 10
+        else:
+            fraction_digits = 0
+
+        # DATETIME HOUR TO ... represents a time without a date.
+        if first_code == 6:
+            satype = IFXTime(
+                fraction_digits=fraction_digits,
+            )
+        else:
+            satype = IFXDateTime(
+                fraction_digits=fraction_digits,
+            )
+
+        setattr(
+            satype,
+            "_informix_qualifiers",
+            qualifiers,
+        )
+
         return satype, autoincrement, nullable
 
     def _ifx_type_args(self, base_code, encoded_len):
@@ -1506,7 +1531,14 @@ class IfxReflector(BaseReflector):
                 }
             )
 
-        return fkeys
+        return sorted(
+            fkeys,
+            key=lambda item: (
+                item.get("name") is not None,
+                str(item.get("name") or "").lower(),
+                tuple(item.get("constrained_columns") or ()),
+            ),
+        )
 
     @reflection.cache
     def get_incoming_foreign_keys(self, connection, table_name, schema=None, **kw):
@@ -1736,7 +1768,14 @@ class IfxReflector(BaseReflector):
                 }
             )
 
-        return unique_constraints
+        return sorted(
+            unique_constraints,
+            key=lambda item: (
+                item.get("name") is not None,
+                str(item.get("name") or "").lower(),
+                tuple(item.get("column_names") or ()),
+            ),
+        )
 
     def get_multi_columns(
         self,
@@ -1771,6 +1810,10 @@ class IfxReflector(BaseReflector):
         yield from self._multi_reflect(
             connection,
             self.get_pk_constraint,
+            view_default_factory=lambda: {
+                "name": None,
+                "constrained_columns": [],
+            },
             schema=schema,
             filter_names=filter_names,
             kind=kind,
@@ -1791,6 +1834,7 @@ class IfxReflector(BaseReflector):
         yield from self._multi_reflect(
             connection,
             self.get_foreign_keys,
+            view_default_factory=list,
             schema=schema,
             filter_names=filter_names,
             kind=kind,
@@ -1811,6 +1855,7 @@ class IfxReflector(BaseReflector):
         yield from self._multi_reflect(
             connection,
             self.get_indexes,
+            view_default_factory=list,
             schema=schema,
             filter_names=filter_names,
             kind=kind,
@@ -1831,6 +1876,7 @@ class IfxReflector(BaseReflector):
         yield from self._multi_reflect(
             connection,
             self.get_unique_constraints,
+            view_default_factory=list,
             schema=schema,
             filter_names=filter_names,
             kind=kind,
@@ -1937,9 +1983,11 @@ class IfxReflector(BaseReflector):
         filter_names=None,
         kind=ObjectKind.TABLE,
         scope=ObjectScope.DEFAULT,
+        view_default_factory=None,
         **kw,
     ):
         unreflectable = kw.pop("unreflectable", {})
+
         names = self._table_names_for_multi(
             connection,
             schema=schema,
@@ -1949,8 +1997,35 @@ class IfxReflector(BaseReflector):
             **kw,
         )
 
+        view_names = set()
+
+        if (
+            view_default_factory is not None
+            and ObjectScope.DEFAULT in scope
+            and ObjectKind.VIEW in kind
+        ):
+            view_names = {
+                str(name)
+                for name in self.get_view_names(
+                    connection,
+                    schema=schema,
+                    **kw,
+                )
+            }
+
         for name in names:
             key = (schema, name)
+
+            if (
+                view_default_factory is not None
+                and str(name) in view_names
+            ):
+                yield (
+                    key,
+                    view_default_factory(),
+                )
+                continue
+
             reflected = self._multi_reflect_one(
                 connection,
                 single_table_method,
@@ -1959,6 +2034,7 @@ class IfxReflector(BaseReflector):
                 unreflectable,
                 kw,
             )
+
             if reflected is self._MISSING:
                 continue
 

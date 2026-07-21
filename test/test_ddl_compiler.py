@@ -17,6 +17,7 @@ from sqlalchemy import (
     String,
     Table,
     Text,
+    Time,
     Unicode,
     select,
 )
@@ -149,9 +150,65 @@ def test_type_compiler_smoke(dialect):
     assert type_compiler.process(String(50)).upper() == "VARCHAR(50)"
     assert type_compiler.process(Numeric(10, 2)).upper() == "DECIMAL(10, 2)"
     assert type_compiler.process(Date()).upper() == "DATE"
-    assert type_compiler.process(DateTime()).upper() == "DATETIME YEAR TO SECOND"
+
+    assert (
+        type_compiler.process(Time()).upper()
+        == "DATETIME HOUR TO FRACTION(5)"
+    )
+
+    assert (
+        type_compiler.process(DateTime()).upper()
+        == "DATETIME YEAR TO FRACTION(5)"
+    )
+
     assert type_compiler.process(Boolean()).upper() == "SMALLINT"
 
+@pytest.mark.ddl_compiler
+def test_time_uses_fraction5_in_create_table(dialect):
+    metadata = MetaData()
+
+    table = Table(
+        "ifx_time_fraction",
+        metadata,
+        Column("time_value", Time()),
+    )
+
+    compiled = str(
+        CreateTable(table).compile(
+            dialect=dialect,
+        )
+    )
+
+    upper = _upper_sql(compiled)
+
+    assert (
+        "TIME_VALUE DATETIME HOUR TO FRACTION(5)"
+        in upper
+    )
+
+
+@pytest.mark.ddl_compiler
+def test_datetime_uses_fraction5_in_create_table(dialect):
+    metadata = MetaData()
+
+    table = Table(
+        "ifx_datetime_fraction",
+        metadata,
+        Column("datetime_value", DateTime()),
+    )
+
+    compiled = str(
+        CreateTable(table).compile(
+            dialect=dialect,
+        )
+    )
+
+    upper = _upper_sql(compiled)
+
+    assert (
+        "DATETIME_VALUE DATETIME YEAR TO FRACTION(5)"
+        in upper
+    )
 
 @pytest.mark.ddl_compiler
 def test_limit_compiles_as_first(dialect, sample_table):

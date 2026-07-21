@@ -357,7 +357,12 @@ def test_multi_columns_reflection_honors_kind_and_scope(
     assert (None, view_name) in views
     assert (None, table_name) not in views
     assert temporary == {}
-    assert view_pks == {}
+    assert view_pks == {
+        (None, view_name): {
+            "name": None,
+            "constrained_columns": [],
+        }
+    }
 
 
 @pytest.mark.reflection_minimal
