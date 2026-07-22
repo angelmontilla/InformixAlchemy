@@ -61,13 +61,22 @@ class BaseReflector(object):
             return None
 
         lowered = name.lower()
+        uppered = name.upper()
+
+        if uppered == lowered:
+            return name
+
         if (
-            name.upper() == name
+            uppered == name
             and not sqla_compat.identifier_requires_quotes(
-                self.identifier_preparer, lowered
+                self.identifier_preparer,
+                lowered,
             )
         ):
             return lowered
+
+        if lowered == name:
+            return quoted_name(name, quote=True)
 
         return name
 

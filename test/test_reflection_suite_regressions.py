@@ -7,6 +7,8 @@ from sqlalchemy import exc
 
 from IfxAlchemy.reflection import IfxReflector
 
+from sqlalchemy.sql import quoted_name
+
 
 class _Dialect:
     ischema_names = {}
@@ -81,3 +83,13 @@ def test_has_sequence_uses_info_cache():
         info_cache=info_cache,
     ) is False
     assert connection.calls == 2
+
+
+def test_lowercase_catalog_name_is_forced_quoted_name():
+    reflector = IfxReflector(_Dialect())
+
+    name = reflector.normalize_name("t1")
+
+    assert isinstance(name, quoted_name)
+    assert name.quote is True
+    assert name.upper() == name.lower() == "t1"
