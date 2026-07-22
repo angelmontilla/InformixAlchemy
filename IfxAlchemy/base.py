@@ -964,6 +964,46 @@ class IfxCompiler(compiler.SQLCompiler):
 
 class IfxDDLCompiler(compiler.DDLCompiler):
 
+    def visit_create_sequence(self, create, prefix=None, **kw):
+        if create.if_not_exists:
+            raise exc.CompileError(
+                "Informix does not support CREATE SEQUENCE IF NOT EXISTS"
+            )
+
+        sequence = create.element
+        text = "CREATE SEQUENCE %s" % self.preparer.format_sequence(sequence)
+        options = []
+
+        if sequence.start is not None:
+            options.append("START WITH %d" % sequence.start)
+        if sequence.increment is not None:
+            options.append("INCREMENT BY %d" % sequence.increment)
+        if sequence.minvalue is not None:
+            options.append("MINVALUE %d" % sequence.minvalue)
+        if sequence.maxvalue is not None:
+            options.append("MAXVALUE %d" % sequence.maxvalue)
+        if sequence.cache is not None:
+            options.append("CACHE %d" % sequence.cache)
+        if sequence.cycle is True:
+            options.append("CYCLE")
+
+        if options:
+            text += " " + " ".join(options)
+
+        return text
+
+
+    def visit_drop_sequence(self, drop, **kw):
+        if drop.if_exists:
+            raise exc.CompileError(
+                "Informix does not support DROP SEQUENCE IF EXISTS"
+            )
+
+        return "DROP SEQUENCE %s" % self.preparer.format_sequence(
+            drop.element
+        )
+
+
     def get_server_version_info(self, dialect):
         """Returns the Informix server major and minor version as a list of ints."""
         if hasattr(dialect, 'dbms_ver'):

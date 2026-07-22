@@ -19,6 +19,7 @@ from sqlalchemy import (
     Text,
     Time,
     Unicode,
+    Sequence,
     select,
 )
 from sqlalchemy.exc import CompileError
@@ -27,7 +28,14 @@ from sqlalchemy.sql.elements import (
     RollbackToSavepointClause,
     SavepointClause,
 )
-from sqlalchemy.schema import CreateIndex, CreateTable, DropIndex, DropTable
+from sqlalchemy.schema import (
+    CreateIndex,
+    CreateSequence,
+    CreateTable,
+    DropIndex,
+    DropSequence,
+    DropTable,
+)
 
 from IfxAlchemy.pyodbc import IfxDialect_pyodbc
 
@@ -783,3 +791,47 @@ def test_text_and_clob_compile_as_distinct_informix_types(dialect):
 
     assert type_compiler.process(Text()).upper() == "TEXT"
     assert type_compiler.process(CLOB()).upper() == "CLOB"
+
+@pytest.mark.ddl_compiler
+def test_create_sequence_omits_generic_no_minmax(dialect):
+    sql = str(
+        CreateSequence(Sequence("other_seq")).compile(
+            dialect=dialect,
+        )
+    ).upper()
+
+    assert sql == "CREATE SEQUENCE OTHER_SEQ"
+    assert "NO MINVALUE" not in sql
+    assert "NO MAXVALUE" not in sql
+
+
+@pytest.mark.ddl_compiler
+def test_drop_sequence_compiles(dialect):
+    sql = str(
+        DropSequence(Sequence("other_seq")).compile(
+            dialect=dialect,
+        )
+    ).upper()
+
+    assert sql == "DROP SEQUENCE OTHER_SEQ"
+
+@pytest.mark.ddl_compiler
+def test_create_sequence_if_not_exists_is_rejected(dialect):
+    statement = CreateSequence(
+        Sequence("other_seq"),
+        if_not_exists=True,
+    )
+
+    with pytest.raises(CompileError, match="IF NOT EXISTS"):
+        statement.compile(dialect=dialect)
+
+
+@pytest.mark.ddl_compiler
+def test_drop_sequence_if_exists_is_rejected(dialect):
+    statement = DropSequence(
+        Sequence("other_seq"),
+        if_exists=True,
+    )
+
+    with pytest.raises(CompileError, match="IF EXISTS"):
+        statement.compile(dialect=dialect)
