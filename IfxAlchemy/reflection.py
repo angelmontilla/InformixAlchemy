@@ -1273,9 +1273,9 @@ class IfxReflector(BaseReflector):
 
     def get_table_options(self, connection, table_name, schema=None, **kw):
         _ = (connection, table_name, schema, kw)
-        # Informix-specific table options are not currently reflected by
-        # this dialect; return the stable SQLAlchemy structure explicitly.
-        return {}
+        raise NotImplementedError(
+            "Informix table-option reflection is not implemented"
+        )
 
     def get_temp_view_names(self, connection, schema=None, **kw):
         _ = (connection, schema, kw)
@@ -1294,7 +1294,7 @@ class IfxReflector(BaseReflector):
             tabtypes=("V",),
         )
         if view_row is None:
-            return None
+            raise exc.NoSuchTableError(viewname)
 
         tabid = int(view_row[0])
 
