@@ -25,16 +25,15 @@
 """
 import datetime
 from sqlalchemy import exc
-from sqlalchemy import types as sa_types
-from sqlalchemy import sql
 from sqlalchemy import schema as sa_schema
+from sqlalchemy import sql
+from sqlalchemy import types as sa_types
 from sqlalchemy import util
 from sqlalchemy.sql import compiler
 from sqlalchemy.sql import operators
 from sqlalchemy.sql import util as sql_util
 from sqlalchemy.engine import default
-from .temporal import IFXDateTime
-from .temporal import IFXTime
+
 from . import reflection as ifx_reflection
 from . import sqla_compat
 
@@ -206,6 +205,7 @@ class _IFXFloat(sa_types.Float):
             return None if value is None else float(value)
 
         return process
+
 
 class _IFXDate(sa_types.Date):
 
@@ -551,7 +551,6 @@ class IfxTypeCompiler(compiler.GenericTypeCompiler):
             "DATETIME HOUR TO "
             f"FRACTION({fraction_digits})"
         )
-
 
     def visit_datetime(self, type_, **kw):
         fraction_digits = getattr(
@@ -960,6 +959,33 @@ class IfxCompiler(compiler.SQLCompiler):
 
         return usql
 
+    def visit_binary(
+        self,
+        binary,
+        override_operator=None,
+        eager_grouping=False,
+        from_linter=None,
+        lateral_from_linter=None,
+        **kw,
+    ):
+        """Compile binary expressions with Informix IN/NOT IN null typing."""
+        operator_ = override_operator or binary.operator
+
+        if operator_ in (
+            operators.in_op,
+            operators.not_in_op,
+        ):
+            binary = self._coerce_untyped_null_in_left(binary)
+
+        return super().visit_binary(
+            binary,
+            override_operator=override_operator,
+            eager_grouping=eager_grouping,
+            from_linter=from_linter,
+            lateral_from_linter=lateral_from_linter,
+            **kw,
+        )
+
     def visit_is_distinct_from_binary(self, binary, operator, **kw):
         left = self.process(binary.left, **kw)
         right = self.process(binary.right, **kw)
@@ -982,6 +1008,95 @@ class IfxCompiler(compiler.SQLCompiler):
             f"WHEN {left} IS NULL OR {right} IS NULL THEN 0 "
             f"WHEN {left} = {right} THEN 1 "
             "ELSE 0 END = 1)"
+        )
+
+    def visit_empty_set_expr(self, element_types, **kw):
+        if len(element_types) != 1:
+            raise exc.CompileError(
+                "Informix dialect does not support tuple-valued empty sets"
+            )
+
+        return (
+            "SELECT 1 FROM sysmaster:informix.sysdual "
+            "WHERE 1 = 0"
+        )
+
+    def visit_empty_set_op_expr(self, type_, expand_op, **kw):
+        """Compile scalar empty IN/NOT IN expressions without a subquery."""
+        if len(type_) != 1:
+            raise exc.CompileError(
+                "Informix dialect does not support tuple-valued empty sets"
+            )
+
+        typed_null = self._render_empty_set_typed_null(type_[0])
+
+        if expand_op is operators.in_op:
+            return f"{typed_null}) AND (1 = 0"
+
+        if expand_op is operators.not_in_op:
+            return f"{typed_null}) OR (1 = 1"
+
+        return super().visit_empty_set_op_expr(
+            type_,
+            expand_op,
+            **kw,
+        )
+
+    def _render_empty_set_typed_null(self, type_):
+        """Render a typed NULL for an Informix empty IN value list.
+
+        SQLAlchemy can provide NullType when neither the left-hand expression
+        nor the empty expanding parameter contains type information. SMALLINT
+        is used only as a neutral fallback for that indeterminate case.
+        """
+        dialect_type = type_._unwrapped_dialect_impl(self.dialect)
+
+        if isinstance(dialect_type, sa_types.NullType):
+            rendered_type = "SMALLINT"
+        else:
+            rendered_type = self.dialect.type_compiler_instance.process(
+                dialect_type
+            )
+
+        return f"CAST(NULL AS {rendered_type})"
+
+    def _coerce_untyped_null_in_left(self, binary):
+        """Type an untyped NULL used as the left operand of IN/NOT IN.
+
+        Informix rejects:
+
+            NULL IN (...)
+
+        but accepts:
+
+            CAST(NULL AS SMALLINT) IN (...)
+
+        Whenever SQLAlchemy can infer a type from the right-hand expanding
+        parameter, that type is used. SMALLINT is the fallback for a completely
+        untyped empty collection.
+        """
+        if not isinstance(binary.left.type, sa_types.NullType):
+            return binary
+
+        right_type = binary.right.type._unwrapped_dialect_impl(
+            self.dialect
+        )
+
+        if isinstance(right_type, sa_types.NullType):
+            right_type = sa_types.SmallInteger()
+
+        coerced = binary._clone()
+        coerced.left = sql.cast(binary.left, right_type)
+
+        return coerced
+
+    def visit_in_op_binary(self, binary, operator, **kw):
+        binary = self._coerce_untyped_null_in_left(binary)
+
+        return self._generate_generic_binary(
+            binary,
+            compiler.OPERATORS[operator],
+            **kw,
         )
 
 
@@ -1015,7 +1130,6 @@ class IfxDDLCompiler(compiler.DDLCompiler):
 
         return text
 
-
     def visit_drop_sequence(self, drop, **kw):
         if drop.if_exists:
             raise exc.CompileError(
@@ -1025,7 +1139,6 @@ class IfxDDLCompiler(compiler.DDLCompiler):
         return "DROP SEQUENCE %s" % self.preparer.format_sequence(
             drop.element
         )
-
 
     def get_server_version_info(self, dialect):
         """Returns the Informix server major and minor version as a list of ints."""
@@ -1318,6 +1431,7 @@ class _SelectLastRowIDMixin(object):
 
 
 class IfxDialect(default.DefaultDialect):
+    div_is_floordiv = False
 
     name = 'informix'
     max_identifier_length = 128
