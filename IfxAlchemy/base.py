@@ -1419,15 +1419,22 @@ class _SelectLastRowIDMixin(object):
 
     def post_exec(self):
         if self._select_lastrowid and self._lastrowid_query:
-            cursor = getattr(self, "cursor", None)
-            if cursor is None:
+            root_connection = getattr(self, "root_connection", None)
+            fairy = getattr(root_connection, "connection", None)
+            dbapi_connection = getattr(fairy, "dbapi_connection", None)
+
+            if dbapi_connection is None:
                 return
-            cursor.execute(self._lastrowid_query)
-            row = cursor.fetchone()
-            if row is None:
-                return
-            if row[0] is not None:
-                self._lastrowid = int(row[0])
+
+            lastrowid_cursor = dbapi_connection.cursor()
+            try:
+                lastrowid_cursor.execute(self._lastrowid_query)
+                row = lastrowid_cursor.fetchone()
+
+                if row is not None and row[0] is not None:
+                    self._lastrowid = int(row[0])
+            finally:
+                lastrowid_cursor.close()
 
 
 class IfxDialect(default.DefaultDialect):
