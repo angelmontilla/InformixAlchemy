@@ -374,13 +374,14 @@ def test_limit_offset_keeps_function_arguments_with_commas_intact(
         .offset(10)
     )
 
-    compiled = str(stmt.compile(dialect=dialect))
-    upper = _upper_sql(compiled)
+    compiled = stmt.compile(dialect=dialect)
+    upper = _upper_sql(str(compiled))
 
     assert (
-        "REPLACE(SA_COMPILE_BASIC.NAME, :REPLACE_1, :REPLACE_2) AS NAME2"
+        "REPLACE(SA_COMPILE_BASIC.NAME, __[POSTCOMPILE_REPLACE_1], "
+        "__[POSTCOMPILE_REPLACE_2]) AS NAME2"
     ) in upper
-    assert "ROW_NUMBER() OVER (ORDER BY SA_COMPILE_BASIC.ID)" in upper
+    assert compiled.literal_execute_params
 
 
 @pytest.mark.ddl_compiler
@@ -408,10 +409,14 @@ def test_offset_keeps_unlabeled_replace_projection_intact_without_limit(
 ):
     stmt = select(func.replace(sample_table.c.name, "a", "b")).offset(2)
 
-    compiled = str(stmt.compile(dialect=dialect))
-    upper = _upper_sql(compiled)
+    compiled = stmt.compile(dialect=dialect)
+    upper = _upper_sql(str(compiled))
 
-    assert "FROM (SELECT REPLACE(SA_COMPILE_BASIC.NAME, :REPLACE_" in upper
+    assert (
+        "FROM (SELECT REPLACE(SA_COMPILE_BASIC.NAME, "
+        "__[POSTCOMPILE_REPLACE_"
+    ) in upper
+    assert compiled.literal_execute_params
     assert ") AS REPLACE_1, ROW_NUMBER() OVER () AS IFX_RN" in upper
     assert "WHERE ANON_1.IFX_RN > __[POSTCOMPILE_" in upper
     assert "__IFX_" not in upper

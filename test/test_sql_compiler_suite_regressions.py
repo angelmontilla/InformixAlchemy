@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import Integer, column, select
+from sqlalchemy import Integer, column, literal, select
 
 from IfxAlchemy.pyodbc import IfxDialect_pyodbc
 
@@ -41,3 +41,25 @@ def test_is_not_distinct_from_is_emulated_with_null_safe_case(dialect):
     assert "WHEN LEFT_VALUE IS NULL OR RIGHT_VALUE IS NULL THEN 0" in sql
     assert "WHEN LEFT_VALUE = RIGHT_VALUE THEN 1" in sql
     assert "ELSE 0 END = 1" in sql
+
+
+def test_projection_binds_use_literal_execute(dialect):
+    compiled = select(literal(1)).compile(dialect=dialect)
+
+    assert compiled.literal_execute_params
+    assert "POSTCOMPILE" in str(compiled)
+
+    rendered = select(literal(1)).compile(
+        dialect=dialect,
+        compile_kwargs={"render_postcompile": True},
+    )
+    assert "SELECT 1 AS" in _normalized(rendered)
+
+
+def test_concatenation_projection_renders_typed_literals(dialect):
+    rendered = select(literal("a") + "b").compile(
+        dialect=dialect,
+        compile_kwargs={"render_postcompile": True},
+    )
+
+    assert "SELECT 'A' || 'B' AS" in _normalized(rendered)

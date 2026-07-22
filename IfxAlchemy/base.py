@@ -671,6 +671,8 @@ class IfxTypeCompiler(compiler.GenericTypeCompiler):
 
 
 class IfxCompiler(compiler.SQLCompiler):
+    ansi_bind_rules = True
+
     def default_from(self):
         return _IFX_SINGLE_ROW_FROM
 
@@ -866,9 +868,6 @@ class IfxCompiler(compiler.SQLCompiler):
     def visit_sequence(self, sequence, **kw):
         return "%s.NEXTVAL" % self.preparer.format_sequence(sequence)
 
-    def default_from(self):
-        return _IFX_SINGLE_ROW_FROM
-
     def visit_function(self, func, add_to_result_map=None, **kwargs):
         if add_to_result_map is not None:
             add_to_result_map(func.name, func.name, (func.name,), func.type)
@@ -984,7 +983,6 @@ class IfxCompiler(compiler.SQLCompiler):
             f"WHEN {left} = {right} THEN 1 "
             "ELSE 0 END = 1)"
         )
-
 
 
 class IfxDDLCompiler(compiler.DDLCompiler):
