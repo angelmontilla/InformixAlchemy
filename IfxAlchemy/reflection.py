@@ -1082,6 +1082,7 @@ class IfxReflector(BaseReflector):
             *self._ifx_type_args(base_code, encoded_len),
         )
 
+    @reflection.cache
     def has_table(self, connection, table_name, schema=None, **kw):
         _ = kw
         row = self._get_table_row(
@@ -1103,6 +1104,7 @@ class IfxReflector(BaseReflector):
 
         return self._has_table_via_dbapi_probe(connection, table_name, schema=schema)
 
+    @reflection.cache
     def has_sequence(self, connection, sequence_name, schema=None, **kw):
         _ = kw
         owner = self._resolved_owner(schema)
