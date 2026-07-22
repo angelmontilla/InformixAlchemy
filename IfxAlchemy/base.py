@@ -961,6 +961,31 @@ class IfxCompiler(compiler.SQLCompiler):
 
         return usql
 
+    def visit_is_distinct_from_binary(self, binary, operator, **kw):
+        left = self.process(binary.left, **kw)
+        right = self.process(binary.right, **kw)
+
+        return (
+            "(CASE "
+            f"WHEN {left} IS NULL AND {right} IS NULL THEN 0 "
+            f"WHEN {left} IS NULL OR {right} IS NULL THEN 1 "
+            f"WHEN {left} = {right} THEN 0 "
+            "ELSE 1 END = 1)"
+        )
+
+    def visit_is_not_distinct_from_binary(self, binary, operator, **kw):
+        left = self.process(binary.left, **kw)
+        right = self.process(binary.right, **kw)
+
+        return (
+            "(CASE "
+            f"WHEN {left} IS NULL AND {right} IS NULL THEN 1 "
+            f"WHEN {left} IS NULL OR {right} IS NULL THEN 0 "
+            f"WHEN {left} = {right} THEN 1 "
+            "ELSE 0 END = 1)"
+        )
+
+
 
 class IfxDDLCompiler(compiler.DDLCompiler):
 
