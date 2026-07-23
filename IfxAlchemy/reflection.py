@@ -1549,8 +1549,6 @@ class IfxReflector(BaseReflector):
             options = {}
             if delrule == "C":
                 options["ondelete"] = "CASCADE"
-            elif delrule == "R":
-                options["ondelete"] = "RESTRICT"
 
             fkeys.append(
                 {

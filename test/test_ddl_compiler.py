@@ -11,6 +11,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     func,
+    ForeignKeyConstraint,
     Index,
     Integer,
     literal_column,
@@ -965,3 +966,114 @@ def test_supported_non_arithmetic_server_defaults_still_compile(
     )
 
     assert expected_sql in compiled
+
+def _table_with_foreign_key_ondelete(ondelete):
+    metadata = MetaData()
+
+    parent = Table(
+        "sa_fk_parent",
+        metadata,
+        Column(
+            "id",
+            Integer,
+            primary_key=True,
+            autoincrement=False,
+        ),
+    )
+
+    child = Table(
+        "sa_fk_child",
+        metadata,
+        Column(
+            "id",
+            Integer,
+            primary_key=True,
+            autoincrement=False,
+        ),
+        Column(
+            "parent_id",
+            Integer,
+        ),
+        ForeignKeyConstraint(
+            ["parent_id"],
+            [parent.c.id],
+            name="fk_sa_child_parent",
+            ondelete=ondelete,
+        ),
+    )
+
+    return child
+
+
+@pytest.mark.ddl_compiler
+def test_foreign_key_without_ondelete_compiles_without_action(
+    dialect,
+):
+    child = _table_with_foreign_key_ondelete(None)
+
+    compiled = _upper_sql(
+        str(
+            CreateTable(child).compile(
+                dialect=dialect
+            )
+        )
+    )
+
+    assert "ON DELETE" not in compiled
+
+
+@pytest.mark.ddl_compiler
+@pytest.mark.parametrize(
+    "ondelete",
+    [
+        "CASCADE",
+        "cascade",
+        "  cascade  ",
+    ],
+)
+def test_foreign_key_ondelete_cascade_compiles_canonically(
+    dialect,
+    ondelete,
+):
+    child = _table_with_foreign_key_ondelete(
+        ondelete
+    )
+
+    compiled = _upper_sql(
+        str(
+            CreateTable(child).compile(
+                dialect=dialect
+            )
+        )
+    )
+
+    assert "ON DELETE CASCADE" in compiled
+
+
+@pytest.mark.ddl_compiler
+@pytest.mark.parametrize(
+    "ondelete",
+    [
+        "RESTRICT",
+        "SET NULL",
+        "SET DEFAULT",
+        "NO ACTION",
+        "CUALQUIER COSA",
+        "CASCADE; DROP TABLE sa_fk_parent",
+    ],
+)
+def test_unsupported_foreign_key_ondelete_actions_are_rejected(
+    dialect,
+    ondelete,
+):
+    child = _table_with_foreign_key_ondelete(
+        ondelete
+    )
+
+    with pytest.raises(
+        CompileError,
+        match="supports only ON DELETE CASCADE",
+    ):
+        CreateTable(child).compile(
+            dialect=dialect
+        )

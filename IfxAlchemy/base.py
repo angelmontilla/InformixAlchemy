@@ -1421,14 +1421,45 @@ class IfxDDLCompiler(compiler.DDLCompiler):
 
         return " ".join(col_spec)
 
+    @staticmethod
+    def _normalize_ondelete_action(action):
+        """Validate and normalize an Informix ON DELETE action."""
+        if action is None:
+            return None
+
+        if not isinstance(action, str):
+            raise exc.CompileError(
+                "Informix foreign-key ON DELETE action must be "
+                "a string or None"
+            )
+
+        normalized_action = " ".join(
+            action.upper().split()
+        )
+
+        if normalized_action != "CASCADE":
+            raise exc.CompileError(
+                "Informix supports only ON DELETE CASCADE for "
+                "foreign-key constraints; received %r" % action
+            )
+
+        return normalized_action
+
     def define_constraint_cascades(self, constraint):
         text = ""
-        if constraint.ondelete is not None:
-            text += " ON DELETE %s" % constraint.ondelete
+
+        ondelete = self._normalize_ondelete_action(
+            constraint.ondelete
+        )
+
+        if ondelete is not None:
+            text += " ON DELETE %s" % ondelete
 
         if constraint.onupdate is not None:
             util.warn(
-                "Informix does not support UPDATE CASCADE for foreign keys.")
+                "Informix does not support UPDATE CASCADE "
+                "for foreign keys."
+            )
 
         return text
 
