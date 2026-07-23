@@ -107,3 +107,49 @@ def test_explicit_values_override_server_defaults(
 
     assert row.importe == Decimal("125.750")
     assert row.estado == "MANUAL"
+
+
+def test_server_defaults_are_reflected_on_the_correct_columns(
+    engine,
+    server_default_table,
+):
+    inspector = inspect(engine)
+
+    columns = {
+        str(column["name"]): column
+        for column in inspector.get_columns(server_default_table.name)
+    }
+
+    assert set(columns) == {"id", "importe", "estado"}
+    assert columns["id"]["default"] is None
+    assert columns["importe"]["default"] == "0.000"
+    assert columns["estado"]["default"] == "ACTIVO"
+
+
+@pytest.fixture
+def literal_default_table(engine):
+    metadata = MetaData()
+    table = Table(
+        "ifx_test_literal_defaults",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("literal_value", Integer, server_default=text("10")),
+        Column("literal_text", String(20), server_default=text("'ACTIVO'")),
+    )
+
+    metadata.drop_all(engine, checkfirst=True)
+    metadata.create_all(engine)
+    try:
+        yield table
+    finally:
+        metadata.drop_all(engine, checkfirst=True)
+
+
+def test_literal_defaults_are_reflected(engine, expression_default_table):
+    columns = {
+        str(column["name"]): column
+        for column in inspect(engine).get_columns(expression_default_table.name)
+    }
+
+    assert columns["literal_value"]["default"] == "10"
+    assert columns["literal_text"]["default"].replace(" ", "") == "ACTIVO"

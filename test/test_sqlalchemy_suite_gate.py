@@ -371,7 +371,16 @@ def test_sqlalchemy_version_contract_for_current_validation_lane():
     assert (major, minor) == ("2", "0")
     assert int(patch) >= 45
 
+
 def test_legacy_full_returning_flag_is_not_declared():
     assert "full_returning" not in IfxDialect.__dict__
     assert "full_returning" not in IfxDialect_pyodbc.__dict__
     assert "full_returning" not in IfxDialect_IfxPy.__dict__
+
+
+@pytest.mark.sqlalchemy_suite
+def test_server_default_requirements_reject_arithmetic_expressions():
+    requirements = Requirements()
+
+    assert requirements.server_defaults.enabled is True
+    assert requirements.expression_server_defaults.enabled is False

@@ -24,17 +24,18 @@
 
 """
 import datetime
+import re
+
 from sqlalchemy import exc
-from sqlalchemy import types as sa_types
-from sqlalchemy import sql
 from sqlalchemy import schema as sa_schema
+from sqlalchemy import sql
+from sqlalchemy import types as sa_types
 from sqlalchemy import util
 from sqlalchemy.sql import compiler
 from sqlalchemy.sql import operators
 from sqlalchemy.sql import util as sql_util
 from sqlalchemy.engine import default
-from .temporal import IFXDateTime
-from .temporal import IFXTime
+
 from . import reflection as ifx_reflection
 from . import sqla_compat
 
@@ -207,6 +208,7 @@ class _IFXFloat(sa_types.Float):
 
         return process
 
+
 class _IFXDate(sa_types.Date):
 
     cache_ok = True
@@ -333,6 +335,223 @@ def _get_ifx_lastrowid_query(column):
         expr = "DBINFO('sqlca.sqlerrd1')"
 
     return "SELECT %s%s" % (expr, _IFX_SINGLE_ROW_FROM)
+
+
+_IFX_ARITHMETIC_DEFAULT_OPERATORS = frozenset(
+    {
+        operators.add,
+        operators.sub,
+        operators.mul,
+        operators.truediv,
+        operators.floordiv,
+        operators.mod,
+    }
+)
+
+_IFX_SIGNED_NUMERIC_DEFAULT_RE = re.compile(
+    r"^[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE][+-]?\d+)?$"
+)
+
+_IFX_QUOTED_STRING_DEFAULT_RE = re.compile(
+    r"^'(?:''|[^'])*'$",
+    re.DOTALL,
+)
+
+_IFX_ISO_TEMPORAL_DEFAULT_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}"
+    r"(?:[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?)?$"
+)
+
+
+def _strip_ifx_outer_parentheses(value):
+    """Remove balanced parentheses enclosing the complete default."""
+
+    text = str(value).strip()
+
+    while len(text) >= 2 and text[0] == "(" and text[-1] == ")":
+        depth = 0
+        in_string = False
+        encloses_whole_value = True
+        index = 0
+
+        while index < len(text):
+            character = text[index]
+
+            if in_string:
+                if character == "'":
+                    if index + 1 < len(text) and text[index + 1] == "'":
+                        index += 2
+                        continue
+
+                    in_string = False
+
+                index += 1
+                continue
+
+            if character == "'":
+                in_string = True
+
+            elif character == "(":
+                depth += 1
+
+            elif character == ")":
+                depth -= 1
+
+                if depth == 0 and index != len(text) - 1:
+                    encloses_whole_value = False
+                    break
+
+            index += 1
+
+        if (
+            not encloses_whole_value
+            or depth != 0
+            or in_string
+        ):
+            break
+
+        text = text[1:-1].strip()
+
+    return text
+
+
+def _is_ifx_scalar_default_literal(text):
+    """Return whether *text* is a supported non-arithmetic literal."""
+    return any(
+        pattern.fullmatch(text)
+        for pattern in (
+            _IFX_SIGNED_NUMERIC_DEFAULT_RE,
+            _IFX_QUOTED_STRING_DEFAULT_RE,
+            _IFX_ISO_TEMPORAL_DEFAULT_RE,
+        )
+    )
+
+
+def _mask_ifx_quoted_literals(text):
+    """Replace quoted SQL literal contents with spaces.
+
+    Keeping the original length allows operator positions to remain stable.
+    Doubled single quotes are treated as escaped quotes inside a literal.
+    """
+    characters = list(text)
+    in_string = False
+    index = 0
+
+    while index < len(characters):
+        character = characters[index]
+
+        if character != "'":
+            if in_string:
+                characters[index] = " "
+            index += 1
+            continue
+
+        characters[index] = " "
+
+        if in_string and index + 1 < len(characters):
+            if characters[index + 1] == "'":
+                characters[index + 1] = " "
+                index += 2
+                continue
+
+        in_string = not in_string
+        index += 1
+
+    return "".join(characters)
+
+
+def _nearest_ifx_non_space_character(text, start, step):
+    """Return the nearest non-space character or ``None``."""
+    index = start
+
+    while 0 <= index < len(text) and text[index].isspace():
+        index += step
+
+    if 0 <= index < len(text):
+        return text[index]
+
+    return None
+
+
+def _is_ifx_non_binary_sign(text, index):
+    """Return whether ``+`` or ``-`` is unary or part of an exponent."""
+    previous_character = _nearest_ifx_non_space_character(
+        text,
+        index - 1,
+        -1,
+    )
+    next_character = _nearest_ifx_non_space_character(
+        text,
+        index + 1,
+        1,
+    )
+
+    is_unary_sign = (
+        previous_character is None
+        or previous_character in "(,"
+    )
+    is_exponent_sign = (
+        previous_character in {"e", "E"}
+        and next_character is not None
+        and next_character.isdigit()
+    )
+
+    return is_unary_sign or is_exponent_sign
+
+
+def _contains_ifx_binary_arithmetic_operator(text):
+    """Return whether unquoted SQL contains a binary arithmetic operator."""
+    if any(operator in text for operator in "*/%"):
+        return True
+
+    for index, character in enumerate(text):
+        if (
+            character in "+-"
+            and not _is_ifx_non_binary_sign(text, index)
+        ):
+            return True
+
+    return False
+
+
+def _contains_ifx_arithmetic_default(default_sql):
+    """Return True for arithmetic operators outside quoted SQL literals."""
+    text = _strip_ifx_outer_parentheses(str(default_sql))
+
+    if not text or _is_ifx_scalar_default_literal(text):
+        return False
+
+    unquoted_text = _mask_ifx_quoted_literals(text)
+    return _contains_ifx_binary_arithmetic_operator(unquoted_text)
+
+
+def _validate_ifx_server_default(column, default_sql):
+    """Reject arithmetic server defaults unsupported by Informix."""
+
+    server_default = getattr(column, "server_default", None)
+    default_arg = getattr(server_default, "arg", None)
+
+    is_structured_arithmetic_expression = (
+        isinstance(default_arg, sql.elements.BinaryExpression)
+        and default_arg.operator
+        in _IFX_ARITHMETIC_DEFAULT_OPERATORS
+    )
+
+    is_textual_arithmetic_expression = (
+        _contains_ifx_arithmetic_default(default_sql)
+    )
+
+    if (
+        is_structured_arithmetic_expression
+        or is_textual_arithmetic_expression
+    ):
+        raise exc.CompileError(
+            "Informix does not support arithmetic server-default "
+            f"expressions for column {column.name!r}: "
+            f"{default_sql!r}. "
+            "Use a literal value or an Informix native default "
+            "such as CURRENT or TODAY."
+        )
 
 
 _IFX_UNENCODED_DEFAULT_SQL_KEYWORDS = frozenset(
@@ -552,7 +771,6 @@ class IfxTypeCompiler(compiler.GenericTypeCompiler):
             f"FRACTION({fraction_digits})"
         )
 
-
     def visit_datetime(self, type_, **kw):
         fraction_digits = getattr(
             type_,
@@ -671,6 +889,8 @@ class IfxTypeCompiler(compiler.GenericTypeCompiler):
 
 
 class IfxCompiler(compiler.SQLCompiler):
+    ansi_bind_rules = True
+
     def default_from(self):
         return _IFX_SINGLE_ROW_FROM
 
@@ -749,6 +969,12 @@ class IfxCompiler(compiler.SQLCompiler):
 
         if sqla_compat.simple_int_clause(select, clause):
             return clause.render_literal_execute()
+
+        if isinstance(clause.type, sa_types.NullType):
+            return sql.type_coerce(
+                clause,
+                sa_types.Integer(),
+            )
 
         return clause
 
@@ -866,9 +1092,6 @@ class IfxCompiler(compiler.SQLCompiler):
     def visit_sequence(self, sequence, **kw):
         return "%s.NEXTVAL" % self.preparer.format_sequence(sequence)
 
-    def default_from(self):
-        return _IFX_SINGLE_ROW_FROM
-
     def visit_function(self, func, add_to_result_map=None, **kwargs):
         if add_to_result_map is not None:
             add_to_result_map(func.name, func.name, (func.name,), func.type)
@@ -961,8 +1184,199 @@ class IfxCompiler(compiler.SQLCompiler):
 
         return usql
 
+    def visit_binary(
+        self,
+        binary,
+        override_operator=None,
+        eager_grouping=False,
+        from_linter=None,
+        lateral_from_linter=None,
+        **kw,
+    ):
+        """Compile binary expressions with Informix IN/NOT IN null typing."""
+        operator_ = override_operator or binary.operator
+
+        if operator_ in (
+            operators.in_op,
+            operators.not_in_op,
+        ):
+            binary = self._coerce_untyped_null_in_left(binary)
+
+        return super().visit_binary(
+            binary,
+            override_operator=override_operator,
+            eager_grouping=eager_grouping,
+            from_linter=from_linter,
+            lateral_from_linter=lateral_from_linter,
+            **kw,
+        )
+
+    def visit_is_distinct_from_binary(self, binary, operator, **kw):
+        left = self.process(binary.left, **kw)
+        right = self.process(binary.right, **kw)
+
+        return (
+            "(CASE "
+            f"WHEN {left} IS NULL AND {right} IS NULL THEN 0 "
+            f"WHEN {left} IS NULL OR {right} IS NULL THEN 1 "
+            f"WHEN {left} = {right} THEN 0 "
+            "ELSE 1 END = 1)"
+        )
+
+    def visit_is_not_distinct_from_binary(self, binary, operator, **kw):
+        left = self.process(binary.left, **kw)
+        right = self.process(binary.right, **kw)
+
+        return (
+            "(CASE "
+            f"WHEN {left} IS NULL AND {right} IS NULL THEN 1 "
+            f"WHEN {left} IS NULL OR {right} IS NULL THEN 0 "
+            f"WHEN {left} = {right} THEN 1 "
+            "ELSE 0 END = 1)"
+        )
+
+    def visit_empty_set_expr(self, element_types, **kw):
+        if len(element_types) != 1:
+            raise exc.CompileError(
+                "Informix dialect does not support tuple-valued empty sets"
+            )
+
+        return (
+            "SELECT 1 FROM sysmaster:informix.sysdual "
+            "WHERE 1 = 0"
+        )
+
+    def visit_empty_set_op_expr(self, type_, expand_op, **kw):
+        """Compile scalar empty IN/NOT IN expressions without a subquery."""
+        if len(type_) != 1:
+            raise exc.CompileError(
+                "Informix dialect does not support tuple-valued empty sets"
+            )
+
+        typed_null = self._render_empty_set_typed_null(type_[0])
+
+        if expand_op is operators.in_op:
+            return f"{typed_null}) AND (1 = 0"
+
+        if expand_op is operators.not_in_op:
+            return f"{typed_null}) OR (1 = 1"
+
+        return super().visit_empty_set_op_expr(
+            type_,
+            expand_op,
+            **kw,
+        )
+
+    def _render_empty_set_typed_null(self, type_):
+        """Render a typed NULL for an Informix empty IN value list.
+
+        SQLAlchemy can provide NullType when neither the left-hand expression
+        nor the empty expanding parameter contains type information. SMALLINT
+        is used only as a neutral fallback for that indeterminate case.
+        """
+        dialect_type = type_._unwrapped_dialect_impl(self.dialect)
+
+        if isinstance(dialect_type, sa_types.NullType):
+            rendered_type = "SMALLINT"
+        else:
+            rendered_type = self.dialect.type_compiler_instance.process(
+                dialect_type
+            )
+
+        return f"CAST(NULL AS {rendered_type})"
+
+    def _coerce_untyped_null_in_left(self, binary):
+        """Type an untyped NULL used as the left operand of IN/NOT IN.
+
+        Informix rejects:
+
+            NULL IN (...)
+
+        but accepts:
+
+            CAST(NULL AS SMALLINT) IN (...)
+
+        Whenever SQLAlchemy can infer a type from the right-hand expanding
+        parameter, that type is used. SMALLINT is the fallback for a completely
+        untyped empty collection.
+        """
+        if not isinstance(binary.left.type, sa_types.NullType):
+            return binary
+
+        right_type = binary.right.type._unwrapped_dialect_impl(
+            self.dialect
+        )
+
+        if isinstance(right_type, sa_types.NullType):
+            right_type = sa_types.SmallInteger()
+
+        coerced = binary._clone()
+        coerced.left = sql.cast(binary.left, right_type)
+
+        return coerced
+
+    def visit_in_op_binary(self, binary, operator, **kw):
+        binary = self._coerce_untyped_null_in_left(binary)
+
+        return self._generate_generic_binary(
+            binary,
+            compiler.OPERATORS[operator],
+            **kw,
+        )
+
 
 class IfxDDLCompiler(compiler.DDLCompiler):
+
+    def get_column_default_string(self, column):
+        """Compile and validate an Informix column server default."""
+
+        default_sql = super().get_column_default_string(column)
+
+        if default_sql is not None:
+            _validate_ifx_server_default(
+                column,
+                default_sql,
+            )
+
+        return default_sql
+
+    def visit_create_sequence(self, create, prefix=None, **kw):
+        if create.if_not_exists:
+            raise exc.CompileError(
+                "Informix does not support CREATE SEQUENCE IF NOT EXISTS"
+            )
+
+        sequence = create.element
+        text = "CREATE SEQUENCE %s" % self.preparer.format_sequence(sequence)
+        options = []
+
+        if sequence.start is not None:
+            options.append("START WITH %d" % sequence.start)
+        if sequence.increment is not None:
+            options.append("INCREMENT BY %d" % sequence.increment)
+        if sequence.minvalue is not None:
+            options.append("MINVALUE %d" % sequence.minvalue)
+        if sequence.maxvalue is not None:
+            options.append("MAXVALUE %d" % sequence.maxvalue)
+        if sequence.cache is not None:
+            options.append("CACHE %d" % sequence.cache)
+        if sequence.cycle is True:
+            options.append("CYCLE")
+
+        if options:
+            text += " " + " ".join(options)
+
+        return text
+
+    def visit_drop_sequence(self, drop, **kw):
+        if drop.if_exists:
+            raise exc.CompileError(
+                "Informix does not support DROP SEQUENCE IF EXISTS"
+            )
+
+        return "DROP SEQUENCE %s" % self.preparer.format_sequence(
+            drop.element
+        )
 
     def get_server_version_info(self, dialect):
         """Returns the Informix server major and minor version as a list of ints."""
@@ -1007,14 +1421,45 @@ class IfxDDLCompiler(compiler.DDLCompiler):
 
         return " ".join(col_spec)
 
+    @staticmethod
+    def _normalize_ondelete_action(action):
+        """Validate and normalize an Informix ON DELETE action."""
+        if action is None:
+            return None
+
+        if not isinstance(action, str):
+            raise exc.CompileError(
+                "Informix foreign-key ON DELETE action must be "
+                "a string or None"
+            )
+
+        normalized_action = " ".join(
+            action.upper().split()
+        )
+
+        if normalized_action != "CASCADE":
+            raise exc.CompileError(
+                "Informix supports only ON DELETE CASCADE for "
+                "foreign-key constraints; received %r" % action
+            )
+
+        return normalized_action
+
     def define_constraint_cascades(self, constraint):
         text = ""
-        if constraint.ondelete is not None:
-            text += " ON DELETE %s" % constraint.ondelete
+
+        ondelete = self._normalize_ondelete_action(
+            constraint.ondelete
+        )
+
+        if ondelete is not None:
+            text += " ON DELETE %s" % ondelete
 
         if constraint.onupdate is not None:
             util.warn(
-                "Informix does not support UPDATE CASCADE for foreign keys.")
+                "Informix does not support UPDATE CASCADE "
+                "for foreign keys."
+            )
 
         return text
 
@@ -1243,18 +1688,26 @@ class _SelectLastRowIDMixin(object):
 
     def post_exec(self):
         if self._select_lastrowid and self._lastrowid_query:
-            cursor = getattr(self, "cursor", None)
-            if cursor is None:
+            root_connection = getattr(self, "root_connection", None)
+            fairy = getattr(root_connection, "connection", None)
+            dbapi_connection = getattr(fairy, "dbapi_connection", None)
+
+            if dbapi_connection is None:
                 return
-            cursor.execute(self._lastrowid_query)
-            row = cursor.fetchone()
-            if row is None:
-                return
-            if row[0] is not None:
-                self._lastrowid = int(row[0])
+
+            lastrowid_cursor = dbapi_connection.cursor()
+            try:
+                lastrowid_cursor.execute(self._lastrowid_query)
+                row = lastrowid_cursor.fetchone()
+
+                if row is not None and row[0] is not None:
+                    self._lastrowid = int(row[0])
+            finally:
+                lastrowid_cursor.close()
 
 
 class IfxDialect(default.DefaultDialect):
+    div_is_floordiv = False
 
     name = 'informix'
     max_identifier_length = 128

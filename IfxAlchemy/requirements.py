@@ -295,3 +295,13 @@ class Requirements(SuiteRequirements):
         the .000 maintained."""
 
         return exclusions.open()
+
+    @property
+    def server_defaults(self):
+        return exclusions.open()
+
+    @property
+    def expression_server_defaults(self):
+        """Informix does not support arbitrary arithmetic DEFAULT expressions."""
+
+        return exclusions.closed()

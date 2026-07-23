@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import (
+    bindparam,
     Boolean,
     CheckConstraint,
     CLOB,
@@ -10,15 +11,19 @@ from sqlalchemy import (
     Date,
     DateTime,
     func,
+    ForeignKeyConstraint,
     Index,
     Integer,
-    MetaData,
+    literal_column,
+    MetaData,    
     Numeric,
     String,
     Table,
     Text,
+    text,
     Time,
     Unicode,
+    Sequence,
     select,
 )
 from sqlalchemy.exc import CompileError
@@ -27,7 +32,14 @@ from sqlalchemy.sql.elements import (
     RollbackToSavepointClause,
     SavepointClause,
 )
-from sqlalchemy.schema import CreateIndex, CreateTable, DropIndex, DropTable
+from sqlalchemy.schema import (
+    CreateIndex,
+    CreateSequence,
+    CreateTable,
+    DropIndex,
+    DropSequence,
+    DropTable,
+)
 
 from IfxAlchemy.pyodbc import IfxDialect_pyodbc
 
@@ -163,6 +175,7 @@ def test_type_compiler_smoke(dialect):
 
     assert type_compiler.process(Boolean()).upper() == "SMALLINT"
 
+
 @pytest.mark.ddl_compiler
 def test_time_uses_fraction5_in_create_table(dialect):
     metadata = MetaData()
@@ -209,6 +222,7 @@ def test_datetime_uses_fraction5_in_create_table(dialect):
         "DATETIME_VALUE DATETIME YEAR TO FRACTION(5)"
         in upper
     )
+
 
 @pytest.mark.ddl_compiler
 def test_limit_compiles_as_first(dialect, sample_table):
@@ -366,13 +380,14 @@ def test_limit_offset_keeps_function_arguments_with_commas_intact(
         .offset(10)
     )
 
-    compiled = str(stmt.compile(dialect=dialect))
-    upper = _upper_sql(compiled)
+    compiled = stmt.compile(dialect=dialect)
+    upper = _upper_sql(str(compiled))
 
     assert (
-        "REPLACE(SA_COMPILE_BASIC.NAME, :REPLACE_1, :REPLACE_2) AS NAME2"
+        "REPLACE(SA_COMPILE_BASIC.NAME, __[POSTCOMPILE_REPLACE_1], "
+        "__[POSTCOMPILE_REPLACE_2]) AS NAME2"
     ) in upper
-    assert "ROW_NUMBER() OVER (ORDER BY SA_COMPILE_BASIC.ID)" in upper
+    assert compiled.literal_execute_params
 
 
 @pytest.mark.ddl_compiler
@@ -400,10 +415,14 @@ def test_offset_keeps_unlabeled_replace_projection_intact_without_limit(
 ):
     stmt = select(func.replace(sample_table.c.name, "a", "b")).offset(2)
 
-    compiled = str(stmt.compile(dialect=dialect))
-    upper = _upper_sql(compiled)
+    compiled = stmt.compile(dialect=dialect)
+    upper = _upper_sql(str(compiled))
 
-    assert "FROM (SELECT REPLACE(SA_COMPILE_BASIC.NAME, :REPLACE_" in upper
+    assert (
+        "FROM (SELECT REPLACE(SA_COMPILE_BASIC.NAME, "
+        "__[POSTCOMPILE_REPLACE_"
+    ) in upper
+    assert compiled.literal_execute_params
     assert ") AS REPLACE_1, ROW_NUMBER() OVER () AS IFX_RN" in upper
     assert "WHERE ANON_1.IFX_RN > __[POSTCOMPILE_" in upper
     assert "__IFX_" not in upper
@@ -713,29 +732,35 @@ def test_identifiers_with_illegal_initial_characters_are_quoted(dialect):
 
 @pytest.mark.ddl_compiler
 def test_unbounded_string_raises_compile_error(dialect):
+    string_type = String()
+
     with pytest.raises(
         CompileError,
         match="Informix VARCHAR requires an explicit length",
     ):
-        dialect.type_compiler.process(String())
+        dialect.type_compiler.process(string_type)
 
 
 @pytest.mark.ddl_compiler
 def test_zero_length_string_raises_compile_error(dialect):
+    string_type = String(0)
+
     with pytest.raises(
         CompileError,
         match="Informix VARCHAR requires an explicit length",
     ):
-        dialect.type_compiler.process(String(0))
+        dialect.type_compiler.process(string_type)
 
 
 @pytest.mark.ddl_compiler
 def test_unbounded_unicode_raises_compile_error(dialect):
+    unicode_type = Unicode()
+
     with pytest.raises(
         CompileError,
         match="Informix VARGRAPHIC requires an explicit length",
     ):
-        dialect.type_compiler.process(Unicode())
+        dialect.type_compiler.process(unicode_type)
 
 
 @pytest.mark.ddl_compiler
@@ -777,9 +802,278 @@ def test_savepoint_clauses_compile_with_informix_syntax(dialect):
     assert rollback == "ROLLBACK TO SAVEPOINT SA_SAVEPOINT_1"
     assert release == "RELEASE SAVEPOINT SA_SAVEPOINT_1"
 
+
 @pytest.mark.ddl_compiler
 def test_text_and_clob_compile_as_distinct_informix_types(dialect):
     type_compiler = dialect.type_compiler
 
     assert type_compiler.process(Text()).upper() == "TEXT"
     assert type_compiler.process(CLOB()).upper() == "CLOB"
+
+
+@pytest.mark.ddl_compiler
+def test_create_sequence_omits_generic_no_minmax(dialect):
+    sql = str(
+        CreateSequence(Sequence("other_seq")).compile(
+            dialect=dialect,
+        )
+    ).upper()
+
+    assert sql == "CREATE SEQUENCE OTHER_SEQ"
+    assert "NO MINVALUE" not in sql
+    assert "NO MAXVALUE" not in sql
+
+
+@pytest.mark.ddl_compiler
+def test_drop_sequence_compiles(dialect):
+    sql = str(
+        DropSequence(Sequence("other_seq")).compile(
+            dialect=dialect,
+        )
+    ).upper()
+
+    assert sql == "DROP SEQUENCE OTHER_SEQ"
+
+
+@pytest.mark.ddl_compiler
+def test_create_sequence_if_not_exists_is_rejected(dialect):
+    statement = CreateSequence(
+        Sequence("other_seq"),
+        if_not_exists=True,
+    )
+
+    with pytest.raises(CompileError, match="IF NOT EXISTS"):
+        statement.compile(dialect=dialect)
+
+
+@pytest.mark.ddl_compiler
+def test_drop_sequence_if_exists_is_rejected(dialect):
+    statement = DropSequence(
+        Sequence("other_seq"),
+        if_exists=True,
+    )
+
+    with pytest.raises(CompileError, match="IF EXISTS"):
+        statement.compile(dialect=dialect)
+
+
+@pytest.mark.ddl_compiler
+def test_limit_offset_untyped_bindparams_are_integer_typed(sample_table):
+    dialect = IfxDialect_pyodbc(paramstyle="qmark")
+
+    statement = (
+        select(sample_table.c.id)
+        .order_by(sample_table.c.id)
+        .limit(bindparam("l"))
+        .offset(bindparam("o"))
+    )
+
+    compiled = statement.compile(dialect=dialect)
+    sql_text = _upper_sql(str(compiled))
+
+    assert "IFX_RN > ?" in sql_text
+    assert "IFX_RN <= ? + ?" in sql_text
+
+    assert "__[POSTCOMPILE_L]" not in sql_text
+    assert "__[POSTCOMPILE_O]" not in sql_text
+
+    assert compiled.positiontup == ["o", "l", "o"]
+
+    assert isinstance(
+        compiled.binds["l"].type,
+        Integer,
+    )
+    assert isinstance(
+        compiled.binds["o"].type,
+        Integer,
+    )
+
+    literal_execute_keys = {
+        bind.key
+        for bind in compiled.literal_execute_params
+    }
+
+    assert "l" not in literal_execute_keys
+    assert "o" not in literal_execute_keys
+
+@pytest.mark.ddl_compiler
+@pytest.mark.parametrize(
+    "server_default",
+    [
+        text("3 + 5"),
+        text("(3 * 5)"),
+        text("10 / 2"),
+        text("10 % 3"),
+        literal_column("3") + literal_column("5"),
+    ],
+)
+def test_arithmetic_server_defaults_are_rejected(
+    dialect,
+    server_default,
+):
+    metadata = MetaData()
+    table = Table(
+        "sa_arithmetic_default",
+        metadata,
+        Column(
+            "value",
+            Integer,
+            server_default=server_default,
+        ),
+    )
+
+    with pytest.raises(
+        CompileError,
+        match="does not support arithmetic server-default expressions",
+    ):
+        str(CreateTable(table).compile(dialect=dialect))
+
+
+@pytest.mark.ddl_compiler
+@pytest.mark.parametrize(
+    ("column_type", "server_default", "expected_sql"),
+    [
+        (Integer, text("10"), "DEFAULT 10"),
+        (Integer, text("-10"), "DEFAULT -10"),
+        (String(20), text("'A+B'"), "DEFAULT 'A+B'"),
+        (Date, text("TODAY"), "DEFAULT TODAY"),
+        (
+            DateTime,
+            text("CURRENT YEAR TO FRACTION(5)"),
+            "DEFAULT CURRENT YEAR TO FRACTION(5)",
+        ),
+    ],
+)
+def test_supported_non_arithmetic_server_defaults_still_compile(
+    dialect,
+    column_type,
+    server_default,
+    expected_sql,
+):
+    metadata = MetaData()
+    table = Table(
+        "sa_supported_default",
+        metadata,
+        Column(
+            "value",
+            column_type,
+            server_default=server_default,
+        ),
+    )
+
+    compiled = _upper_sql(
+        str(CreateTable(table).compile(dialect=dialect))
+    )
+
+    assert expected_sql in compiled
+
+def _table_with_foreign_key_ondelete(ondelete):
+    metadata = MetaData()
+
+    parent = Table(
+        "sa_fk_parent",
+        metadata,
+        Column(
+            "id",
+            Integer,
+            primary_key=True,
+            autoincrement=False,
+        ),
+    )
+
+    child = Table(
+        "sa_fk_child",
+        metadata,
+        Column(
+            "id",
+            Integer,
+            primary_key=True,
+            autoincrement=False,
+        ),
+        Column(
+            "parent_id",
+            Integer,
+        ),
+        ForeignKeyConstraint(
+            ["parent_id"],
+            [parent.c.id],
+            name="fk_sa_child_parent",
+            ondelete=ondelete,
+        ),
+    )
+
+    return child
+
+
+@pytest.mark.ddl_compiler
+def test_foreign_key_without_ondelete_compiles_without_action(
+    dialect,
+):
+    child = _table_with_foreign_key_ondelete(None)
+
+    compiled = _upper_sql(
+        str(
+            CreateTable(child).compile(
+                dialect=dialect
+            )
+        )
+    )
+
+    assert "ON DELETE" not in compiled
+
+
+@pytest.mark.ddl_compiler
+@pytest.mark.parametrize(
+    "ondelete",
+    [
+        "CASCADE",
+        "cascade",
+        "  cascade  ",
+    ],
+)
+def test_foreign_key_ondelete_cascade_compiles_canonically(
+    dialect,
+    ondelete,
+):
+    child = _table_with_foreign_key_ondelete(
+        ondelete
+    )
+
+    compiled = _upper_sql(
+        str(
+            CreateTable(child).compile(
+                dialect=dialect
+            )
+        )
+    )
+
+    assert "ON DELETE CASCADE" in compiled
+
+
+@pytest.mark.ddl_compiler
+@pytest.mark.parametrize(
+    "ondelete",
+    [
+        "RESTRICT",
+        "SET NULL",
+        "SET DEFAULT",
+        "NO ACTION",
+        "CUALQUIER COSA",
+        "CASCADE; DROP TABLE sa_fk_parent",
+    ],
+)
+def test_unsupported_foreign_key_ondelete_actions_are_rejected(
+    dialect,
+    ondelete,
+):
+    child = _table_with_foreign_key_ondelete(
+        ondelete
+    )
+
+    with pytest.raises(
+        CompileError,
+        match="supports only ON DELETE CASCADE",
+    ):
+        CreateTable(child).compile(
+            dialect=dialect
+        )

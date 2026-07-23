@@ -29,7 +29,6 @@ from sqlalchemy.engine import reflection
 from sqlalchemy.engine.reflection import ObjectKind, ObjectScope
 from .temporal import IFXDateTime
 from .temporal import IFXTime
-import re
 
 from . import sqla_compat
 
@@ -61,13 +60,22 @@ class BaseReflector(object):
             return None
 
         lowered = name.lower()
+        uppered = name.upper()
+
+        if uppered == lowered:
+            return name
+
         if (
-            name.upper() == name
+            uppered == name
             and not sqla_compat.identifier_requires_quotes(
-                self.identifier_preparer, lowered
+                self.identifier_preparer,
+                lowered,
             )
         ):
             return lowered
+
+        if lowered == name:
+            return quoted_name(name, quote=True)
 
         return name
 
@@ -201,6 +209,24 @@ class IfxReflector(BaseReflector):
         if isinstance(value, str):
             return value.strip()
         return str(value).strip()
+
+    def _clean_default_catalog_value(self, value):
+        """Normalize a textual value read from sysdefaults.
+
+        Informix stores sysdefaults.default in a fixed-length catalog
+        column. Some ODBC paths expose the terminating catalog padding as
+        one or more NUL characters.
+
+        NUL characters at the end are transport/catalog padding and are
+        not part of the SQL default. Spaces before the NUL must be
+        preserved because they may belong to a character literal.
+        """
+        value = self._clean_str(value)
+
+        if value is None:
+            return None
+
+        return value.rstrip("\x00")
 
     def _normalize_extended_type_name(self, value):
         value = self._clean_str(value)
@@ -829,7 +855,7 @@ class IfxReflector(BaseReflector):
         return False
 
     def _decode_literal_default(self, default_value, base_code):
-        value = self._clean_str(default_value)
+        value = self._clean_default_catalog_value(default_value)
         if value is None:
             return None
 
@@ -844,14 +870,16 @@ class IfxReflector(BaseReflector):
         return sql_value.strip() or value
 
     def _decode_default(self, default_type, default_value, base_code):
-        default_type = self._clean_str(default_type)
-        default_value = self._clean_str(default_value)
+        default_type = self._clean_default_catalog_value(default_type)
 
         if not default_type:
             return None
 
         if default_type == "L":
-            return self._decode_literal_default(default_value, base_code)
+            return self._decode_literal_default(
+                default_value,
+                base_code,
+            )
 
         if default_type == "T":
             return "TODAY"
@@ -859,14 +887,16 @@ class IfxReflector(BaseReflector):
         if default_type == "U":
             return "USER"
 
+        if default_type == "N":
+            return None
+
+        default_value = self._clean_default_catalog_value(default_value)
+
         if default_type == "C":
             return default_value or "CURRENT"
 
         if default_type == "S":
             return default_value or "DBSERVERNAME"
-
-        if default_type == "N":
-            return None
 
         return default_value
 
@@ -1082,6 +1112,7 @@ class IfxReflector(BaseReflector):
             *self._ifx_type_args(base_code, encoded_len),
         )
 
+    @reflection.cache
     def has_table(self, connection, table_name, schema=None, **kw):
         _ = kw
         row = self._get_table_row(
@@ -1103,6 +1134,7 @@ class IfxReflector(BaseReflector):
 
         return self._has_table_via_dbapi_probe(connection, table_name, schema=schema)
 
+    @reflection.cache
     def has_sequence(self, connection, sequence_name, schema=None, **kw):
         _ = kw
         owner = self._resolved_owner(schema)
@@ -1273,9 +1305,9 @@ class IfxReflector(BaseReflector):
 
     def get_table_options(self, connection, table_name, schema=None, **kw):
         _ = (connection, table_name, schema, kw)
-        # Informix-specific table options are not currently reflected by
-        # this dialect; return the stable SQLAlchemy structure explicitly.
-        return {}
+        raise NotImplementedError(
+            "Informix table-option reflection is not implemented"
+        )
 
     def get_temp_view_names(self, connection, schema=None, **kw):
         _ = (connection, schema, kw)
@@ -1294,7 +1326,7 @@ class IfxReflector(BaseReflector):
             tabtypes=("V",),
         )
         if view_row is None:
-            return None
+            raise exc.NoSuchTableError(viewname)
 
         tabid = int(view_row[0])
 
@@ -1517,8 +1549,6 @@ class IfxReflector(BaseReflector):
             options = {}
             if delrule == "C":
                 options["ondelete"] = "CASCADE"
-            elif delrule == "R":
-                options["ondelete"] = "RESTRICT"
 
             fkeys.append(
                 {

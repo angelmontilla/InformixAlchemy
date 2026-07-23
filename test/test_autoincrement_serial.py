@@ -20,13 +20,13 @@ from sqlalchemy.schema import CreateTable
 from IfxAlchemy.base import BIGSERIAL, SERIAL, SERIAL8, _SelectLastRowIDMixin
 from IfxAlchemy.pyodbc import IfxDialect_pyodbc
 
+
 @pytest.fixture
 def dialect():
     return IfxDialect_pyodbc()
 
 
 def _assert_generated_lastrowid_roundtrip(engine, name_factory, prefix, type_):
-    
     table_name = name_factory(prefix)
     metadata = MetaData()
     table = Table(
@@ -64,15 +64,33 @@ def _assert_generated_lastrowid_roundtrip(engine, name_factory, prefix, type_):
 
 
 class _RecordingCursor:
+    """Cursor DBAPI simulado para probar la recuperación de lastrowid."""
+
     def __init__(self, row):
         self.row = row
         self.executed = []
+        self.closed = False
 
     def execute(self, statement):
         self.executed.append(statement)
 
     def fetchone(self):
         return self.row
+
+    def close(self):
+        self.closed = True
+
+
+class _RecordingDbapiConnection:
+    """Conexión DBAPI simulada que entrega un cursor secundario."""
+
+    def __init__(self, cursor):
+        self.cursor_obj = cursor
+        self.cursor_calls = 0
+
+    def cursor(self):
+        self.cursor_calls += 1
+        return self.cursor_obj
 
 
 class _LastrowidContext(_SelectLastRowIDMixin):
@@ -84,32 +102,71 @@ def _unexpected_cursor_execute(*args, **kwargs):
 
 
 @pytest.mark.serial_identity
-def test_lastrowid_post_exec_uses_direct_cursor_execute():
-    cursor = _RecordingCursor((42,))
+def test_lastrowid_post_exec_uses_separate_dbapi_cursor():
+    insert_cursor = _RecordingCursor(None)
+    lastrowid_cursor = _RecordingCursor((42,))
+    dbapi_connection = _RecordingDbapiConnection(lastrowid_cursor)
+
     context = _LastrowidContext()
-    context.cursor = cursor
+    context.cursor = insert_cursor
     context.root_connection = SimpleNamespace(
-        _cursor_execute=_unexpected_cursor_execute
+        connection=SimpleNamespace(
+            dbapi_connection=dbapi_connection,
+        )
     )
     context._select_lastrowid = True
-    context._lastrowid_query = "SELECT DBINFO('sqlca.sqlerrd1') FROM systables WHERE tabid = 1"
+    context._lastrowid_query = (
+        "SELECT DBINFO('sqlca.sqlerrd1') "
+        "FROM systables WHERE tabid = 1"
+    )
 
     context.post_exec()
 
-    assert cursor.executed == [context._lastrowid_query]
+    # El cursor que ejecutó el INSERT no debe reutilizarse.
+    assert insert_cursor.executed == []
+
+    # DBINFO debe ejecutarse en un cursor nuevo de la misma conexión.
+    assert lastrowid_cursor.executed == [
+        context._lastrowid_query
+    ]
+
+    # El cursor auxiliar debe cerrarse siempre.
+    assert lastrowid_cursor.closed is True
+
+    # Solo debe solicitarse un cursor auxiliar.
+    assert dbapi_connection.cursor_calls == 1
+
+    # El valor devuelto por DBINFO debe normalizarse a int.
     assert context.get_lastrowid() == 42
 
 
 @pytest.mark.serial_identity
 def test_lastrowid_post_exec_handles_missing_row():
-    cursor = _RecordingCursor(None)
+    insert_cursor = _RecordingCursor(None)
+    lastrowid_cursor = _RecordingCursor(None)
+    dbapi_connection = _RecordingDbapiConnection(lastrowid_cursor)
+
     context = _LastrowidContext()
-    context.cursor = cursor
+    context.cursor = insert_cursor
+    context.root_connection = SimpleNamespace(
+        connection=SimpleNamespace(
+            dbapi_connection=dbapi_connection,
+        )
+    )
     context._select_lastrowid = True
-    context._lastrowid_query = "SELECT DBINFO('sqlca.sqlerrd1') FROM systables WHERE tabid = 1"
+    context._lastrowid_query = (
+        "SELECT DBINFO('sqlca.sqlerrd1') "
+        "FROM systables WHERE tabid = 1"
+    )
 
     context.post_exec()
 
+    assert insert_cursor.executed == []
+    assert lastrowid_cursor.executed == [
+        context._lastrowid_query
+    ]
+    assert lastrowid_cursor.closed is True
+    assert dbapi_connection.cursor_calls == 1
     assert context.get_lastrowid() is None
 
 
