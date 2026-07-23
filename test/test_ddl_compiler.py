@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import (
+    bindparam,
     Boolean,
     CheckConstraint,
     CLOB,
@@ -12,11 +13,13 @@ from sqlalchemy import (
     func,
     Index,
     Integer,
-    MetaData,
+    literal_column,
+    MetaData,    
     Numeric,
     String,
     Table,
     Text,
+    text,
     Time,
     Unicode,
     Sequence,
@@ -171,6 +174,7 @@ def test_type_compiler_smoke(dialect):
 
     assert type_compiler.process(Boolean()).upper() == "SMALLINT"
 
+
 @pytest.mark.ddl_compiler
 def test_time_uses_fraction5_in_create_table(dialect):
     metadata = MetaData()
@@ -217,6 +221,7 @@ def test_datetime_uses_fraction5_in_create_table(dialect):
         "DATETIME_VALUE DATETIME YEAR TO FRACTION(5)"
         in upper
     )
+
 
 @pytest.mark.ddl_compiler
 def test_limit_compiles_as_first(dialect, sample_table):
@@ -726,29 +731,35 @@ def test_identifiers_with_illegal_initial_characters_are_quoted(dialect):
 
 @pytest.mark.ddl_compiler
 def test_unbounded_string_raises_compile_error(dialect):
+    string_type = String()
+
     with pytest.raises(
         CompileError,
         match="Informix VARCHAR requires an explicit length",
     ):
-        dialect.type_compiler.process(String())
+        dialect.type_compiler.process(string_type)
 
 
 @pytest.mark.ddl_compiler
 def test_zero_length_string_raises_compile_error(dialect):
+    string_type = String(0)
+
     with pytest.raises(
         CompileError,
         match="Informix VARCHAR requires an explicit length",
     ):
-        dialect.type_compiler.process(String(0))
+        dialect.type_compiler.process(string_type)
 
 
 @pytest.mark.ddl_compiler
 def test_unbounded_unicode_raises_compile_error(dialect):
+    unicode_type = Unicode()
+
     with pytest.raises(
         CompileError,
         match="Informix VARGRAPHIC requires an explicit length",
     ):
-        dialect.type_compiler.process(Unicode())
+        dialect.type_compiler.process(unicode_type)
 
 
 @pytest.mark.ddl_compiler
@@ -790,12 +801,14 @@ def test_savepoint_clauses_compile_with_informix_syntax(dialect):
     assert rollback == "ROLLBACK TO SAVEPOINT SA_SAVEPOINT_1"
     assert release == "RELEASE SAVEPOINT SA_SAVEPOINT_1"
 
+
 @pytest.mark.ddl_compiler
 def test_text_and_clob_compile_as_distinct_informix_types(dialect):
     type_compiler = dialect.type_compiler
 
     assert type_compiler.process(Text()).upper() == "TEXT"
     assert type_compiler.process(CLOB()).upper() == "CLOB"
+
 
 @pytest.mark.ddl_compiler
 def test_create_sequence_omits_generic_no_minmax(dialect):
@@ -820,6 +833,7 @@ def test_drop_sequence_compiles(dialect):
 
     assert sql == "DROP SEQUENCE OTHER_SEQ"
 
+
 @pytest.mark.ddl_compiler
 def test_create_sequence_if_not_exists_is_rejected(dialect):
     statement = CreateSequence(
@@ -840,3 +854,114 @@ def test_drop_sequence_if_exists_is_rejected(dialect):
 
     with pytest.raises(CompileError, match="IF EXISTS"):
         statement.compile(dialect=dialect)
+
+
+@pytest.mark.ddl_compiler
+def test_limit_offset_untyped_bindparams_are_integer_typed(sample_table):
+    dialect = IfxDialect_pyodbc(paramstyle="qmark")
+
+    statement = (
+        select(sample_table.c.id)
+        .order_by(sample_table.c.id)
+        .limit(bindparam("l"))
+        .offset(bindparam("o"))
+    )
+
+    compiled = statement.compile(dialect=dialect)
+    sql_text = _upper_sql(str(compiled))
+
+    assert "IFX_RN > ?" in sql_text
+    assert "IFX_RN <= ? + ?" in sql_text
+
+    assert "__[POSTCOMPILE_L]" not in sql_text
+    assert "__[POSTCOMPILE_O]" not in sql_text
+
+    assert compiled.positiontup == ["o", "l", "o"]
+
+    assert isinstance(
+        compiled.binds["l"].type,
+        Integer,
+    )
+    assert isinstance(
+        compiled.binds["o"].type,
+        Integer,
+    )
+
+    literal_execute_keys = {
+        bind.key
+        for bind in compiled.literal_execute_params
+    }
+
+    assert "l" not in literal_execute_keys
+    assert "o" not in literal_execute_keys
+
+@pytest.mark.ddl_compiler
+@pytest.mark.parametrize(
+    "server_default",
+    [
+        text("3 + 5"),
+        text("(3 * 5)"),
+        text("10 / 2"),
+        text("10 % 3"),
+        literal_column("3") + literal_column("5"),
+    ],
+)
+def test_arithmetic_server_defaults_are_rejected(
+    dialect,
+    server_default,
+):
+    metadata = MetaData()
+    table = Table(
+        "sa_arithmetic_default",
+        metadata,
+        Column(
+            "value",
+            Integer,
+            server_default=server_default,
+        ),
+    )
+
+    with pytest.raises(
+        CompileError,
+        match="does not support arithmetic server-default expressions",
+    ):
+        str(CreateTable(table).compile(dialect=dialect))
+
+
+@pytest.mark.ddl_compiler
+@pytest.mark.parametrize(
+    ("column_type", "server_default", "expected_sql"),
+    [
+        (Integer, text("10"), "DEFAULT 10"),
+        (Integer, text("-10"), "DEFAULT -10"),
+        (String(20), text("'A+B'"), "DEFAULT 'A+B'"),
+        (Date, text("TODAY"), "DEFAULT TODAY"),
+        (
+            DateTime,
+            text("CURRENT YEAR TO FRACTION(5)"),
+            "DEFAULT CURRENT YEAR TO FRACTION(5)",
+        ),
+    ],
+)
+def test_supported_non_arithmetic_server_defaults_still_compile(
+    dialect,
+    column_type,
+    server_default,
+    expected_sql,
+):
+    metadata = MetaData()
+    table = Table(
+        "sa_supported_default",
+        metadata,
+        Column(
+            "value",
+            column_type,
+            server_default=server_default,
+        ),
+    )
+
+    compiled = _upper_sql(
+        str(CreateTable(table).compile(dialect=dialect))
+    )
+
+    assert expected_sql in compiled

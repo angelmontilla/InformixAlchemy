@@ -77,3 +77,54 @@ def test_decode_default(
     )
 
     assert result == expected
+
+
+def test_decode_plain_literal_default_removes_trailing_nul(reflector):
+    result = reflector._decode_literal_default(
+        "ACTIVO\x00",
+        13,
+    )
+
+    assert result == "ACTIVO"
+
+
+def test_decode_plain_literal_default_removes_multiple_trailing_nuls(
+    reflector,
+):
+    result = reflector._decode_literal_default(
+        "ACTIVO\x00\x00",
+        13,
+    )
+
+    assert result == "ACTIVO"
+
+
+def test_decode_plain_literal_default_preserves_space_before_nul(
+    reflector,
+):
+    result = reflector._decode_literal_default(
+        "ACTIVO \x00",
+        13,
+    )
+
+    assert result == "ACTIVO "
+
+
+def test_decode_default_removes_catalog_nul_padding(reflector):
+    result = reflector._decode_default(
+        "L\x00",
+        "ACTIVO\x00",
+        13,
+    )
+
+    assert result == "ACTIVO"
+
+
+def test_decode_current_default_removes_catalog_nul_padding(reflector):
+    result = reflector._decode_default(
+        "C\x00",
+        "CURRENT\x00",
+        10,
+    )
+
+    assert result == "CURRENT"

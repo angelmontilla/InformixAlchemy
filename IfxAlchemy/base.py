@@ -24,6 +24,8 @@
 
 """
 import datetime
+import re
+
 from sqlalchemy import exc
 from sqlalchemy import schema as sa_schema
 from sqlalchemy import sql
@@ -333,6 +335,223 @@ def _get_ifx_lastrowid_query(column):
         expr = "DBINFO('sqlca.sqlerrd1')"
 
     return "SELECT %s%s" % (expr, _IFX_SINGLE_ROW_FROM)
+
+
+_IFX_ARITHMETIC_DEFAULT_OPERATORS = frozenset(
+    {
+        operators.add,
+        operators.sub,
+        operators.mul,
+        operators.truediv,
+        operators.floordiv,
+        operators.mod,
+    }
+)
+
+_IFX_SIGNED_NUMERIC_DEFAULT_RE = re.compile(
+    r"^[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE][+-]?\d+)?$"
+)
+
+_IFX_QUOTED_STRING_DEFAULT_RE = re.compile(
+    r"^'(?:''|[^'])*'$",
+    re.DOTALL,
+)
+
+_IFX_ISO_TEMPORAL_DEFAULT_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}"
+    r"(?:[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?)?$"
+)
+
+
+def _strip_ifx_outer_parentheses(value):
+    """Remove balanced parentheses enclosing the complete default."""
+
+    text = str(value).strip()
+
+    while len(text) >= 2 and text[0] == "(" and text[-1] == ")":
+        depth = 0
+        in_string = False
+        encloses_whole_value = True
+        index = 0
+
+        while index < len(text):
+            character = text[index]
+
+            if in_string:
+                if character == "'":
+                    if index + 1 < len(text) and text[index + 1] == "'":
+                        index += 2
+                        continue
+
+                    in_string = False
+
+                index += 1
+                continue
+
+            if character == "'":
+                in_string = True
+
+            elif character == "(":
+                depth += 1
+
+            elif character == ")":
+                depth -= 1
+
+                if depth == 0 and index != len(text) - 1:
+                    encloses_whole_value = False
+                    break
+
+            index += 1
+
+        if (
+            not encloses_whole_value
+            or depth != 0
+            or in_string
+        ):
+            break
+
+        text = text[1:-1].strip()
+
+    return text
+
+
+def _is_ifx_scalar_default_literal(text):
+    """Return whether *text* is a supported non-arithmetic literal."""
+    return any(
+        pattern.fullmatch(text)
+        for pattern in (
+            _IFX_SIGNED_NUMERIC_DEFAULT_RE,
+            _IFX_QUOTED_STRING_DEFAULT_RE,
+            _IFX_ISO_TEMPORAL_DEFAULT_RE,
+        )
+    )
+
+
+def _mask_ifx_quoted_literals(text):
+    """Replace quoted SQL literal contents with spaces.
+
+    Keeping the original length allows operator positions to remain stable.
+    Doubled single quotes are treated as escaped quotes inside a literal.
+    """
+    characters = list(text)
+    in_string = False
+    index = 0
+
+    while index < len(characters):
+        character = characters[index]
+
+        if character != "'":
+            if in_string:
+                characters[index] = " "
+            index += 1
+            continue
+
+        characters[index] = " "
+
+        if in_string and index + 1 < len(characters):
+            if characters[index + 1] == "'":
+                characters[index + 1] = " "
+                index += 2
+                continue
+
+        in_string = not in_string
+        index += 1
+
+    return "".join(characters)
+
+
+def _nearest_ifx_non_space_character(text, start, step):
+    """Return the nearest non-space character or ``None``."""
+    index = start
+
+    while 0 <= index < len(text) and text[index].isspace():
+        index += step
+
+    if 0 <= index < len(text):
+        return text[index]
+
+    return None
+
+
+def _is_ifx_non_binary_sign(text, index):
+    """Return whether ``+`` or ``-`` is unary or part of an exponent."""
+    previous_character = _nearest_ifx_non_space_character(
+        text,
+        index - 1,
+        -1,
+    )
+    next_character = _nearest_ifx_non_space_character(
+        text,
+        index + 1,
+        1,
+    )
+
+    is_unary_sign = (
+        previous_character is None
+        or previous_character in "(,"
+    )
+    is_exponent_sign = (
+        previous_character in {"e", "E"}
+        and next_character is not None
+        and next_character.isdigit()
+    )
+
+    return is_unary_sign or is_exponent_sign
+
+
+def _contains_ifx_binary_arithmetic_operator(text):
+    """Return whether unquoted SQL contains a binary arithmetic operator."""
+    if any(operator in text for operator in "*/%"):
+        return True
+
+    for index, character in enumerate(text):
+        if (
+            character in "+-"
+            and not _is_ifx_non_binary_sign(text, index)
+        ):
+            return True
+
+    return False
+
+
+def _contains_ifx_arithmetic_default(default_sql):
+    """Return True for arithmetic operators outside quoted SQL literals."""
+    text = _strip_ifx_outer_parentheses(str(default_sql))
+
+    if not text or _is_ifx_scalar_default_literal(text):
+        return False
+
+    unquoted_text = _mask_ifx_quoted_literals(text)
+    return _contains_ifx_binary_arithmetic_operator(unquoted_text)
+
+
+def _validate_ifx_server_default(column, default_sql):
+    """Reject arithmetic server defaults unsupported by Informix."""
+
+    server_default = getattr(column, "server_default", None)
+    default_arg = getattr(server_default, "arg", None)
+
+    is_structured_arithmetic_expression = (
+        isinstance(default_arg, sql.elements.BinaryExpression)
+        and default_arg.operator
+        in _IFX_ARITHMETIC_DEFAULT_OPERATORS
+    )
+
+    is_textual_arithmetic_expression = (
+        _contains_ifx_arithmetic_default(default_sql)
+    )
+
+    if (
+        is_structured_arithmetic_expression
+        or is_textual_arithmetic_expression
+    ):
+        raise exc.CompileError(
+            "Informix does not support arithmetic server-default "
+            f"expressions for column {column.name!r}: "
+            f"{default_sql!r}. "
+            "Use a literal value or an Informix native default "
+            "such as CURRENT or TODAY."
+        )
 
 
 _IFX_UNENCODED_DEFAULT_SQL_KEYWORDS = frozenset(
@@ -751,6 +970,12 @@ class IfxCompiler(compiler.SQLCompiler):
         if sqla_compat.simple_int_clause(select, clause):
             return clause.render_literal_execute()
 
+        if isinstance(clause.type, sa_types.NullType):
+            return sql.type_coerce(
+                clause,
+                sa_types.Integer(),
+            )
+
         return clause
 
     def _row_limit_upper_bound(self, select, limit_clause, offset_clause):
@@ -1101,6 +1326,19 @@ class IfxCompiler(compiler.SQLCompiler):
 
 
 class IfxDDLCompiler(compiler.DDLCompiler):
+
+    def get_column_default_string(self, column):
+        """Compile and validate an Informix column server default."""
+
+        default_sql = super().get_column_default_string(column)
+
+        if default_sql is not None:
+            _validate_ifx_server_default(
+                column,
+                default_sql,
+            )
+
+        return default_sql
 
     def visit_create_sequence(self, create, prefix=None, **kw):
         if create.if_not_exists:

@@ -268,8 +268,8 @@ def test_typed_left_operand_is_not_cast_again(dialect):
 
     sql_text = _normalized(rendered)
 
-    assert "VALUE IN (CAST(NULL AS INTEGER))" in sql_text
-    assert "CAST(VALUE AS INTEGER)" not in sql_text
+    assert "SIMPLE_COL IN (CAST(NULL AS INTEGER))" in sql_text
+    assert "CAST(SIMPLE_COL AS INTEGER)" not in sql_text
 
 
 def test_typed_expanding_bind_types_untyped_left(dialect):

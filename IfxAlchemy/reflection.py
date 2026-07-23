@@ -29,7 +29,6 @@ from sqlalchemy.engine import reflection
 from sqlalchemy.engine.reflection import ObjectKind, ObjectScope
 from .temporal import IFXDateTime
 from .temporal import IFXTime
-import re
 
 from . import sqla_compat
 
@@ -210,6 +209,24 @@ class IfxReflector(BaseReflector):
         if isinstance(value, str):
             return value.strip()
         return str(value).strip()
+
+    def _clean_default_catalog_value(self, value):
+        """Normalize a textual value read from sysdefaults.
+
+        Informix stores sysdefaults.default in a fixed-length catalog
+        column. Some ODBC paths expose the terminating catalog padding as
+        one or more NUL characters.
+
+        NUL characters at the end are transport/catalog padding and are
+        not part of the SQL default. Spaces before the NUL must be
+        preserved because they may belong to a character literal.
+        """
+        value = self._clean_str(value)
+
+        if value is None:
+            return None
+
+        return value.rstrip("\x00")
 
     def _normalize_extended_type_name(self, value):
         value = self._clean_str(value)
@@ -838,7 +855,7 @@ class IfxReflector(BaseReflector):
         return False
 
     def _decode_literal_default(self, default_value, base_code):
-        value = self._clean_str(default_value)
+        value = self._clean_default_catalog_value(default_value)
         if value is None:
             return None
 
@@ -853,14 +870,16 @@ class IfxReflector(BaseReflector):
         return sql_value.strip() or value
 
     def _decode_default(self, default_type, default_value, base_code):
-        default_type = self._clean_str(default_type)
-        default_value = self._clean_str(default_value)
+        default_type = self._clean_default_catalog_value(default_type)
 
         if not default_type:
             return None
 
         if default_type == "L":
-            return self._decode_literal_default(default_value, base_code)
+            return self._decode_literal_default(
+                default_value,
+                base_code,
+            )
 
         if default_type == "T":
             return "TODAY"
@@ -868,14 +887,16 @@ class IfxReflector(BaseReflector):
         if default_type == "U":
             return "USER"
 
+        if default_type == "N":
+            return None
+
+        default_value = self._clean_default_catalog_value(default_value)
+
         if default_type == "C":
             return default_value or "CURRENT"
 
         if default_type == "S":
             return default_value or "DBSERVERNAME"
-
-        if default_type == "N":
-            return None
 
         return default_value
 
