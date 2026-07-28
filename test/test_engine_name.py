@@ -1,22 +1,20 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_mock_engine
 
 import IfxAlchemy
 from IfxAlchemy import base, pyodbc
 
 
 def test_engine_name_reports_informix():
-    engine = create_engine(
+    engine = create_mock_engine(
         "informix+pyodbc://user:pass@host/database"
         "?driver=IBM+INFORMIX+ODBC+DRIVER+(64-bit)"
         "&protocol=onsoctcp"
         "&server=demo"
-        "&service=9088"
+        "&service=9088",
+        executor=lambda *args, **kwargs: None,
     )
 
-    try:
-        assert engine.name == "informix"
-    finally:
-        engine.dispose()
+    assert engine.name == "informix"
 
 
 def test_package_default_dialect_export_has_no_base_side_effect():

@@ -140,6 +140,7 @@ celerybeat-schedule
 
 # dotenv
 .env
+.env.informix
 .env.official-suites.example
 .env.official-suites
 

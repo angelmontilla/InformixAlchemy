@@ -186,12 +186,12 @@ def test_probe4_style_autoincrement_still_works_after_failed_savepoint(
       rompa este roundtrip de autoincrement, siempre que la conexión se limpie.
     """
     savepoint_outcome = force_unsupported_savepoint_sql()
-    if savepoint_outcome == "unexpectedly_supported":
-        pytest.skip("El servidor soporta ese SAVEPOINT; este aislamiento deja de ser relevante.")
-
     result = _run_probe4_style_autoincrement_roundtrip(engine, unique_name())
 
-    assert savepoint_outcome == "failed_as_expected"
+    assert savepoint_outcome in {
+        "failed_as_expected",
+        "unexpectedly_supported",
+    }
     assert "ID SERIAL NOT NULL" in result["compiled"], result["compiled"]
     assert result["generated_pk"] is not None
     assert int(result["generated_pk"]) > 0

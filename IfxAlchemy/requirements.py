@@ -330,16 +330,113 @@ class Requirements(SuiteRequirements):
         return exclusions.closed()
 
     @property
-    def parens_in_union_contained_select_w_limit_offset(self):
-        """Informix no admite el SQL parentetizado generado en estas ramas."""
+    def intersect(self):
+        """Informix supports the native ``INTERSECT`` set operator."""
 
-        return exclusions.closed()
+        return exclusions.open()
+
+    @property
+    def except_(self):
+        """Informix supports the native ``EXCEPT`` set operator."""
+
+        return exclusions.open()
+
+    @property
+    def ctes(self):
+        """Informix supports non-recursive and recursive CTE statements.
+
+        Informix uses the ``WITH`` preamble for both forms; the compiler
+        intentionally omits the optional ``RECURSIVE`` keyword.
+        """
+
+        return exclusions.open()
+
+    @property
+    def ctes_with_update_delete(self):
+        """Informix supports a CTE preceding UPDATE and DELETE.
+
+        The dialect also protects affected ODBC/server combinations by
+        rendering bind values inside a DML CTE as post-compile literals.
+        Values outside the CTE remain ordinary DBAPI parameters.
+        """
+
+        return exclusions.open()
+
+    @property
+    def update_from(self):
+        """Provide SQLAlchemy's multi-table UPDATE behavior on Informix.
+
+        Informix does not need ``UPDATE .. FROM`` syntax for this contract;
+        the compiler rewrites the additional FROM objects to a correlated
+        ``EXISTS`` predicate while preserving the observable result.
+        """
+
+        return exclusions.open()
+
+    @property
+    def delete_from(self):
+        """Provide SQLAlchemy's multi-table DELETE behavior on Informix.
+
+        Additional FROM objects are rewritten to a correlated ``EXISTS``
+        predicate instead of emitting unsupported ``DELETE .. USING`` SQL.
+        """
+
+        return exclusions.open()
+
+    @property
+    def boolean_col_expressions(self):
+        """Boolean predicates can be selected as result columns.
+
+        Informix receives a numeric ``CASE WHEN`` projection and SQLAlchemy
+        retains Boolean result processing for the returned value.
+        """
+
+        return exclusions.open()
+
+    @property
+    def parens_in_union_contained_select_w_limit_offset(self):
+        """Support ordered or limited SELECT branches inside a UNION.
+
+        Informix rejects the generic parenthesized branch syntax. The
+        compiler preserves branch-local ordering and row limits through a
+        derived-table SELECT, which satisfies the SQLAlchemy behavior.
+        """
+
+        return exclusions.open()
 
     @property
     def parens_in_union_contained_select_wo_limit_offset(self):
-        """No se garantiza SELECT parentetizado dentro de UNION."""
+        """Support ordered SELECT branches inside a UNION.
 
-        return exclusions.closed()
+        The compiler uses a derived table instead of an unsupported directly
+        parenthesized SELECT branch.
+        """
+
+        return exclusions.open()
+
+    @property
+    def order_by_label_with_expression(self):
+        """Allow projected labels to participate in ORDER BY expressions."""
+
+        return exclusions.open()
+
+    @property
+    def fetch_first(self):
+        """Implement SQLAlchemy FETCH through Informix FIRST/ROW_NUMBER."""
+
+        return exclusions.open()
+
+    @property
+    def fetch_no_order_by(self):
+        """Informix FIRST can limit a result without an ORDER BY clause."""
+
+        return exclusions.open()
+
+    @property
+    def fetch_expression(self):
+        """Support expression-valued FETCH and OFFSET through ROW_NUMBER."""
+
+        return exclusions.open()
 
     @property
     def sql_expression_limit_offset(self):
@@ -451,10 +548,12 @@ class Requirements(SuiteRequirements):
 
     @property
     def server_defaults(self):
+        """Informix supports literal and temporal column server defaults."""
+
         return exclusions.open()
 
     @property
     def expression_server_defaults(self):
-        """Informix does not support arbitrary arithmetic DEFAULT expressions."""
+        """Informix DEFAULT does not accept arbitrary arithmetic expressions."""
 
         return exclusions.closed()

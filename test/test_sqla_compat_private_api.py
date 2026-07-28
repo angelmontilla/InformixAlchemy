@@ -167,3 +167,21 @@ def test_get_limit_state_accepts_representative_selects(stmt):
 
     assert state.fetch_options["percent"] in (True, False)
     assert state.fetch_options["with_ties"] in (True, False)
+
+
+def test_dml_where_criteria_extra_froms_and_clone_without_where():
+    metadata = MetaData()
+    source = Table("source", metadata, Column("id", Integer))
+    target = Table("target", metadata, Column("id", Integer))
+    statement = target.update().values(id=5).where(
+        target.c.id == source.c.id
+    )
+
+    criteria = sqla_compat.get_dml_where_criteria(statement)
+    extra_froms = sqla_compat.get_dml_extra_froms(statement)
+    clone = sqla_compat.clone_dml_without_where(statement)
+
+    assert len(criteria) == 1
+    assert extra_froms == (source,)
+    assert sqla_compat.get_dml_where_criteria(clone) == ()
+    assert clone is not statement

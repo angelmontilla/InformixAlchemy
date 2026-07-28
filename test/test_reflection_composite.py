@@ -227,8 +227,33 @@ def test_multi_reflection_filter_names_handle_quoted_and_folded_names(
     assert _multi_reflection_names(result) == set(names.values())
 
 @pytest.mark.reflection_composite
-def test_multi_table_options_is_explicitly_unsupported(engine):
+def test_multi_table_options_reflects_native_storage_metadata(
+    engine,
+    composite_objects,
+):
+    expected_names = {
+        composite_objects["parent"],
+        composite_objects["child"],
+    }
+
     with engine.connect() as connection:
         insp = inspect(connection)
-        with pytest.raises(NotImplementedError):
-            insp.get_multi_table_options()
+        options = insp.get_multi_table_options(
+            filter_names=sorted(expected_names)
+        )
+
+    assert {name for _schema, name in options} == expected_names
+    for reflected in options.values():
+        assert reflected["informix_lock_level"] in {
+            "PAGE",
+            "ROW",
+            "PAGE_AND_ROW",
+        }
+        for key in (
+            "informix_first_extent",
+            "informix_next_extent",
+            "informix_page_size",
+        ):
+            if key in reflected:
+                assert isinstance(reflected[key], int)
+                assert reflected[key] > 0

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect as pyinspect
+from types import SimpleNamespace
 
 import pytest
 import sqlalchemy
@@ -36,7 +37,10 @@ def test_supported_dialect_contract():
         None,
         "pyodbc",
     )
-    assert dialect.supports_schemas is True
+    # Informix solo ofrece namespaces de propietario aislados en
+    # bases ANSI. Antes de initialize(), el valor conservador es False.
+    assert dialect.supports_schemas is False
+    assert dialect.is_ansi_database is False
 
 
 @pytest.mark.legacy_ifxpy
@@ -351,9 +355,50 @@ def test_current_closed_requirements_are_part_of_contract(requirement_name):
         "precision_numerics_enotation_small",
         "precision_numerics_enotation_large",
         "precision_numerics_retains_significant_digits",
+        "intersect",
+        "except_",
+        "ctes",
+        "ctes_with_update_delete",
+        "update_from",
+        "delete_from",
+        "boolean_col_expressions",
+        "parens_in_union_contained_select_w_limit_offset",
+        "parens_in_union_contained_select_wo_limit_offset",
+        "order_by_label_with_expression",
+        "fetch_first",
+        "fetch_no_order_by",
+        "fetch_expression",
     ],
 )
 def test_current_open_requirements_are_part_of_contract(requirement_name):
+    requirements = Requirements()
+
+    assert getattr(requirements, requirement_name).enabled is True
+
+
+@pytest.mark.sqlalchemy_suite
+@pytest.mark.parametrize(
+    "requirement_name",
+    [
+        "intersect",
+        "except_",
+        "ctes",
+        "ctes_with_update_delete",
+        "update_from",
+        "delete_from",
+        "boolean_col_expressions",
+        "parens_in_union_contained_select_w_limit_offset",
+        "parens_in_union_contained_select_wo_limit_offset",
+        "order_by_label_with_expression",
+        "fetch_first",
+        "fetch_no_order_by",
+        "fetch_expression",
+    ],
+)
+def test_sql_expression_capabilities_are_officially_declared(
+    requirement_name,
+):
+    """Advertise every SQL-expression behavior covered by certification."""
     requirements = Requirements()
 
     assert getattr(requirements, requirement_name).enabled is True
@@ -496,3 +541,34 @@ def test_server_default_requirements_reject_arithmetic_expressions():
 
     assert requirements.server_defaults.enabled is True
     assert requirements.expression_server_defaults.enabled is False
+
+
+@pytest.mark.sqlalchemy_suite
+@pytest.mark.parametrize(
+    "requirement_name",
+    [
+        "schemas",
+        "schema_reflection",
+        "cross_schema_fk_reflection",
+    ],
+)
+@pytest.mark.parametrize(
+    ("is_ansi_database", "expected_enabled"),
+    [(False, False), (True, True)],
+)
+def test_schema_requirements_follow_database_mode(
+    requirement_name,
+    is_ansi_database,
+    expected_enabled,
+):
+    requirements = Requirements()
+    config = SimpleNamespace(
+        db=SimpleNamespace(
+            dialect=SimpleNamespace(
+                is_ansi_database=is_ansi_database,
+            )
+        )
+    )
+
+    requirement = getattr(requirements, requirement_name)
+    assert requirement.enabled_for_config(config) is expected_enabled

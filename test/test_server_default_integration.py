@@ -145,10 +145,10 @@ def literal_default_table(engine):
         metadata.drop_all(engine, checkfirst=True)
 
 
-def test_literal_defaults_are_reflected(engine, expression_default_table):
+def test_literal_defaults_are_reflected(engine, literal_default_table):
     columns = {
         str(column["name"]): column
-        for column in inspect(engine).get_columns(expression_default_table.name)
+        for column in inspect(engine).get_columns(literal_default_table.name)
     }
 
     assert columns["literal_value"]["default"] == "10"

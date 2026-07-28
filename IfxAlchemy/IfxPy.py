@@ -64,9 +64,6 @@ class IfxExecutionContext_IfxPy(IfxExecutionContext):
     _callproc_result = None
     _out_parameters = None
 
-    #def get_lastrowid(self):
-    #    return self.cursor.last_identity_val
-
     def get_lastrowid(self):
         return self._lastrowid
 

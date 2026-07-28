@@ -258,16 +258,28 @@ def test_get_table_comment_returns_none_text(engine, basic_reflection_objects):
 
 
 @pytest.mark.reflection_minimal
-def test_get_table_options_is_explicitly_unsupported(
+def test_get_table_options_reflects_native_storage_metadata(
     engine,
     basic_reflection_objects,
 ):
     table_name = basic_reflection_objects["table"]
 
     with engine.connect() as connection:
-        insp = inspect(connection)
-        with pytest.raises(NotImplementedError):
-            insp.get_table_options(table_name)
+        options = inspect(connection).get_table_options(table_name)
+
+    assert options["informix_lock_level"] in {
+        "PAGE",
+        "ROW",
+        "PAGE_AND_ROW",
+    }
+    for key in (
+        "informix_first_extent",
+        "informix_next_extent",
+        "informix_page_size",
+    ):
+        if key in options:
+            assert isinstance(options[key], int)
+            assert options[key] > 0
 
 
 @pytest.mark.reflection_minimal

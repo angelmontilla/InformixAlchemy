@@ -11,16 +11,8 @@ from sqlalchemy import (
     Integer,
     MetaData,
     Table,
-    create_engine,
     inspect,
 )
-
-from tools.official_suite_support import (
-    load_official_suite_environment,
-    official_suite_dburi,
-    verify_official_suite_database,
-)
-
 
 def _name(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
@@ -46,22 +38,15 @@ def _check_tokens(sqltext: str) -> tuple[str, ...]:
 
 
 @pytest.fixture(scope="module")
-def official_engine():
-    try:
-        load_official_suite_environment()
-        dburi = official_suite_dburi()
-        verify_official_suite_database(
-            dburi,
-            require_empty=False,
-        )
-    except RuntimeError as exc:
-        pytest.skip(str(exc))
+def official_engine(engine):
+    """Reuse the mandatory live Informix engine used by the main test suite.
 
-    engine = create_engine(dburi, pool_pre_ping=True)
-    try:
-        yield engine
-    finally:
-        engine.dispose()
+    These probes no longer depend on an optional ``.env.official-suites``
+    file.  A normal ``pytest`` run already requires the configured Informix
+    14.x database, so absence or invalid configuration is a test-session
+    setup error rather than a skipped capability.
+    """
+    return engine
 
 
 def test_explicit_use_alter_self_reference_works(official_engine):
@@ -104,11 +89,31 @@ def test_explicit_use_alter_self_reference_works(official_engine):
         metadata.drop_all(official_engine, checkfirst=True)
 
 
-def test_schema_namespaced_constraints_can_coexist(official_engine):
-    """Logical names may repeat because schema objects use physical prefixes."""
+def test_schema_namespaced_constraints_match_database_mode(official_engine):
+    """Validate owner namespaces only where Informix actually isolates them.
+
+    In an ANSI database, ``owner.table`` is the object identity and two owners
+    can use the same table name.  A non-ANSI database has no equivalent schema
+    contract for SQLAlchemy, so the dialect must advertise schemas as closed
+    instead of attempting a schema-qualified duplicate creation.
+    """
+    dialect = official_engine.dialect
+
+    assert dialect.supports_schemas is dialect.is_ansi_database
+
+    if not dialect.is_ansi_database:
+        assert dialect.supports_schemas is False
+        return
+
     table_name = _name("ifx_ns_users")
     check_name = _name("ifx_same_check")
     fk_name = _name("ifx_same_fk")
+    default_owner = str(dialect.default_schema_name).strip()
+    alternate_owner = (
+        "test_schema_2"
+        if default_owner.casefold() == "test_schema"
+        else "test_schema"
+    )
     metadata = MetaData()
 
     def add_table(schema: str | None) -> Table:
@@ -132,7 +137,7 @@ def test_schema_namespaced_constraints_can_coexist(official_engine):
         )
 
     local_table = add_table(None)
-    schema_table = add_table("test_schema")
+    schema_table = add_table(alternate_owner)
 
     try:
         metadata.create_all(official_engine, checkfirst=False)
@@ -158,12 +163,18 @@ def test_schema_namespaced_constraints_can_coexist(official_engine):
             for name, _table, owner in rows
         }
 
-        assert (check_name, "informix") in found
-        assert (fk_name, "informix") in found
-        assert (f"test_schema__{check_name}", "test_schema") in found
-        assert (f"test_schema__{fk_name}", "test_schema") in found
+        assert (check_name, default_owner.casefold()) in found
+        assert (fk_name, default_owner.casefold()) in found
+        assert (
+            f"{alternate_owner}__{check_name}",
+            alternate_owner.casefold(),
+        ) in found
+        assert (
+            f"{alternate_owner}__{fk_name}",
+            alternate_owner.casefold(),
+        ) in found
         assert local_table.schema is None
-        assert schema_table.schema == "test_schema"
+        assert schema_table.schema == alternate_owner
     finally:
         metadata.drop_all(official_engine, checkfirst=True)
 

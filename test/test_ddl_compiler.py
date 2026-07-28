@@ -38,6 +38,7 @@ from sqlalchemy.schema import (
     CreateIndex,
     CreateSequence,
     CreateTable,
+    DropConstraint,
     DropIndex,
     DropSequence,
     DropTable,
@@ -1335,3 +1336,36 @@ def test_unsupported_foreign_key_ondelete_actions_are_rejected(
         CreateTable(child).compile(
             dialect=dialect
         )
+
+
+@pytest.mark.ddl_compiler
+def test_drop_named_foreign_key_uses_drop_constraint(dialect):
+    metadata = MetaData()
+    parent = Table(
+        "ifx_drop_parent",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+    )
+    child = Table(
+        "ifx_drop_child",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("parent_id", Integer),
+        ForeignKeyConstraint(
+            ["parent_id"],
+            [parent.c.id],
+            name="fk_ifx_drop_parent",
+            use_alter=True,
+        ),
+    )
+    constraint = next(iter(child.foreign_key_constraints))
+
+    compiled = _upper_sql(
+        str(DropConstraint(constraint).compile(dialect=dialect))
+    )
+
+    assert compiled == (
+        "ALTER TABLE IFX_DROP_CHILD "
+        "DROP CONSTRAINT FK_IFX_DROP_PARENT"
+    )
+    assert "DROP FOREIGN KEY" not in compiled

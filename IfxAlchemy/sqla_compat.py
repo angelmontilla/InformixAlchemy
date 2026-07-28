@@ -184,6 +184,60 @@ def get_statement_returning(statement):
     return getattr(statement, "_returning", None)
 
 
+def get_dml_where_criteria(statement):
+    """Return a DML statement's private WHERE criteria tuple."""
+
+    criteria = getattr(statement, "_where_criteria", None)
+    if criteria is None:
+        raise _missing_private_api("_where_criteria")
+
+    return tuple(criteria)
+
+
+def get_dml_extra_froms(statement):
+    """Return FROM objects referenced directly by DML WHERE criteria.
+
+    SQLAlchemy uses these objects to decide whether UPDATE/DELETE needs a
+    backend-specific multi-table form.  Informix rewrites that shape to a
+    correlated EXISTS predicate, so the private traversal is centralized
+    here.
+    """
+
+    target = getattr(statement, "table", None)
+    if target is None:
+        raise _missing_private_api("DML.table")
+
+    extra_froms = []
+    for criterion in get_dml_where_criteria(statement):
+        from_objects = getattr(criterion, "_from_objects", None)
+        if from_objects is None:
+            raise _missing_private_api("ClauseElement._from_objects")
+
+        for from_ in from_objects:
+            if from_ is target:
+                continue
+            if any(existing is from_ for existing in extra_froms):
+                continue
+            extra_froms.append(from_)
+
+    return tuple(extra_froms)
+
+
+def clone_dml_without_where(statement):
+    """Clone a DML statement and clear its private WHERE criteria."""
+
+    generate = getattr(statement, "_generate", None)
+    if generate is None:
+        raise _missing_private_api("_generate")
+
+    clone = generate()
+    if not hasattr(clone, "_where_criteria"):
+        raise _missing_private_api("_where_criteria")
+
+    clone._where_criteria = ()
+    return clone
+
+
 def get_limit_state(select) -> IfxSelectLimitState:
     return IfxSelectLimitState(
         limit_clause=get_limit_clause(select),

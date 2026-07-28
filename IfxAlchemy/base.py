@@ -25,7 +25,7 @@
 """
 import datetime
 import re
-
+from sqlalchemy import event, table
 from sqlalchemy import exc
 from sqlalchemy import schema as sa_schema
 from sqlalchemy import sql
@@ -33,6 +33,7 @@ from sqlalchemy import types as sa_types
 from sqlalchemy import util
 from sqlalchemy.sql import compiler
 from sqlalchemy.sql import operators
+from sqlalchemy.sql import selectable
 from sqlalchemy.sql import util as sql_util
 from sqlalchemy.engine import default
 
@@ -1095,6 +1096,226 @@ class IfxCompiler(compiler.SQLCompiler):
             **kw,
         )
 
+    @staticmethod
+    def _ifx_is_boolean_projection_expression(column):
+        """Return whether a projected Boolean needs predicate emulation.
+
+        Informix requires a search condition in ``CASE WHEN``.  SQLAlchemy
+        Boolean values such as ``true()``, ``false()``, Boolean bind
+        parameters and an existing ``CASE`` expression are already scalar
+        values (rendered as 1/0 by this dialect); wrapping them again would
+        produce invalid SQL such as ``CASE WHEN CASE ... THEN 1 ...``.
+
+        ``_is_implicitly_boolean`` identifies expressions that are actual SQL
+        predicates, including comparisons, ``IN`` and Boolean clause lists.
+        Only those expressions need to be converted to a deterministic 1/0
+        result when projected in the SELECT list.  ``EXISTS`` is handled by
+        :meth:`visit_unary` and therefore is intentionally not wrapped here.
+        """
+        if not isinstance(column.type, sa_types.Boolean):
+            return False
+
+        element = (
+            column.element
+            if isinstance(column, sql.elements.Label)
+            else column
+        )
+
+        return bool(getattr(element, "_is_implicitly_boolean", False))
+
+    def _ifx_boolean_projection_expression(self, column):
+        if not self._ifx_is_boolean_projection_expression(column):
+            return column
+
+        label_name = (
+            column.name
+            if isinstance(column, sql.elements.Label)
+            else None
+        )
+        element = (
+            column.element
+            if isinstance(column, sql.elements.Label)
+            else column
+        )
+
+        rendered = sql.type_coerce(
+            sql.case(
+                (element, sql.literal_column("1")),
+                else_=sql.literal_column("0"),
+            ),
+            sa_types.Boolean(),
+        )
+
+        if label_name is not None:
+            rendered = rendered.label(label_name)
+
+        return rendered
+
+    def _label_select_column(
+        self,
+        select,
+        column,
+        populate_result_map,
+        asfrom,
+        column_clause_args,
+        **kw,
+    ):
+        column = self._ifx_boolean_projection_expression(column)
+        return super()._label_select_column(
+            select,
+            column,
+            populate_result_map,
+            asfrom,
+            column_clause_args,
+            **kw,
+        )
+
+    @staticmethod
+    def _ifx_projected_label_names(select):
+        return frozenset(
+            column.name
+            for column in select.selected_columns
+            if isinstance(column, sql.elements.Label)
+            and column.name is not None
+        )
+
+    def order_by_clause(self, select, **kw):
+        order_by_clauses = sqla_compat.get_order_by_clauses(select)
+        if not order_by_clauses:
+            return ""
+
+        rendered = self._generate_delimited_list(
+            order_by_clauses,
+            compiler.OPERATORS[operators.comma_op],
+            ifx_order_by_label_names=self._ifx_projected_label_names(select),
+            **kw,
+        )
+        return " ORDER BY " + rendered if rendered else ""
+
+    def visit_label(
+        self,
+        label,
+        add_to_result_map=None,
+        within_label_clause=False,
+        within_columns_clause=False,
+        render_label_as_label=None,
+        result_map_targets=(),
+        **kw,
+    ):
+        projected_names = kw.pop("ifx_order_by_label_names", frozenset())
+        if (
+            not within_columns_clause
+            and label.name in projected_names
+        ):
+            return self.preparer.format_label(label)
+
+        return super().visit_label(
+            label,
+            add_to_result_map=add_to_result_map,
+            within_label_clause=within_label_clause,
+            within_columns_clause=within_columns_clause,
+            render_label_as_label=render_label_as_label,
+            result_map_targets=result_map_targets,
+            **kw,
+        )
+
+    def _ifx_rewrite_multitable_dml_as_exists(self, statement):
+        extra_froms = sqla_compat.get_dml_extra_froms(statement)
+        if not extra_froms:
+            return statement
+
+        criteria = sqla_compat.get_dml_where_criteria(statement)
+        if not criteria:
+            return statement
+
+        predicate = sql.and_(*criteria)
+        exists_predicate = sql.exists(
+            sql.select(sql.literal_column("1"))
+            .select_from(*extra_froms)
+            .where(predicate)
+        )
+
+        rewritten = sqla_compat.clone_dml_without_where(statement)
+        return rewritten.where(exists_predicate)
+
+    def visit_bindparam(
+        self,
+        bindparam,
+        within_columns_clause=False,
+        literal_binds=False,
+        skip_bind_expression=False,
+        literal_execute=False,
+        render_postcompile=False,
+        is_upsert_set=False,
+        **kw,
+    ):
+        """Protect parameterized CTEs that precede UPDATE or DELETE.
+
+        IBM Informix ODBC/server combinations can execute a WITH + DML
+        statement without reporting an error yet affect zero rows when host
+        variables occur inside the CTE body.  SQLAlchemy's official CTE suite
+        uses ordinary bound values in precisely that position.
+
+        Mark only bind parameters compiled *inside* a CTE attached to an
+        UPDATE or DELETE as ``literal_execute``.  SQLAlchemy renders their
+        typed values immediately before execution, while SET values and
+        predicates outside the CTE remain normal DBAPI parameters.  This
+        keeps statement caching and user-supplied execution parameters intact.
+        """
+        if (
+            (self.isupdate or self.isdelete)
+            and kw.get("visiting_cte") is not None
+            and not literal_binds
+            and not literal_execute
+            and not bindparam.literal_execute
+        ):
+            bindparam = bindparam.render_literal_execute()
+
+        return super().visit_bindparam(
+            bindparam,
+            within_columns_clause=within_columns_clause,
+            literal_binds=literal_binds,
+            skip_bind_expression=skip_bind_expression,
+            literal_execute=literal_execute,
+            render_postcompile=render_postcompile,
+            is_upsert_set=is_upsert_set,
+            **kw,
+        )
+
+    def visit_update(self, update_stmt, visiting_cte=None, **kw):
+        return super().visit_update(
+            self._ifx_rewrite_multitable_dml_as_exists(update_stmt),
+            visiting_cte=visiting_cte,
+            **kw,
+        )
+
+    def visit_delete(self, delete_stmt, visiting_cte=None, **kw):
+        return super().visit_delete(
+            self._ifx_rewrite_multitable_dml_as_exists(delete_stmt),
+            visiting_cte=visiting_cte,
+            **kw,
+        )
+
+    def visit_select_statement_grouping(self, grouping, **kw):
+        element = grouping.element
+        parent = self.stack[-1].get("selectable") if self.stack else None
+
+        if (
+            isinstance(parent, selectable.CompoundSelect)
+            and isinstance(element, selectable.Select)
+            and (
+                self._ifx_limit_fetch_clause(element) is not None
+                or sqla_compat.get_offset_clause(element) is not None
+                or sqla_compat.get_order_by_clauses(element)
+            )
+        ):
+            # Informix rejects parenthesized SELECT branches in combined
+            # queries.  A derived-table SELECT preserves each branch's
+            # ORDER BY / FIRST / SKIP semantics without those parentheses.
+            return self.process(element.alias().select(), **kw)
+
+        return super().visit_select_statement_grouping(grouping, **kw)
+
     def group_by_clause(self, select, **kw):
         """Render projected labels by alias in ``GROUP BY``.
 
@@ -1278,11 +1499,33 @@ class IfxCompiler(compiler.SQLCompiler):
             .label("ifx_rn")
         ).select_from(translated).alias()
 
+    def _ifx_requires_row_number_rewrite(
+        self,
+        select,
+        limit_clause,
+        offset_clause,
+    ):
+        if offset_clause is not None:
+            return True
+
+        if limit_clause is None:
+            return False
+
+        # Informix FIRST accepts integer literals and host variables, but not
+        # arbitrary SQL expressions.  Route non-literal FETCH/LIMIT values
+        # through the ROW_NUMBER emulation so expression semantics remain
+        # available without emitting invalid FIRST <expression> syntax.
+        return not sqla_compat.simple_int_clause(select, limit_clause)
+
     def _translate_offset_select(self, select):
         limit_clause = self._ifx_limit_fetch_clause(select)
         offset_clause = sqla_compat.get_offset_clause(select)
 
-        if offset_clause is None:
+        if not self._ifx_requires_row_number_rewrite(
+            select,
+            limit_clause,
+            offset_clause,
+        ):
             return select
 
         order_by_clauses = [
@@ -1317,9 +1560,11 @@ class IfxCompiler(compiler.SQLCompiler):
             .order_by(row_number_col)
         )
 
-        paged = paged.where(
-            row_number_col > self._row_limit_expression(select, offset_clause)
-        )
+        if offset_clause is not None:
+            paged = paged.where(
+                row_number_col
+                > self._row_limit_expression(select, offset_clause)
+            )
 
         if limit_clause is not None:
             paged = paged.where(
@@ -1588,19 +1833,6 @@ class IfxCompiler(compiler.SQLCompiler):
 
 class IfxDDLCompiler(compiler.DDLCompiler):
 
-    def get_column_default_string(self, column):
-        """Compile and validate an Informix column server default."""
-
-        default_sql = super().get_column_default_string(column)
-
-        if default_sql is not None:
-            _validate_ifx_server_default(
-                column,
-                default_sql,
-            )
-
-        return default_sql
-
     def visit_create_sequence(self, create, prefix=None, **kw):
         if create.if_not_exists:
             raise exc.CompileError(
@@ -1659,12 +1891,11 @@ class IfxDDLCompiler(compiler.DDLCompiler):
             return False
 
     def get_column_default_string(self, column):
-        """Render SQLAlchemy server defaults using Informix DDL syntax.
+        """Render and validate an Informix column server default.
 
         Informix requires CURRENT to carry the same DATETIME qualifier as the
         target column. It also rejects quoted numeric defaults for numeric
-        columns, even though SQLAlchemy renders a plain string default as a
-        quoted SQL string literal.
+        columns and arbitrary arithmetic expressions in DEFAULT clauses.
         """
         server_default = column.server_default
 
@@ -1677,18 +1908,23 @@ class IfxDDLCompiler(compiler.DDLCompiler):
             isinstance(column.type, sa_types.DateTime)
             and _is_ifx_current_datetime_default(default_arg)
         ):
-            return _ifx_current_default_for_column(
+            default_sql = _ifx_current_default_for_column(
                 self.dialect.type_compiler,
                 column,
             )
+        elif (
+            isinstance(default_arg, str)
+            and _is_ifx_numeric_type(column.type)
+            and _IFX_NUMERIC_DEFAULT_RE.fullmatch(default_arg.strip())
+        ):
+            default_sql = default_arg.strip()
+        else:
+            default_sql = super().get_column_default_string(column)
 
-        if isinstance(default_arg, str) and _is_ifx_numeric_type(column.type):
-            numeric_literal = default_arg.strip()
+        if default_sql is not None:
+            _validate_ifx_server_default(column, default_sql)
 
-            if _IFX_NUMERIC_DEFAULT_RE.fullmatch(numeric_literal):
-                return numeric_literal
-
-        return super().get_column_default_string(column)
+        return default_sql
 
     def get_column_specification(self, column, **kw):
         col_spec = [self.preparer.format_column(column)]
@@ -1714,21 +1950,22 @@ class IfxDDLCompiler(compiler.DDLCompiler):
 
         return " ".join(col_spec)
 
+    def _is_inline_self_referential_fk(self, constraint):
+        """Compatibility wrapper for the shared self-reference detector."""
+        return _is_ifx_simple_self_referential_fk(constraint)
+
     @staticmethod
     def _normalize_ondelete_action(action):
-        """Validate and normalize an Informix ON DELETE action."""
+        """Validate and normalize the referential action supported by Informix."""
         if action is None:
             return None
 
         if not isinstance(action, str):
             raise exc.CompileError(
-                "Informix foreign-key ON DELETE action must be "
-                "a string or None"
+                "Informix foreign-key ON DELETE action must be a string or None"
             )
 
-        normalized_action = " ".join(
-            action.upper().split()
-        )
+        normalized_action = " ".join(action.upper().split())
 
         if normalized_action != "CASCADE":
             raise exc.CompileError(
@@ -1740,18 +1977,14 @@ class IfxDDLCompiler(compiler.DDLCompiler):
 
     def define_constraint_cascades(self, constraint):
         text = ""
-
-        ondelete = self._normalize_ondelete_action(
-            constraint.ondelete
-        )
+        ondelete = self._normalize_ondelete_action(constraint.ondelete)
 
         if ondelete is not None:
             text += " ON DELETE %s" % ondelete
 
         if constraint.onupdate is not None:
             util.warn(
-                "Informix does not support UPDATE CASCADE "
-                "for foreign keys."
+                "Informix does not support UPDATE CASCADE for foreign keys."
             )
 
         return text
@@ -1901,27 +2134,33 @@ class IfxDDLCompiler(compiler.DDLCompiler):
         return self.visit_check_constraint(constraint, **kw)
 
     def visit_drop_constraint(self, drop, **kw):
+        """Compile constraint removal using Informix ALTER TABLE syntax.
+
+        Informix removes named CHECK, UNIQUE and FOREIGN KEY constraints with
+        ``DROP CONSTRAINT <name>``.  ``DROP FOREIGN KEY`` is not valid
+        Informix SQL and produced error -201 during ``MetaData.drop_all()``.
+        A nullable UNIQUE constraint implemented by this dialect as an index
+        remains the only case that is removed with a standalone ``DROP INDEX``.
+        """
         constraint = drop.element
-        if isinstance(constraint, sa_schema.ForeignKeyConstraint):
-            qual = "FOREIGN KEY "
-            const = self._format_physical_constraint_name(constraint)
-        elif isinstance(constraint, sa_schema.PrimaryKeyConstraint):
-            qual = "PRIMARY KEY "
-            const = ""
-        elif isinstance(constraint, sa_schema.UniqueConstraint):
-            qual = "UNIQUE "
-            if self._should_use_nullable_unique_index(constraint):
-                self._mark_unique_constraint_as_index(constraint)
-                qual = "INDEX "
-            const = self._format_physical_constraint_name(constraint)
-        else:
-            qual = ""
-            const = self._format_physical_constraint_name(constraint)
 
         if self._is_unique_constraint_as_index(constraint):
-            return "DROP %s%s" % \
-                                (qual, const)
-        return "ALTER TABLE %s DROP %s%s" % (self.preparer.format_table(constraint.table), qual, const)
+            const = self._format_physical_constraint_name(constraint)
+            return f"DROP INDEX {const}"
+
+        table_name = self.preparer.format_table(constraint.table)
+
+        if isinstance(constraint, sa_schema.PrimaryKeyConstraint):
+            # Informix accepts the structural form for an unnamed or named PK.
+            return f"ALTER TABLE {table_name} DROP PRIMARY KEY"
+
+        const = self._format_physical_constraint_name(constraint)
+        if not const:
+            raise exc.CompileError(
+                "Informix requires a name when dropping this constraint"
+            )
+
+        return f"ALTER TABLE {table_name} DROP CONSTRAINT {const}"
 
     def create_table_constraints(
         self,
