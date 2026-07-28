@@ -24,6 +24,8 @@
 
 """
 import datetime
+import re
+from sqlalchemy import event, table
 from sqlalchemy import exc
 from sqlalchemy import schema as sa_schema
 from sqlalchemy import sql
@@ -47,6 +49,61 @@ _IFX_LASTROWID_DBINFO_BY_TYPE = {
     "SERIAL8": "serial8",
 }
 _IFX_UNIQUE_CONSTRAINT_AS_INDEX = "informix_unique_constraint_as_index"
+
+
+def _is_ifx_simple_self_referential_fk(constraint):
+    """Return whether *constraint* is a simple one-column self reference."""
+    if not isinstance(constraint, sa_schema.ForeignKeyConstraint):
+        return False
+
+    if len(constraint.elements) != 1:
+        return False
+
+    element = constraint.elements[0]
+    try:
+        referred_column = element.column
+    except (
+        exc.NoReferencedTableError,
+        exc.NoReferencedColumnError,
+    ):
+        return False
+
+    return (
+        element.parent.table is constraint.table
+        and referred_column.table is constraint.table
+    )
+
+
+def _create_ifx_deferred_self_referential_fks(
+    table,
+    connection,
+    **kw,
+):
+    """Create simple self-referential FKs after the Informix table exists.
+
+    Informix can reject the inline form used during ``CREATE TABLE`` for the
+    SQLAlchemy reflection fixture.  Explicit ``use_alter=True`` constraints
+    are already handled by SQLAlchemy and are therefore skipped here.
+    """
+    _ = kw
+
+    if getattr(connection.dialect, "name", None) != "informix":
+        return
+
+    for constraint in table.foreign_key_constraints:
+        if constraint.use_alter:
+            continue
+
+        if _is_ifx_simple_self_referential_fk(constraint):
+            connection.execute(sa_schema.AddConstraint(constraint))
+
+
+event.listen(
+    sa_schema.Table,
+    "after_create",
+    _create_ifx_deferred_self_referential_fks,
+    propagate=True,
+)
 
 # as documented from:
 RESERVED_WORDS = {
@@ -360,6 +417,61 @@ _IFX_DEFAULT_ENCODING_CHARACTERS = frozenset(
 )
 
 
+_IFX_NUMERIC_DEFAULT_RE = re.compile(
+    r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$"
+)
+
+
+def _is_ifx_numeric_type(type_):
+    """Return whether *type_* has a numeric SQLAlchemy affinity."""
+    affinity = getattr(type_, "_type_affinity", type(type_))
+
+    try:
+        return issubclass(
+            affinity,
+            (
+                sa_types.Integer,
+                sa_types.Numeric,
+                sa_types.Float,
+            ),
+        )
+    except TypeError:
+        return isinstance(
+            type_,
+            (
+                sa_types.Integer,
+                sa_types.Numeric,
+                sa_types.Float,
+            ),
+        )
+
+
+def _is_ifx_current_datetime_default(default_arg):
+    """Recognize SQLAlchemy's generic current-timestamp functions."""
+    function_name = getattr(default_arg, "name", None)
+
+    return (
+        isinstance(function_name, str)
+        and function_name.lower() in {"now", "current_timestamp"}
+    )
+
+
+def _ifx_current_default_for_column(type_compiler, column):
+    """Render CURRENT with the DATETIME qualifier required by Informix."""
+    rendered_type = type_compiler.process(
+        column.type,
+        type_expression=column,
+    )
+
+    normalized_type = " ".join(rendered_type.upper().split())
+
+    if normalized_type.startswith("DATETIME "):
+        qualifier = normalized_type[len("DATETIME "):]
+        return f"CURRENT {qualifier}"
+
+    return "CURRENT"
+
+
 def _normalize_ifx_reflected_default(raw_default, reflected_type):
     """Normalize a DEFAULT value obtained from Informix system catalogs.
 
@@ -387,6 +499,16 @@ def _normalize_ifx_reflected_default(raw_default, reflected_type):
 
     if not value:
         return value
+
+    # Informix names the current DATETIME expression CURRENT (or SYSDATE),
+    # while SQLAlchemy's generic server-default contract uses the canonical
+    # CURRENT_TIMESTAMP spelling. Canonicalizing here makes reflected metadata
+    # stable and prevents false Alembic diffs.
+    if isinstance(reflected_type, sa_types.DateTime):
+        normalized_expression = " ".join(value.upper().split())
+
+        if normalized_expression in {"CURRENT", "SYSDATE"}:
+            return "CURRENT_TIMESTAMP"
 
     # Informix stores these families directly as their ASCII
     # representation, without the internal 6-bit prefix.
@@ -672,6 +794,125 @@ class IfxTypeCompiler(compiler.GenericTypeCompiler):
 class IfxCompiler(compiler.SQLCompiler):
     ansi_bind_rules = True
 
+    def visit_column(
+        self,
+        column,
+        add_to_result_map=None,
+        include_table=True,
+        result_map_targets=(),
+        ambiguous_table_name_map=None,
+        **kw,
+    ):
+        """Render owner-qualified tables without three-part columns.
+
+        Informix accepts ``owner.table`` in the FROM clause, but column
+        references must use ``table.column`` (or an alias), not
+        ``owner.table.column``.
+        """
+        rendered = super().visit_column(
+            column,
+            add_to_result_map=add_to_result_map,
+            include_table=include_table,
+            result_map_targets=result_map_targets,
+            ambiguous_table_name_map=ambiguous_table_name_map,
+            **kw,
+        )
+
+        table = column.table
+        if (
+            table is None
+            or not include_table
+            or not table.named_with_column
+        ):
+            return rendered
+
+        effective_schema = self.preparer.schema_for_object(table)
+        if not effective_schema:
+            return rendered
+
+        schema_prefix = (
+            self.preparer.quote_schema(effective_schema) + "."
+        )
+        if rendered.startswith(schema_prefix):
+            return rendered[len(schema_prefix):]
+
+        return rendered
+
+    def visit_insert(
+        self,
+        insert_stmt,
+        visited_bindparam=None,
+        visiting_cte=None,
+        **kw,
+    ):
+        """Render an empty INSERT through an Informix SERIAL column.
+
+        Informix does not support SQLAlchemy's generic ``DEFAULT VALUES``
+        or ``() VALUES ()`` forms.  For an empty INSERT into a table whose
+        autoincrement column is compiled as SERIAL/SERIAL8/BIGSERIAL, an
+        explicit zero asks Informix to generate the next serial value.
+
+        The rewrite is deliberately limited to true execution-time empty
+        parameter sets and to tables that expose an autoincrement column.
+        Other empty INSERT shapes keep SQLAlchemy's normal CompileError.
+        """
+        is_empty_parameter_set = (
+            self.column_keys == []
+            and not insert_stmt._values
+            and not insert_stmt._multi_values
+            and insert_stmt.select is None
+        )
+
+        if is_empty_parameter_set:
+            autoincrement_column = insert_stmt.table._autoincrement_column
+
+            if autoincrement_column is not None:
+                insert_stmt = insert_stmt.values(
+                    {autoincrement_column: 0}
+                )
+
+        return super().visit_insert(
+            insert_stmt,
+            visited_bindparam=visited_bindparam,
+            visiting_cte=visiting_cte,
+            **kw,
+        )
+
+    def group_by_clause(self, select, **kw):
+        """Render projected labels by alias in ``GROUP BY``.
+
+        Informix accepts a select-list alias in ``GROUP BY`` but rejects
+        some composed expressions when SQLAlchemy expands the label back
+        to its underlying expression.  Only labels that are actually part
+        of the SELECT list are rendered by alias; non-projected labels keep
+        SQLAlchemy's normal expression rendering.
+        """
+        selected_columns = tuple(select.selected_columns)
+        rendered = []
+
+        for clause in select._group_by_clauses:
+            if (
+                isinstance(clause, sql.elements.Label)
+                and any(
+                    selected is clause
+                    for selected in selected_columns
+                )
+            ):
+                rendered.append(
+                    self.process(
+                        clause,
+                        render_label_as_label=clause,
+                        **kw,
+                    )
+                )
+            else:
+                rendered.append(self.process(clause, **kw))
+
+        if rendered:
+            return " GROUP BY " + ", ".join(rendered)
+
+        return ""
+
     def default_from(self):
         return _IFX_SINGLE_ROW_FROM
 
@@ -686,6 +927,28 @@ class IfxCompiler(compiler.SQLCompiler):
 
     def visit_now_func(self, fn, **kw):
         return "CURRENT_TIMESTAMP"
+
+    def visit_grouping(self, grouping, asfrom=False, **kw):
+        if isinstance(grouping, sql.selectable.ScalarSelect):
+            scalar_select = grouping.element
+            has_row_limit = (
+                self._ifx_limit_fetch_clause(scalar_select) is not None
+                or sqla_compat.get_offset_clause(scalar_select) is not None
+            )
+
+            if has_row_limit and sqla_compat.get_order_by_clauses(
+                scalar_select
+            ):
+                ordered_rows = scalar_select.alias()
+                grouping = sql.select(
+                    *ordered_rows.c
+                ).select_from(ordered_rows).scalar_subquery()
+
+        return super().visit_grouping(
+            grouping,
+            asfrom=asfrom,
+            **kw,
+        )
 
     def for_update_clause(self, select, **kw):
         for_update = sqla_compat.get_select_for_update(select)
@@ -750,6 +1013,12 @@ class IfxCompiler(compiler.SQLCompiler):
 
         if sqla_compat.simple_int_clause(select, clause):
             return clause.render_literal_execute()
+
+        if isinstance(clause.type, sa_types.NullType):
+            return sql.type_coerce(
+                clause,
+                sa_types.Integer(),
+            )
 
         return clause
 
@@ -1159,6 +1428,38 @@ class IfxDDLCompiler(compiler.DDLCompiler):
         else:
             return False
 
+    def get_column_default_string(self, column):
+        """Render SQLAlchemy server defaults using Informix DDL syntax.
+
+        Informix requires CURRENT to carry the same DATETIME qualifier as the
+        target column. It also rejects quoted numeric defaults for numeric
+        columns, even though SQLAlchemy renders a plain string default as a
+        quoted SQL string literal.
+        """
+        server_default = column.server_default
+
+        if not isinstance(server_default, sa_schema.DefaultClause):
+            return None
+
+        default_arg = server_default.arg
+
+        if (
+            isinstance(column.type, sa_types.DateTime)
+            and _is_ifx_current_datetime_default(default_arg)
+        ):
+            return _ifx_current_default_for_column(
+                self.dialect.type_compiler,
+                column,
+            )
+
+        if isinstance(default_arg, str) and _is_ifx_numeric_type(column.type):
+            numeric_literal = default_arg.strip()
+
+            if _IFX_NUMERIC_DEFAULT_RE.fullmatch(numeric_literal):
+                return numeric_literal
+
+        return super().get_column_default_string(column)
+
     def get_column_specification(self, column, **kw):
         col_spec = [self.preparer.format_column(column)]
 
@@ -1183,6 +1484,10 @@ class IfxDDLCompiler(compiler.DDLCompiler):
 
         return " ".join(col_spec)
 
+    def _is_inline_self_referential_fk(self, constraint):
+        """Compatibility wrapper for the shared self-reference detector."""
+        return _is_ifx_simple_self_referential_fk(constraint)
+
     def define_constraint_cascades(self, constraint):
         text = ""
         if constraint.ondelete is not None:
@@ -1194,11 +1499,65 @@ class IfxDDLCompiler(compiler.DDLCompiler):
 
         return text
 
-    def _define_constraint_name_postfix(self, constraint):
-        if constraint.name is None:
-            return ""
+    def _constraint_table(self, constraint):
+        """Return the table associated with a constraint.
 
-        formatted_name = self.preparer.format_constraint(constraint)
+        Table-level constraints expose ``constraint.table`` directly.
+        Column-level CHECK constraints are attached to a Column and their
+        ``table`` property raises InvalidRequestError, so the table must be
+        obtained through the parent column.
+        """
+        try:
+            return constraint.table
+        except exc.InvalidRequestError:
+            parent = getattr(constraint, "parent", None)
+            return getattr(parent, "table", None)
+
+    def _physical_constraint_name(self, constraint):
+        """Return the Informix catalog name used for a constraint.
+
+        Informix can enforce constraint names globally across owners. Prefix
+        schema-owned objects physically while keeping the SQLAlchemy object's
+        logical name unchanged.
+
+        Naming-convention names must retain SQLAlchemy's truncation marker so
+        that IdentifierPreparer can shorten them deterministically when they
+        exceed Informix's maximum identifier length.
+        """
+        if constraint.name is None:
+            return None
+
+        logical_name = constraint.name
+        table = self._constraint_table(constraint)
+        schema = getattr(table, "schema", None)
+
+        if schema:
+            physical_name = f"{schema}__{logical_name}"
+
+            if isinstance(
+                logical_name,
+                sql.elements._truncated_label,
+            ):
+                return type(logical_name)(
+                    physical_name,
+                    getattr(logical_name, "quote", None),
+                )
+
+            return physical_name
+
+        return logical_name
+
+    def _format_physical_constraint_name(self, constraint):
+        physical_name = self._physical_constraint_name(constraint)
+        if physical_name is None:
+            return None
+
+        return self.preparer.truncate_and_render_constraint_name(
+            physical_name
+        )
+
+    def _define_constraint_name_postfix(self, constraint):
+        formatted_name = self._format_physical_constraint_name(constraint)
         if formatted_name is None:
             return ""
 
@@ -1280,11 +1639,15 @@ class IfxDDLCompiler(compiler.DDLCompiler):
         text += self.define_constraint_deferrability(constraint)
         return text
 
+    def visit_column_check_constraint(self, constraint, **kw):
+        """Compile a column CHECK using Informix postfix naming syntax."""
+        return self.visit_check_constraint(constraint, **kw)
+
     def visit_drop_constraint(self, drop, **kw):
         constraint = drop.element
         if isinstance(constraint, sa_schema.ForeignKeyConstraint):
             qual = "FOREIGN KEY "
-            const = self.preparer.format_constraint(constraint)
+            const = self._format_physical_constraint_name(constraint)
         elif isinstance(constraint, sa_schema.PrimaryKeyConstraint):
             qual = "PRIMARY KEY "
             const = ""
@@ -1293,23 +1656,86 @@ class IfxDDLCompiler(compiler.DDLCompiler):
             if self._should_use_nullable_unique_index(constraint):
                 self._mark_unique_constraint_as_index(constraint)
                 qual = "INDEX "
-            const = self.preparer.format_constraint(constraint)
+            const = self._format_physical_constraint_name(constraint)
         else:
             qual = ""
-            const = self.preparer.format_constraint(constraint)
+            const = self._format_physical_constraint_name(constraint)
 
         if self._is_unique_constraint_as_index(constraint):
             return "DROP %s%s" % \
                                 (qual, const)
         return "ALTER TABLE %s DROP %s%s" % (self.preparer.format_table(constraint.table), qual, const)
 
-    def create_table_constraints(self, table, **kw):
+    def create_table_constraints(
+        self,
+        table,
+        _include_foreign_key_constraints=None,
+        **kw,
+    ):
         for constraint in sqla_compat.get_table_sorted_constraints(table):
             if self._should_use_nullable_unique_index(constraint):
                 self._defer_unique_constraint_to_index(constraint, "ukey")
 
-        result = super(IfxDDLCompiler, self).create_table_constraints(table, **kw)
-        return result
+        inline_self_fks = {
+            constraint
+            for constraint in table.foreign_key_constraints
+            if self._is_inline_self_referential_fk(constraint)
+        }
+
+        if _include_foreign_key_constraints is None:
+            included_fks = (
+                table.foreign_key_constraints - inline_self_fks
+            )
+        else:
+            included_fks = (
+                set(_include_foreign_key_constraints)
+                - inline_self_fks
+            )
+
+        return super().create_table_constraints(
+            table,
+            _include_foreign_key_constraints=included_fks,
+            **kw,
+        )
+
+    def _physical_index_name(self, index):
+        """Return the Informix catalog name used for an index.
+
+        Preserve SQLAlchemy's truncation marker for names generated from a
+        naming convention. This allows ``IdentifierPreparer`` to shorten long
+        index names deterministically instead of validating them as ordinary
+        strings.
+        """
+        if index.name is None:
+            raise exc.CompileError(
+                "CREATE INDEX requires that the index have a name"
+            )
+
+        logical_name = index.name
+        table = getattr(index, "table", None)
+        schema = getattr(table, "schema", None)
+
+        if schema:
+            physical_name = f"{schema}__{logical_name}"
+
+            if isinstance(
+                logical_name,
+                sql.elements._truncated_label,
+            ):
+                return type(logical_name)(
+                    physical_name,
+                    getattr(logical_name, "quote", None),
+                )
+
+            return physical_name
+
+        return logical_name
+
+    def _prepared_index_name(self, index, include_schema=False):
+        _ = include_schema
+        return self.preparer.truncate_and_render_index_name(
+            self._physical_index_name(index)
+        )
 
     def visit_create_index(
         self, create, include_schema=False, include_table_schema=True, **kw
@@ -1346,11 +1772,11 @@ class IfxIdentifierPreparer(compiler.IdentifierPreparer):
 
 class IfxExecutionContext(default.DefaultExecutionContext):
     def fire_sequence(self, seq, type_):
+        sequence_name = self.identifier_preparer.format_sequence(seq)
         return self._execute_scalar(
-            "SELECT "
-            + self.dialect.identifier_preparer.format_sequence(seq)
-            + ".NEXTVAL"
-            + _IFX_SINGLE_ROW_FROM,
+            "SELECT FIRST 1 "
+            + sequence_name
+            + ".NEXTVAL FROM systables",
             type_,
         )
 
@@ -1446,6 +1872,18 @@ class IfxDialect(default.DefaultDialect):
     default_paramstyle = 'qmark'
     colspecs = colspecs
     ischema_names = ischema_names
+    construct_arguments = [
+        (
+            sa_schema.Table,
+            {
+                "lock_level": None,
+                "first_extent": None,
+                "next_extent": None,
+                "page_size": None,
+            },
+        ),
+    ]
+    is_ansi_database = False
     supports_char_length = False
     supports_unicode_statements = False
     supports_unicode_binds = False
@@ -1490,12 +1928,74 @@ class IfxDialect(default.DefaultDialect):
 
         self._reflector = self._reflector_cls(self)
 
-    # reflection: these all defer to an BaseIfxReflector
-    # object which selects between Informix and AS/400 schemas
+    def _detect_database_mode(self, connection):
+        """Return the current database name and its ANSI-mode flag."""
+        database_name = connection.exec_driver_sql(
+            """
+            SELECT DBINFO('dbname')
+            FROM systables
+            WHERE tabid = 1
+            """
+        ).scalar()
+
+        if database_name is None:
+            raise exc.InvalidRequestError(
+                "Informix no pudo determinar la base actual mediante "
+                "DBINFO('dbname')."
+            )
+
+        database_name = str(database_name).strip()
+
+        database_row = connection.exec_driver_sql(
+            """
+            SELECT FIRST 1 d.is_ansi
+            FROM sysmaster:sysdatabases d
+            WHERE LOWER(d.name) = LOWER(?)
+            """,
+            (database_name,),
+        ).first()
+
+        if database_row is None or database_row[0] is None:
+            raise exc.InvalidRequestError(
+                "Informix no encontró la base conectada en "
+                "sysmaster:sysdatabases. "
+                f"Base informada por DBINFO: {database_name!r}."
+            )
+
+        ansi_value = database_row[0]
+
+        try:
+            is_ansi_database = bool(int(ansi_value))
+        except (TypeError, ValueError) as exc_value:
+            raise exc.InvalidRequestError(
+                "Informix devolvió un valor is_ansi no reconocido para "
+                f"la base {database_name!r}: {ansi_value!r}."
+            ) from exc_value
+
+        return database_name, is_ansi_database
+
     def initialize(self, connection):
         super(IfxDialect, self).initialize(connection)
-        self.dbms_ver = getattr(connection.connection, 'dbms_ver', None)
-        self.dbms_name = getattr(connection.connection, 'dbms_name', None)
+
+        self.dbms_ver = getattr(
+            connection.connection,
+            "dbms_ver",
+            None,
+        )
+        self.dbms_name = getattr(
+            connection.connection,
+            "dbms_name",
+            None,
+        )
+
+        (
+            self.database_name,
+            self.is_ansi_database,
+        ) = self._detect_database_mode(connection)
+
+        # SQLAlchemy's public capability must describe the connected
+        # database, not the Informix server version in the abstract.
+        self.supports_schemas = self.is_ansi_database
 
     def normalize_name(self, name):
         return self._reflector.normalize_name(name)

@@ -29,7 +29,6 @@ from sqlalchemy.engine import reflection
 from sqlalchemy.engine.reflection import ObjectKind, ObjectScope
 from .temporal import IFXDateTime
 from .temporal import IFXTime
-import re
 
 from . import sqla_compat
 
@@ -128,6 +127,12 @@ class IfxReflector(BaseReflector):
     _INDEX_PART_COUNT = 16
     _MISSING = object()
 
+    _TABLE_LOCK_LEVELS = {
+        "P": "PAGE",
+        "R": "ROW",
+        "B": "PAGE_AND_ROW",
+    }
+
     _PLAIN_LITERAL_DEFAULT_TYPES = {
         0,   # CHAR
         13,  # VARCHAR
@@ -211,6 +216,47 @@ class IfxReflector(BaseReflector):
             return value.strip()
         return str(value).strip()
 
+    def _logical_reflected_name(
+        self,
+        physical_name,
+        schema=None,
+    ):
+        """Convert a schema-prefixed physical name back to its logical name."""
+        physical_name = self._clean_str(physical_name)
+
+        if not physical_name:
+            return None
+
+        if schema:
+            schema_name = self._clean_str(schema)
+
+            if schema_name:
+                prefix = f"{schema_name}__"
+                candidate_prefix = physical_name[: len(prefix)]
+
+                if candidate_prefix.casefold() == prefix.casefold():
+                    physical_name = physical_name[len(prefix) :]
+
+        return self.normalize_name(physical_name)
+
+    def _clean_default_catalog_value(self, value):
+        """Normalize a textual value read from sysdefaults.
+
+        Informix stores sysdefaults.default in a fixed-length catalog
+        column. Some ODBC paths expose the terminating catalog padding as
+        one or more NUL characters.
+
+        NUL characters at the end are transport/catalog padding and are
+        not part of the SQL default. Spaces before the NUL must be
+        preserved because they may belong to a character literal.
+        """
+        value = self._clean_str(value)
+
+        if value is None:
+            return None
+
+        return value.rstrip("\x00")
+
     def _normalize_extended_type_name(self, value):
         value = self._clean_str(value)
         if not value:
@@ -245,8 +291,23 @@ class IfxReflector(BaseReflector):
         }
 
     def _resolved_owner(self, schema=None):
-        owner = schema if schema is not None else self.default_schema_name
-        return self._clean_str(owner)
+        """Convierte un schema SQLAlchemy en propietario Informix."""
+
+        owner = (
+            self.default_schema_name
+            if schema is None
+            else schema
+        )
+
+        owner = self._clean_str(owner)
+
+        if not owner:
+            raise exc.InvalidRequestError(
+                "Informix reflection requires a non-empty object owner. "
+                "Pass schema explicitly or initialize default_schema_name."
+            )
+
+        return owner
 
     def _normalize_schema_for_output(self, owner, requested_schema=None):
         owner_norm = self.normalize_name(self._clean_str(owner))
@@ -349,8 +410,8 @@ class IfxReflector(BaseReflector):
                     {", ".join(f"i.part{n}" for n in range(1, self._INDEX_PART_COUNT + 1))}
                 FROM sysindexes i
                 WHERE i.tabid = ?
-                  AND LOWER(i.idxname) = LOWER(?)
-                  AND LOWER(i.owner) = LOWER(?)
+                  AND LOWER(TRIM(i.idxname)) = LOWER(TRIM(?))
+                  AND LOWER(TRIM(i.owner)) = LOWER(TRIM(?))
             """
             params = (tabid, idxname, owner)
         else:
@@ -362,7 +423,7 @@ class IfxReflector(BaseReflector):
                     {", ".join(f"i.part{n}" for n in range(1, self._INDEX_PART_COUNT + 1))}
                 FROM sysindexes i
                 WHERE i.tabid = ?
-                  AND LOWER(i.idxname) = LOWER(?)
+                  AND LOWER(TRIM(i.idxname)) = LOWER(TRIM(?))
             """
             params = (tabid, idxname)
 
@@ -838,7 +899,7 @@ class IfxReflector(BaseReflector):
         return False
 
     def _decode_literal_default(self, default_value, base_code):
-        value = self._clean_str(default_value)
+        value = self._clean_default_catalog_value(default_value)
         if value is None:
             return None
 
@@ -853,14 +914,16 @@ class IfxReflector(BaseReflector):
         return sql_value.strip() or value
 
     def _decode_default(self, default_type, default_value, base_code):
-        default_type = self._clean_str(default_type)
-        default_value = self._clean_str(default_value)
+        default_type = self._clean_default_catalog_value(default_type)
 
         if not default_type:
             return None
 
         if default_type == "L":
-            return self._decode_literal_default(default_value, base_code)
+            return self._decode_literal_default(
+                default_value,
+                base_code,
+            )
 
         if default_type == "T":
             return "TODAY"
@@ -868,14 +931,16 @@ class IfxReflector(BaseReflector):
         if default_type == "U":
             return "USER"
 
+        if default_type == "N":
+            return None
+
+        default_value = self._clean_default_catalog_value(default_value)
+
         if default_type == "C":
-            return default_value or "CURRENT"
+            return (default_value or "CURRENT").strip()
 
         if default_type == "S":
             return default_value or "DBSERVERNAME"
-
-        if default_type == "N":
-            return None
 
         return default_value
 
@@ -1105,13 +1170,31 @@ class IfxReflector(BaseReflector):
 
         # TEMP TABLES can be connection-local and not always discoverable
         # through systables in the same way as permanent objects.
-        if self._has_table_via_odbc(connection, table_name, schema=schema):
+        if self._has_table_via_sql_probe(
+            connection,
+            table_name,
+            schema=schema,
+        ):
             return True
 
-        if self._has_table_via_sql_probe(connection, table_name, schema=schema):
+        if self._has_table_via_dbapi_probe(
+            connection,
+            table_name,
+            schema=schema,
+        ):
             return True
 
-        return self._has_table_via_dbapi_probe(connection, table_name, schema=schema)
+        # SQLTables without an explicit owner can return a table with the
+        # requested name from another owner in an ANSI database.  That would
+        # make has_table(name) report a cross-schema false positive.
+        if schema is None:
+            return False
+
+        return self._has_table_via_odbc(
+            connection,
+            table_name,
+            schema=schema,
+        )
 
     @reflection.cache
     def has_sequence(self, connection, sequence_name, schema=None, **kw):
@@ -1130,15 +1213,46 @@ class IfxReflector(BaseReflector):
 
     @reflection.cache
     def get_schema_names(self, connection, **kw):
+        """Enumera propietarios de objetos y usuarios capaces de poseerlos."""
+
         _ = kw
-        sql_text = """
+
+        object_owner_rows = connection.exec_driver_sql(
+            """
             SELECT DISTINCT t.owner
             FROM systables t
             WHERE t.owner IS NOT NULL
             ORDER BY t.owner
-        """
-        rows = connection.exec_driver_sql(sql_text).fetchall()
-        return [self.normalize_name(self._clean_str(r[0])) for r in rows if r[0]]
+            """
+        ).fetchall()
+
+        authorization_rows = connection.exec_driver_sql(
+            """
+            SELECT u.username
+            FROM sysusers u
+            WHERE u.username IS NOT NULL
+            AND u.usertype IN ('D', 'R')
+            ORDER BY u.username
+            """
+        ).fetchall()
+
+        owners = {}
+
+        for row in (*object_owner_rows, *authorization_rows):
+            owner = self.normalize_name(
+                self._clean_str(row[0])
+            )
+
+            if owner is not None:
+                owners[str(owner)] = owner
+
+        return [
+            owners[key]
+            for key in sorted(
+                owners,
+                key=str.casefold,
+            )
+        ]
 
     @reflection.cache
     def get_table_names(self, connection, schema=None, **kw):
@@ -1270,11 +1384,198 @@ class IfxReflector(BaseReflector):
         # dialect, so the contract is explicit and empty.
         return self._empty_reflection_names("materialized views")
 
-    def get_check_constraints(self, connection, table_name, schema=None, **kw):
-        _ = (connection, table_name, schema, kw)
-        # Explicit contract for a reflection surface we don't currently
-        # implement for Informix in this dialect.
-        return []
+    @staticmethod
+    def _normalize_check_catalog_text(sqltext):
+        """Remove Informix catalog formatting without changing SQL literals.
+
+        Informix adds whitespace immediately before closing parentheses when
+        it stores CHECK expressions in ``syschecks``. That whitespace is not
+        semantically relevant, but it prevents SQLAlchemy's compliance suite
+        from comparing the reflected expression with the original one.
+
+        Quoted strings and quoted identifiers are preserved verbatim.
+        """
+        if sqltext is None:
+            return ""
+
+        text = str(sqltext)
+        normalized = []
+        quote = None
+        index = 0
+
+        while index < len(text):
+            character = text[index]
+
+            if quote is not None:
+                quote, index = (
+                    IfxReflector._append_quoted_check_character(
+                        normalized,
+                        text,
+                        index,
+                        quote,
+                    )
+                )
+                continue
+
+            if character in ("'", '"'):
+                quote = character
+                normalized.append(character)
+                index += 1
+                continue
+
+            if character == ")":
+                IfxReflector._remove_trailing_whitespace(normalized)
+
+            normalized.append(character)
+            index += 1
+
+        return "".join(normalized).rstrip()
+
+    @staticmethod
+    def _append_quoted_check_character(
+        normalized,
+        text,
+        index,
+        quote,
+    ):
+        """Append a quoted character, preserving doubled quote escapes."""
+        character = text[index]
+        normalized.append(character)
+
+        if character != quote:
+            return quote, index + 1
+
+        # SQL escapes a quote by doubling it:
+        # 'it''s valid' or "quoted""identifier".
+        if index + 1 < len(text) and text[index + 1] == quote:
+            normalized.append(text[index + 1])
+            return quote, index + 2
+
+        return None, index + 1
+
+    @staticmethod
+    def _remove_trailing_whitespace(characters):
+        """Remove catalog-added whitespace before a closing parenthesis."""
+        while characters and characters[-1].isspace():
+            characters.pop()
+
+    @staticmethod
+    def _check_constraint_sort_key(constraint):
+        """Return a stable semantic ordering key for reflected CHECKs."""
+        sqltext = constraint.get("sqltext") or ""
+
+        comparable_text = " ".join(
+            sqltext
+            .replace("(", " ")
+            .replace(")", " ")
+            .replace("`", " ")
+            .split()
+        ).casefold()
+
+        name = constraint.get("name")
+
+        return (
+            comparable_text,
+            str(name).casefold() if name is not None else "",
+        )
+
+    @reflection.cache
+    def get_check_constraints(
+        self,
+        connection,
+        table_name,
+        schema=None,
+        **kw,
+    ):
+        """Reflect CHECK constraints defined on an Informix table.
+
+        Informix stores the textual representation of each CHECK constraint
+        in multiple fixed-width rows of ``syschecks``. The rows must be
+        concatenated in ``seqno`` order before removing final catalog padding.
+        """
+        _ = kw
+
+        table_row = self._require_table_row(
+            connection,
+            table_name,
+            schema=schema,
+            tabtypes=("T",),
+        )
+        tabid = int(table_row[0])
+
+        sql_text = """
+            SELECT
+                c.constrid,
+                c.constrname,
+                ch.seqno,
+                ch.checktext
+            FROM sysconstraints c
+            JOIN syschecks ch
+            ON ch.constrid = c.constrid
+            WHERE c.tabid = ?
+            AND c.constrtype = 'C'
+            AND UPPER(TRIM(ch.type)) = 'T'
+            ORDER BY
+                c.constrid,
+                ch.seqno
+        """
+
+        rows = connection.exec_driver_sql(
+            sql_text,
+            (tabid,),
+        ).fetchall()
+
+        constraints = []
+
+        current_id = None
+        current_name = None
+        current_parts = []
+
+        def append_current():
+            if current_id is None:
+                return
+
+            # Do not strip individual CHAR(32) fragments: a space at the end
+            # of a non-final fragment can be part of the original expression.
+            raw_sqltext = "".join(current_parts).rstrip()
+
+            sqltext = self._normalize_check_catalog_text(
+                raw_sqltext
+            )
+
+            constraints.append(
+                {
+                    "name": self._logical_reflected_name(
+                        current_name,
+                        schema=schema,
+                    ),
+                    "sqltext": sqltext,
+                }
+            )
+
+        for constrid, constrname, _seqno, checktext in rows:
+            constrid = int(constrid)
+
+            if current_id is not None and constrid != current_id:
+                append_current()
+                current_parts = []
+
+            if constrid != current_id:
+                current_id = constrid
+                current_name = constrname
+
+            part = self._coerce_name(checktext)
+
+            if part is not None:
+                current_parts.append(part)
+
+        append_current()
+
+        constraints.sort(
+            key=self._check_constraint_sort_key
+        )
+
+        return constraints
 
     def get_table_comment(self, connection, table_name, schema=None, **kw):
         _ = (connection, table_name, schema, kw)
@@ -1282,11 +1583,75 @@ class IfxReflector(BaseReflector):
         # dialect; return the stable SQLAlchemy structure explicitly.
         return {"text": None}
 
+    @staticmethod
+    def _positive_catalog_int(value):
+        """Return a positive catalog integer, or ``None`` when absent."""
+        try:
+            converted = int(value)
+        except (TypeError, ValueError):
+            return None
+
+        return converted if converted > 0 else None
+
+    def _table_options_from_catalog_row(self, row):
+        """Translate one SYSTABLES row to SQLAlchemy dialect options."""
+        if row is None:
+            return {}
+
+        tabtype = (self._clean_str(row[0]) or "").upper()
+        if tabtype != "T":
+            # Views participate in SQLAlchemy's multi-reflection API, but
+            # Informix storage and lock options apply only to base tables.
+            return {}
+
+        options = {}
+        lock_code = (self._clean_str(row[1]) or "").upper()
+        lock_level = self._TABLE_LOCK_LEVELS.get(lock_code)
+        if lock_level is not None:
+            options["informix_lock_level"] = lock_level
+
+        for key, raw_value in (
+            ("informix_first_extent", row[2]),
+            ("informix_next_extent", row[3]),
+            ("informix_page_size", row[4]),
+        ):
+            value = self._positive_catalog_int(raw_value)
+            if value is not None:
+                options[key] = value
+
+        return options
+
+    @reflection.cache
     def get_table_options(self, connection, table_name, schema=None, **kw):
-        _ = (connection, table_name, schema, kw)
-        raise NotImplementedError(
-            "Informix table-option reflection is not implemented"
+        """Reflect native Informix storage and lock options from SYSTABLES."""
+        _ = kw
+
+        table_row = self._require_table_row(
+            connection,
+            table_name,
+            schema=schema,
+            tabtypes=("T", "V"),
         )
+        tabid = int(table_row[0])
+
+        row = connection.exec_driver_sql(
+            """
+            SELECT FIRST 1
+                t.tabtype,
+                t.locklevel,
+                t.fextsize,
+                t.nextsize,
+                t.pagesize
+            FROM systables t
+            WHERE t.tabid = ?
+            """,
+            (tabid,),
+        ).first()
+
+        if row is None:
+            raise exc.NoSuchTableError(table_name)
+
+        return self._table_options_from_catalog_row(row)
 
     def get_temp_view_names(self, connection, schema=None, **kw):
         _ = (connection, schema, kw)
@@ -1528,12 +1893,13 @@ class IfxReflector(BaseReflector):
             options = {}
             if delrule == "C":
                 options["ondelete"] = "CASCADE"
-            elif delrule == "R":
-                options["ondelete"] = "RESTRICT"
 
             fkeys.append(
                 {
-                    "name": self.normalize_name(constrname) if constrname else None,
+                    "name": self._logical_reflected_name(
+                        constrname,
+                        schema=schema,
+                    ),
                     "constrained_columns": constrained_columns,
                     "referred_schema": referred_schema,
                     "referred_table": self.normalize_name(pk_tabname),
@@ -1622,7 +1988,10 @@ class IfxReflector(BaseReflector):
 
             incoming.append(
                 {
-                    "name": self.normalize_name(constrname) if constrname else None,
+                    "name": self._logical_reflected_name(
+                        constrname,
+                        schema=fk_tabowner,
+                    ),
                     "constrained_schema": self._normalize_schema_for_output(
                         fk_tabowner,
                         requested_schema=schema,
@@ -1642,7 +2011,7 @@ class IfxReflector(BaseReflector):
             SELECT constrtype, constrname, idxname
             FROM sysconstraints
             WHERE tabid = ?
-              AND constrtype IN ('P', 'U')
+              AND constrtype IN ('P', 'U', 'R')
               AND idxname IS NOT NULL
         """
         constr_rows = connection.exec_driver_sql(constr_sql, (tabid,)).fetchall()
@@ -1669,7 +2038,14 @@ class IfxReflector(BaseReflector):
         """
         return connection.exec_driver_sql(idx_sql, (tabid,)).fetchall()
 
-    def _index_info_from_row(self, connection, tabid, row, constraint_by_index):
+    def _index_info_from_row(
+        self,
+        connection,
+        tabid,
+        row,
+        constraint_by_index,
+        schema=None,
+    ):
         idxname = self._clean_str(row[0])
         owner = self._clean_str(row[1])
         idxtype = self._clean_str(row[2])
@@ -1677,7 +2053,7 @@ class IfxReflector(BaseReflector):
         key = idxname.lower() if idxname else None
         duplicated = constraint_by_index.get(key) if key else None
 
-        if duplicated and duplicated[0] == "P":
+        if duplicated and duplicated[0] in ("P", "U", "R"):
             return None
 
         colnames, column_sorting = self._get_index_columns(
@@ -1686,20 +2062,21 @@ class IfxReflector(BaseReflector):
             idxname,
             owner=owner,
         )
+
         if not colnames:
             return None
 
         idx_info = {
-            "name": self.normalize_name(idxname),
+            "name": self._logical_reflected_name(
+                idxname,
+                schema=schema,
+            ),
             "column_names": colnames,
             "unique": idxtype in ("U", "u"),
         }
 
         if column_sorting:
             idx_info["column_sorting"] = column_sorting
-
-        if duplicated and duplicated[0] == "U":
-            idx_info["duplicates_constraint"] = duplicated[1]
 
         return idx_info
 
@@ -1722,6 +2099,7 @@ class IfxReflector(BaseReflector):
                 tabid,
                 row,
                 constraint_by_index,
+                schema=schema,
             )
             if idx_info is not None:
                 indexes.append(idx_info)
@@ -1908,6 +2286,7 @@ class IfxReflector(BaseReflector):
         yield from self._multi_reflect(
             connection,
             self.get_check_constraints,
+            view_default_factory=list,
             schema=schema,
             filter_names=filter_names,
             kind=kind,

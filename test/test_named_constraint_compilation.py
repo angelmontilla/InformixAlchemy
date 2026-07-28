@@ -52,3 +52,57 @@ def test_add_constraint_compiles_named_constraints_in_informix_order():
         "ALTER TABLE sa_named_constraints ADD CONSTRAINT "
         "FOREIGN KEY(parent_id) REFERENCES sa_parent (id) CONSTRAINT fk_named"
     )
+
+
+def test_long_convention_pk_name_is_truncated_by_identifier_preparer():
+    long_suffix = "_".join(["abcdef" * 5] * 10)
+
+    metadata = MetaData(
+        naming_convention={
+            "pk": (
+                "primary_key_%(table_name)s_%(column_0_N_name)s_"
+                + long_suffix
+            )
+        }
+    )
+
+    table = Table(
+        "a_things_with_stuff",
+        metadata,
+        Column(
+            "id_long_column_name",
+            Integer,
+            primary_key=True,
+        ),
+        Column(
+            "id_another_long_name",
+            Integer,
+            primary_key=True,
+        ),
+    )
+
+    dialect = IfxDialect_pyodbc()
+
+    assert table.primary_key.name is not None
+    assert (
+        len(table.primary_key.name)
+        > dialect.max_identifier_length
+    )
+
+    compiled = str(
+        CreateTable(table).compile(dialect=dialect)
+    )
+
+    rendered_name = compiled.split(
+        " CONSTRAINT ",
+        1,
+    )[1].split()[0]
+
+    assert (
+        len(rendered_name)
+        <= dialect.max_identifier_length
+    )
+
+    assert rendered_name[:-5] == str(
+        table.primary_key.name
+    )[: len(rendered_name) - 5]

@@ -57,12 +57,43 @@ class ReflectionSelectStyleTests(unittest.TestCase):
         self.assertEqual(connection.calls[0][1][0], "employee")
 
     def test_get_schema_names_uses_exec_driver_sql(self):
-        connection = _RecordingConnection(results=[[("informix",), ("reporting",)]])
+        connection = _RecordingConnection(
+            results=[
+                [
+                    ("informix",),
+                    ("reporting",),
+                ],
+                [
+                    ("informix",),
+                    ("test_schema",),
+                    ("test_schema_2",),
+                ],
+            ]
+        )
 
-        schema_names = self.reflector.get_schema_names(connection)
+        schema_names = self.reflector.get_schema_names(
+            connection
+        )
 
-        self.assertEqual(schema_names, ["informix", "reporting"])
-        self.assertIn("SELECT DISTINCT t.owner", connection.calls[0][0])
+        self.assertEqual(
+            schema_names,
+            [
+                "informix",
+                "reporting",
+                "test_schema",
+                "test_schema_2",
+            ],
+        )
+
+        self.assertIn(
+            "SELECT DISTINCT t.owner",
+            connection.calls[0][0],
+        )
+
+        self.assertIn(
+            "FROM sysusers u",
+            connection.calls[1][0],
+        )
 
     def test_get_incoming_foreign_keys_groups_without_has_key(self):
         connection = _RecordingConnection(

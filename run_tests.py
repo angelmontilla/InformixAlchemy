@@ -17,21 +17,26 @@ from tools.official_suite_support import (
 def main(
     argv: list[str] | None = None,
 ) -> int:
-    registry.register("informix", "IfxAlchemy.pyodbc", "IfxDialect_pyodbc",)
-
-    registry.register("informix.pyodbc", "IfxAlchemy.pyodbc", "IfxDialect_pyodbc",)
+    registry.register(
+        "informix",
+        "IfxAlchemy.pyodbc",
+        "IfxDialect_pyodbc",
+    )
+    registry.register(
+        "informix.pyodbc",
+        "IfxAlchemy.pyodbc",
+        "IfxDialect_pyodbc",
+    )
 
     try:
-        env_file = (
-            load_official_suite_environment()
-        )
-
+        env_file = load_official_suite_environment()
         dburi = official_suite_dburi()
 
-        target = (
-            verify_official_suite_database(
-                dburi
-            )
+        # Se autoriza primero la base exacta. La limpieza de objetos pertenece
+        # al mecanismo oficial --dropfirst y a IfxAlchemy.provision.
+        target = verify_official_suite_database(
+            dburi,
+            require_empty=False,
         )
 
     except Exception as exc:
@@ -46,16 +51,21 @@ def main(
         "dialect compliance suite",
         file=sys.stderr,
     )
-
     print(
         f"Environment: {env_file}",
         file=sys.stderr,
     )
-
     print(
         f"Target: {target['safe_url']}",
         file=sys.stderr,
     )
+
+    if target["has_objects"]:
+        print(
+            "Stale suite objects detected; --dropfirst will remove them: "
+            f"{target['dirty_inventory']}",
+            file=sys.stderr,
+        )
 
     suite_targets = [
         "test/test_suite.py",
@@ -83,6 +93,7 @@ def main(
         *suite_targets,
         "--dburi",
         dburi,
+        "--dropfirst",
         "-ra",
     ]
 

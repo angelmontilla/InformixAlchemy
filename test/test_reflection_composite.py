@@ -205,7 +205,6 @@ def _multi_reflection_names(result):
         "get_multi_unique_constraints",
         "get_multi_check_constraints",
         "get_multi_table_comment",
-        "get_multi_table_options",
     ],
 )
 def test_multi_reflection_filter_names_handle_quoted_and_folded_names(
@@ -226,3 +225,10 @@ def test_multi_reflection_filter_names_handle_quoted_and_folded_names(
         result = getattr(insp, method_name)(filter_names=filters)
 
     assert _multi_reflection_names(result) == set(names.values())
+
+@pytest.mark.reflection_composite
+def test_multi_table_options_is_explicitly_unsupported(engine):
+    with engine.connect() as connection:
+        insp = inspect(connection)
+        with pytest.raises(NotImplementedError):
+            insp.get_multi_table_options()

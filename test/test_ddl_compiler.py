@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import (
+    bindparam,
     Boolean,
     CheckConstraint,
     CLOB,
@@ -9,6 +10,7 @@ from sqlalchemy import (
     Column,
     Date,
     DateTime,
+    ForeignKey,
     func,
     Index,
     Integer,
@@ -29,6 +31,7 @@ from sqlalchemy.sql.elements import (
     SavepointClause,
 )
 from sqlalchemy.schema import (
+    AddConstraint,
     CreateIndex,
     CreateSequence,
     CreateTable,
@@ -98,6 +101,182 @@ def test_create_table_compiles_basic_types(dialect, sample_table):
 
 
 @pytest.mark.ddl_compiler
+def test_self_referential_fk_is_deferred_until_after_create(
+    dialect,
+):
+    table = Table(
+        "ifx_self_ref",
+        MetaData(),
+        Column(
+            "id",
+            Integer,
+            primary_key=True,
+            autoincrement=False,
+        ),
+        Column(
+            "parent_id",
+            Integer,
+            ForeignKey(
+                "ifx_self_ref.id",
+                name="fk_ifx_self_ref_parent",
+            ),
+        ),
+    )
+
+    create_sql = _upper_sql(
+        str(CreateTable(table).compile(dialect=dialect))
+    )
+    constraint = next(iter(table.foreign_key_constraints))
+    alter_sql = _upper_sql(
+        str(AddConstraint(constraint).compile(dialect=dialect))
+    )
+
+    assert "PARENT_ID INTEGER" in create_sql
+    assert "REFERENCES" not in create_sql
+    assert "FOREIGN KEY(PARENT_ID)" not in create_sql
+    assert (
+        "ALTER TABLE IFX_SELF_REF ADD CONSTRAINT "
+        "FOREIGN KEY(PARENT_ID) REFERENCES IFX_SELF_REF (ID) "
+        "CONSTRAINT FK_IFX_SELF_REF_PARENT"
+        in alter_sql
+    )
+
+
+@pytest.mark.ddl_compiler
+def test_schema_constraint_names_are_physically_namespaced(dialect):
+    table = Table(
+        "ifx_ns_users",
+        MetaData(),
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("value", Integer),
+        CheckConstraint("value > 0", name="ifx_same_check"),
+        schema="test_schema",
+    )
+
+    compiled = _upper_sql(
+        str(CreateTable(table).compile(dialect=dialect))
+    )
+
+    assert (
+        "CHECK (VALUE > 0) CONSTRAINT "
+        "TEST_SCHEMA__IFX_SAME_CHECK"
+        in compiled
+    )
+    constraint = next(
+        item
+        for item in table.constraints
+        if isinstance(item, CheckConstraint)
+    )
+    assert constraint.name == "ifx_same_check"
+
+
+@pytest.mark.ddl_compiler
+def test_schema_foreign_key_name_is_physically_namespaced(dialect):
+    metadata = MetaData()
+    parent = Table(
+        "ifx_ns_parent",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        schema="test_schema",
+    )
+    child = Table(
+        "ifx_ns_child",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column(
+            "parent_id",
+            Integer,
+            ForeignKey(
+                "test_schema.ifx_ns_parent.id",
+                name="ifx_same_fk",
+                use_alter=True,
+            ),
+        ),
+        schema="test_schema",
+    )
+    _ = parent
+    constraint = next(iter(child.foreign_key_constraints))
+
+    compiled = _upper_sql(
+        str(AddConstraint(constraint).compile(dialect=dialect))
+    )
+
+    assert (
+        "FOREIGN KEY(PARENT_ID) REFERENCES "
+        "TEST_SCHEMA.IFX_NS_PARENT (ID) "
+        "CONSTRAINT TEST_SCHEMA__IFX_SAME_FK"
+        in compiled
+    )
+    assert constraint.name == "ifx_same_fk"
+
+
+@pytest.mark.ddl_compiler
+def test_foreign_key_ondelete_cascade_compiles(dialect):
+    metadata = MetaData()
+    parent = Table(
+        "ifx_cascade_parent",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+    )
+    child = Table(
+        "ifx_cascade_child",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column(
+            "parent_id",
+            Integer,
+            ForeignKey(
+                "ifx_cascade_parent.id",
+                name="fk_ifx_cascade_parent",
+                ondelete="CASCADE",
+                use_alter=True,
+            ),
+        ),
+    )
+    _ = parent
+    constraint = next(iter(child.foreign_key_constraints))
+
+    compiled = _upper_sql(
+        str(AddConstraint(constraint).compile(dialect=dialect))
+    )
+
+    assert (
+        "FOREIGN KEY(PARENT_ID) REFERENCES "
+        "IFX_CASCADE_PARENT (ID) "
+        "CONSTRAINT FK_IFX_CASCADE_PARENT "
+        "ON DELETE CASCADE"
+        in compiled
+    )
+
+
+@pytest.mark.ddl_compiler
+def test_schema_index_names_are_physically_namespaced(dialect):
+    table = Table(
+        "ifx_ns_users",
+        MetaData(),
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("value", Integer),
+        schema="test_schema",
+    )
+    index = Index("ifx_same_index", table.c.value)
+
+    create_sql = _upper_sql(
+        str(CreateIndex(index).compile(dialect=dialect))
+    )
+    drop_sql = _upper_sql(
+        str(DropIndex(index).compile(dialect=dialect))
+    )
+
+    assert (
+        "CREATE INDEX TEST_SCHEMA__IFX_SAME_INDEX "
+        'ON TEST_SCHEMA.IFX_NS_USERS ("VALUE")'
+        in create_sql
+    )
+    assert "DROP INDEX TEST_SCHEMA__IFX_SAME_INDEX" in drop_sql
+    assert index.name == "ifx_same_index"
+
+
+@pytest.mark.ddl_compiler
 def test_drop_table_compiles(dialect, sample_table):
     compiled = str(DropTable(sample_table).compile(dialect=dialect))
     upper = _upper_sql(compiled)
@@ -151,6 +330,86 @@ def test_drop_index_compiles(dialect, sample_table):
 
 
 @pytest.mark.ddl_compiler
+def test_create_table_if_not_exists_compiles(dialect, sample_table):
+    compiled = str(
+        CreateTable(sample_table, if_not_exists=True).compile(
+            dialect=dialect
+        )
+    )
+
+    assert _upper_sql(compiled).startswith(
+        "CREATE TABLE IF NOT EXISTS SA_COMPILE_BASIC ("
+    )
+
+
+@pytest.mark.ddl_compiler
+def test_drop_table_if_exists_compiles(dialect, sample_table):
+    compiled = str(
+        DropTable(sample_table, if_exists=True).compile(dialect=dialect)
+    )
+
+    assert _upper_sql(compiled) == (
+        "DROP TABLE IF EXISTS SA_COMPILE_BASIC"
+    )
+
+
+@pytest.mark.ddl_compiler
+def test_create_index_if_not_exists_compiles(dialect, sample_table):
+    index = next(iter(sample_table.indexes))
+
+    compiled = str(
+        CreateIndex(index, if_not_exists=True).compile(dialect=dialect)
+    )
+
+    assert _upper_sql(compiled) == (
+        "CREATE INDEX IF NOT EXISTS IX_SA_COMPILE_BASIC_NAME "
+        "ON SA_COMPILE_BASIC (NAME)"
+    )
+
+
+@pytest.mark.ddl_compiler
+def test_drop_index_if_exists_compiles(dialect, sample_table):
+    index = next(iter(sample_table.indexes))
+
+    compiled = str(
+        DropIndex(index, if_exists=True).compile(dialect=dialect)
+    )
+
+    assert _upper_sql(compiled) == (
+        "DROP INDEX IF EXISTS IX_SA_COMPILE_BASIC_NAME"
+    )
+
+
+@pytest.mark.ddl_compiler
+def test_create_constraint_backing_index_if_not_exists_preserves_suffix(
+    dialect,
+):
+    metadata = MetaData()
+    table = Table(
+        "sa_compile_unique_ifne",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("name", String(50)),
+    )
+    index = Index(
+        "ix_sa_compile_unique_ifne_name",
+        table.c.name,
+        unique=True,
+    )
+    index.info["informix_unique_constraint_as_index"] = True
+
+    compiled = str(
+        CreateIndex(index, if_not_exists=True).compile(dialect=dialect)
+    )
+
+    assert _upper_sql(compiled) == (
+        "CREATE UNIQUE INDEX IF NOT EXISTS "
+        "IX_SA_COMPILE_UNIQUE_IFNE_NAME "
+        "ON SA_COMPILE_UNIQUE_IFNE (NAME) EXCLUDE NULL KEYS"
+    )
+
+
+@pytest.mark.ddl_compiler
 def test_type_compiler_smoke(dialect):
     type_compiler = dialect.type_compiler
 
@@ -170,6 +429,25 @@ def test_type_compiler_smoke(dialect):
     )
 
     assert type_compiler.process(Boolean()).upper() == "SMALLINT"
+
+
+@pytest.mark.ddl_compiler
+@pytest.mark.parametrize(
+    ("type_", "expected"),
+    [
+        (Numeric(18, 14), "DECIMAL(18, 14)"),
+        (Numeric(25, 2), "DECIMAL(25, 2)"),
+    ],
+)
+def test_numeric_precisions_used_by_enotation_suite(
+    dialect,
+    type_,
+    expected,
+):
+    """Keep SQLAlchemy's scientific-notation test precisions intact."""
+
+    assert dialect.type_compiler.process(type_).upper() == expected
+
 
 @pytest.mark.ddl_compiler
 def test_time_uses_fraction5_in_create_table(dialect):
@@ -217,6 +495,7 @@ def test_datetime_uses_fraction5_in_create_table(dialect):
         "DATETIME_VALUE DATETIME YEAR TO FRACTION(5)"
         in upper
     )
+
 
 @pytest.mark.ddl_compiler
 def test_limit_compiles_as_first(dialect, sample_table):
@@ -726,29 +1005,35 @@ def test_identifiers_with_illegal_initial_characters_are_quoted(dialect):
 
 @pytest.mark.ddl_compiler
 def test_unbounded_string_raises_compile_error(dialect):
+    string_type = String()
+
     with pytest.raises(
         CompileError,
         match="Informix VARCHAR requires an explicit length",
     ):
-        dialect.type_compiler.process(String())
+        dialect.type_compiler.process(string_type)
 
 
 @pytest.mark.ddl_compiler
 def test_zero_length_string_raises_compile_error(dialect):
+    string_type = String(0)
+
     with pytest.raises(
         CompileError,
         match="Informix VARCHAR requires an explicit length",
     ):
-        dialect.type_compiler.process(String(0))
+        dialect.type_compiler.process(string_type)
 
 
 @pytest.mark.ddl_compiler
 def test_unbounded_unicode_raises_compile_error(dialect):
+    unicode_type = Unicode()
+
     with pytest.raises(
         CompileError,
         match="Informix VARGRAPHIC requires an explicit length",
     ):
-        dialect.type_compiler.process(Unicode())
+        dialect.type_compiler.process(unicode_type)
 
 
 @pytest.mark.ddl_compiler
@@ -790,12 +1075,14 @@ def test_savepoint_clauses_compile_with_informix_syntax(dialect):
     assert rollback == "ROLLBACK TO SAVEPOINT SA_SAVEPOINT_1"
     assert release == "RELEASE SAVEPOINT SA_SAVEPOINT_1"
 
+
 @pytest.mark.ddl_compiler
 def test_text_and_clob_compile_as_distinct_informix_types(dialect):
     type_compiler = dialect.type_compiler
 
     assert type_compiler.process(Text()).upper() == "TEXT"
     assert type_compiler.process(CLOB()).upper() == "CLOB"
+
 
 @pytest.mark.ddl_compiler
 def test_create_sequence_omits_generic_no_minmax(dialect):
@@ -820,6 +1107,7 @@ def test_drop_sequence_compiles(dialect):
 
     assert sql == "DROP SEQUENCE OTHER_SEQ"
 
+
 @pytest.mark.ddl_compiler
 def test_create_sequence_if_not_exists_is_rejected(dialect):
     statement = CreateSequence(
@@ -840,3 +1128,199 @@ def test_drop_sequence_if_exists_is_rejected(dialect):
 
     with pytest.raises(CompileError, match="IF EXISTS"):
         statement.compile(dialect=dialect)
+
+
+@pytest.mark.ddl_compiler
+def test_limit_offset_untyped_bindparams_are_integer_typed(sample_table):
+    dialect = IfxDialect_pyodbc(paramstyle="qmark")
+
+    statement = (
+        select(sample_table.c.id)
+        .order_by(sample_table.c.id)
+        .limit(bindparam("l"))
+        .offset(bindparam("o"))
+    )
+
+    compiled = statement.compile(dialect=dialect)
+    sql_text = _upper_sql(str(compiled))
+
+    assert "IFX_RN > ?" in sql_text
+    assert "IFX_RN <= ? + ?" in sql_text
+
+    assert "__[POSTCOMPILE_L]" not in sql_text
+    assert "__[POSTCOMPILE_O]" not in sql_text
+
+    assert compiled.positiontup == ["o", "l", "o"]
+
+    assert isinstance(
+        compiled.binds["l"].type,
+        Integer,
+    )
+    assert isinstance(
+        compiled.binds["o"].type,
+        Integer,
+    )
+
+    literal_execute_keys = {
+        bind.key
+        for bind in compiled.literal_execute_params
+    }
+
+    assert "l" not in literal_execute_keys
+    assert "o" not in literal_execute_keys
+
+
+@pytest.mark.ddl_compiler
+def test_integer_string_server_default_is_unquoted(dialect):
+    table = Table(
+        "ifx_integer_default",
+        MetaData(),
+        Column("amount", Integer, server_default="10"),
+    )
+
+    compiled = _upper_sql(
+        str(CreateTable(table).compile(dialect=dialect))
+    )
+
+    assert "AMOUNT INTEGER DEFAULT 10" in compiled
+    assert "DEFAULT '10'" not in compiled
+
+
+@pytest.mark.ddl_compiler
+def test_character_string_server_default_remains_quoted(dialect):
+    table = Table(
+        "ifx_character_default",
+        MetaData(),
+        Column("code", String(20), server_default="10"),
+    )
+
+    compiled = _upper_sql(
+        str(CreateTable(table).compile(dialect=dialect))
+    )
+
+    assert "CODE VARCHAR(20) DEFAULT '10'" in compiled
+
+
+@pytest.mark.ddl_compiler
+def test_datetime_now_default_uses_matching_informix_qualifier(dialect):
+    table = Table(
+        "ifx_datetime_default",
+        MetaData(),
+        Column(
+            "created_at",
+            DateTime(),
+            server_default=func.now(),
+        ),
+    )
+
+    compiled = _upper_sql(
+        str(CreateTable(table).compile(dialect=dialect))
+    )
+
+    assert (
+        "CREATED_AT DATETIME YEAR TO FRACTION(5) "
+        "DEFAULT CURRENT YEAR TO FRACTION(5)"
+        in compiled
+    )
+
+    assert "DEFAULT CURRENT_TIMESTAMP" not in compiled
+
+
+@pytest.mark.ddl_compiler
+def test_long_convention_index_name_is_truncated(dialect):
+    long_suffix = "_".join(
+        ["abcdef" * 5] * 10
+    )
+
+    metadata = MetaData(
+        naming_convention={
+            "ix": (
+                "index_%(table_name)s_"
+                "%(column_0_N_name)s"
+                + long_suffix
+            )
+        }
+    )
+
+    table = Table(
+        "a_things_with_stuff",
+        metadata,
+        Column(
+            "id_long_column_name",
+            Integer,
+            primary_key=True,
+            autoincrement=False,
+        ),
+        Column(
+            "id_another_long_name",
+            Integer,
+        ),
+    )
+
+    index = Index(
+        None,
+        table.c.id_long_column_name,
+        table.c.id_another_long_name,
+    )
+
+    logical_name = index.name
+
+    assert logical_name is not None
+    assert len(logical_name) > dialect.max_identifier_length
+
+    compiled = str(
+        CreateIndex(index).compile(dialect=dialect)
+    )
+
+    rendered_name = (
+        compiled.split("CREATE INDEX ", 1)[1]
+        .split(" ON ", 1)[0]
+        .strip('"')
+    )
+
+    assert (
+        len(rendered_name)
+        <= dialect.max_identifier_length
+    )
+
+    assert rendered_name.startswith(
+        "index_a_things_with_stuff_"
+    )
+
+    # SQLAlchemy reserves the final five characters for
+    # "_" followed by its deterministic four-character hash.
+    assert rendered_name[:-5] == str(logical_name)[
+        : len(rendered_name) - 5
+    ]
+
+@pytest.mark.ddl_compiler
+def test_named_column_check_uses_informix_postfix_syntax(dialect):
+    table = Table(
+        "ifx_column_check",
+        MetaData(),
+        Column(
+            "quantity",
+            Integer,
+            CheckConstraint(
+                "quantity > 0",
+                name="ifx_positive_quantity",
+            ),
+        ),
+        schema="test_schema",
+    )
+
+    compiled = _upper_sql(
+        str(CreateTable(table).compile(dialect=dialect))
+    )
+
+    assert (
+        "QUANTITY INTEGER CHECK (QUANTITY > 0) "
+        "CONSTRAINT TEST_SCHEMA__IFX_POSITIVE_QUANTITY"
+        in compiled
+    )
+
+    assert (
+        "CONSTRAINT TEST_SCHEMA__IFX_POSITIVE_QUANTITY "
+        "CHECK (QUANTITY > 0)"
+        not in compiled
+    )
