@@ -127,10 +127,10 @@ def test_server_defaults_are_reflected_on_the_correct_columns(
 
 
 @pytest.fixture
-def expression_default_table(engine):
+def literal_default_table(engine):
     metadata = MetaData()
     table = Table(
-        "ifx_test_expression_defaults",
+        "ifx_test_literal_defaults",
         metadata,
         Column("id", Integer, primary_key=True, autoincrement=False),
         Column("literal_value", Integer, server_default=text("10")),
@@ -145,7 +145,7 @@ def expression_default_table(engine):
         metadata.drop_all(engine, checkfirst=True)
 
 
-def test_expression_defaults_are_reflected(engine, expression_default_table):
+def test_literal_defaults_are_reflected(engine, expression_default_table):
     columns = {
         str(column["name"]): column
         for column in inspect(engine).get_columns(expression_default_table.name)

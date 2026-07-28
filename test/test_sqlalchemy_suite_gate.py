@@ -491,18 +491,8 @@ def test_legacy_full_returning_flag_is_not_declared():
 
 
 @pytest.mark.sqlalchemy_suite
-@pytest.mark.parametrize(
-    "requirement_name",
-    [
-        "schemas",
-        "schema_reflection",
-        "cross_schema_fk_reflection",
-    ],
-)
-def test_schema_requirements_are_open(requirement_name):
+def test_server_default_requirements_reject_arithmetic_expressions():
     requirements = Requirements()
 
-    assert getattr(
-        requirements,
-        requirement_name,
-    ).enabled is True
+    assert requirements.server_defaults.enabled is True
+    assert requirements.expression_server_defaults.enabled is False

@@ -216,29 +216,6 @@ class IfxReflector(BaseReflector):
             return value.strip()
         return str(value).strip()
 
-    def _logical_reflected_name(
-        self,
-        physical_name,
-        schema=None,
-    ):
-        """Convert a schema-prefixed physical name back to its logical name."""
-        physical_name = self._clean_str(physical_name)
-
-        if not physical_name:
-            return None
-
-        if schema:
-            schema_name = self._clean_str(schema)
-
-            if schema_name:
-                prefix = f"{schema_name}__"
-                candidate_prefix = physical_name[: len(prefix)]
-
-                if candidate_prefix.casefold() == prefix.casefold():
-                    physical_name = physical_name[len(prefix) :]
-
-        return self.normalize_name(physical_name)
-
     def _clean_default_catalog_value(self, value):
         """Normalize a textual value read from sysdefaults.
 

@@ -451,13 +451,10 @@ class Requirements(SuiteRequirements):
 
     @property
     def server_defaults(self):
-        """Informix supports literal and temporal column server defaults."""
-
         return exclusions.open()
 
     @property
     def expression_server_defaults(self):
-        """Informix DEFAULT does not accept arbitrary arithmetic expressions."""
+        """Informix does not support arbitrary arithmetic DEFAULT expressions."""
 
         return exclusions.closed()
-    

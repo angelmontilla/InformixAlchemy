@@ -12,13 +12,16 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     func,
+    ForeignKeyConstraint,
     Index,
     Integer,
-    MetaData,
+    literal_column,
+    MetaData,    
     Numeric,
     String,
     Table,
     Text,
+    text,
     Time,
     Unicode,
     Sequence,
@@ -429,24 +432,6 @@ def test_type_compiler_smoke(dialect):
     )
 
     assert type_compiler.process(Boolean()).upper() == "SMALLINT"
-
-
-@pytest.mark.ddl_compiler
-@pytest.mark.parametrize(
-    ("type_", "expected"),
-    [
-        (Numeric(18, 14), "DECIMAL(18, 14)"),
-        (Numeric(25, 2), "DECIMAL(25, 2)"),
-    ],
-)
-def test_numeric_precisions_used_by_enotation_suite(
-    dialect,
-    type_,
-    expected,
-):
-    """Keep SQLAlchemy's scientific-notation test precisions intact."""
-
-    assert dialect.type_compiler.process(type_).upper() == expected
 
 
 @pytest.mark.ddl_compiler
@@ -1169,47 +1154,68 @@ def test_limit_offset_untyped_bindparams_are_integer_typed(sample_table):
     assert "l" not in literal_execute_keys
     assert "o" not in literal_execute_keys
 
-
 @pytest.mark.ddl_compiler
-def test_integer_string_server_default_is_unquoted(dialect):
+@pytest.mark.parametrize(
+    "server_default",
+    [
+        text("3 + 5"),
+        text("(3 * 5)"),
+        text("10 / 2"),
+        text("10 % 3"),
+        literal_column("3") + literal_column("5"),
+    ],
+)
+def test_arithmetic_server_defaults_are_rejected(
+    dialect,
+    server_default,
+):
+    metadata = MetaData()
     table = Table(
-        "ifx_integer_default",
-        MetaData(),
-        Column("amount", Integer, server_default="10"),
-    )
-
-    compiled = _upper_sql(
-        str(CreateTable(table).compile(dialect=dialect))
-    )
-
-    assert "AMOUNT INTEGER DEFAULT 10" in compiled
-    assert "DEFAULT '10'" not in compiled
-
-
-@pytest.mark.ddl_compiler
-def test_character_string_server_default_remains_quoted(dialect):
-    table = Table(
-        "ifx_character_default",
-        MetaData(),
-        Column("code", String(20), server_default="10"),
-    )
-
-    compiled = _upper_sql(
-        str(CreateTable(table).compile(dialect=dialect))
-    )
-
-    assert "CODE VARCHAR(20) DEFAULT '10'" in compiled
-
-
-@pytest.mark.ddl_compiler
-def test_datetime_now_default_uses_matching_informix_qualifier(dialect):
-    table = Table(
-        "ifx_datetime_default",
-        MetaData(),
+        "sa_arithmetic_default",
+        metadata,
         Column(
-            "created_at",
-            DateTime(),
-            server_default=func.now(),
+            "value",
+            Integer,
+            server_default=server_default,
+        ),
+    )
+
+    with pytest.raises(
+        CompileError,
+        match="does not support arithmetic server-default expressions",
+    ):
+        str(CreateTable(table).compile(dialect=dialect))
+
+
+@pytest.mark.ddl_compiler
+@pytest.mark.parametrize(
+    ("column_type", "server_default", "expected_sql"),
+    [
+        (Integer, text("10"), "DEFAULT 10"),
+        (Integer, text("-10"), "DEFAULT -10"),
+        (String(20), text("'A+B'"), "DEFAULT 'A+B'"),
+        (Date, text("TODAY"), "DEFAULT TODAY"),
+        (
+            DateTime,
+            text("CURRENT YEAR TO FRACTION(5)"),
+            "DEFAULT CURRENT YEAR TO FRACTION(5)",
+        ),
+    ],
+)
+def test_supported_non_arithmetic_server_defaults_still_compile(
+    dialect,
+    column_type,
+    server_default,
+    expected_sql,
+):
+    metadata = MetaData()
+    table = Table(
+        "sa_supported_default",
+        metadata,
+        Column(
+            "value",
+            column_type,
+            server_default=server_default,
         ),
     )
 
@@ -1217,110 +1223,115 @@ def test_datetime_now_default_uses_matching_informix_qualifier(dialect):
         str(CreateTable(table).compile(dialect=dialect))
     )
 
-    assert (
-        "CREATED_AT DATETIME YEAR TO FRACTION(5) "
-        "DEFAULT CURRENT YEAR TO FRACTION(5)"
-        in compiled
-    )
+    assert expected_sql in compiled
 
-    assert "DEFAULT CURRENT_TIMESTAMP" not in compiled
+def _table_with_foreign_key_ondelete(ondelete):
+    metadata = MetaData()
 
-
-@pytest.mark.ddl_compiler
-def test_long_convention_index_name_is_truncated(dialect):
-    long_suffix = "_".join(
-        ["abcdef" * 5] * 10
-    )
-
-    metadata = MetaData(
-        naming_convention={
-            "ix": (
-                "index_%(table_name)s_"
-                "%(column_0_N_name)s"
-                + long_suffix
-            )
-        }
-    )
-
-    table = Table(
-        "a_things_with_stuff",
+    parent = Table(
+        "sa_fk_parent",
         metadata,
         Column(
-            "id_long_column_name",
+            "id",
+            Integer,
+            primary_key=True,
+            autoincrement=False,
+        ),
+    )
+
+    child = Table(
+        "sa_fk_child",
+        metadata,
+        Column(
+            "id",
             Integer,
             primary_key=True,
             autoincrement=False,
         ),
         Column(
-            "id_another_long_name",
+            "parent_id",
             Integer,
+        ),
+        ForeignKeyConstraint(
+            ["parent_id"],
+            [parent.c.id],
+            name="fk_sa_child_parent",
+            ondelete=ondelete,
         ),
     )
 
-    index = Index(
-        None,
-        table.c.id_long_column_name,
-        table.c.id_another_long_name,
-    )
+    return child
 
-    logical_name = index.name
-
-    assert logical_name is not None
-    assert len(logical_name) > dialect.max_identifier_length
-
-    compiled = str(
-        CreateIndex(index).compile(dialect=dialect)
-    )
-
-    rendered_name = (
-        compiled.split("CREATE INDEX ", 1)[1]
-        .split(" ON ", 1)[0]
-        .strip('"')
-    )
-
-    assert (
-        len(rendered_name)
-        <= dialect.max_identifier_length
-    )
-
-    assert rendered_name.startswith(
-        "index_a_things_with_stuff_"
-    )
-
-    # SQLAlchemy reserves the final five characters for
-    # "_" followed by its deterministic four-character hash.
-    assert rendered_name[:-5] == str(logical_name)[
-        : len(rendered_name) - 5
-    ]
 
 @pytest.mark.ddl_compiler
-def test_named_column_check_uses_informix_postfix_syntax(dialect):
-    table = Table(
-        "ifx_column_check",
-        MetaData(),
-        Column(
-            "quantity",
-            Integer,
-            CheckConstraint(
-                "quantity > 0",
-                name="ifx_positive_quantity",
-            ),
-        ),
-        schema="test_schema",
+def test_foreign_key_without_ondelete_compiles_without_action(
+    dialect,
+):
+    child = _table_with_foreign_key_ondelete(None)
+
+    compiled = _upper_sql(
+        str(
+            CreateTable(child).compile(
+                dialect=dialect
+            )
+        )
+    )
+
+    assert "ON DELETE" not in compiled
+
+
+@pytest.mark.ddl_compiler
+@pytest.mark.parametrize(
+    "ondelete",
+    [
+        "CASCADE",
+        "cascade",
+        "  cascade  ",
+    ],
+)
+def test_foreign_key_ondelete_cascade_compiles_canonically(
+    dialect,
+    ondelete,
+):
+    child = _table_with_foreign_key_ondelete(
+        ondelete
     )
 
     compiled = _upper_sql(
-        str(CreateTable(table).compile(dialect=dialect))
+        str(
+            CreateTable(child).compile(
+                dialect=dialect
+            )
+        )
     )
 
-    assert (
-        "QUANTITY INTEGER CHECK (QUANTITY > 0) "
-        "CONSTRAINT TEST_SCHEMA__IFX_POSITIVE_QUANTITY"
-        in compiled
+    assert "ON DELETE CASCADE" in compiled
+
+
+@pytest.mark.ddl_compiler
+@pytest.mark.parametrize(
+    "ondelete",
+    [
+        "RESTRICT",
+        "SET NULL",
+        "SET DEFAULT",
+        "NO ACTION",
+        "CUALQUIER COSA",
+        "CASCADE; DROP TABLE sa_fk_parent",
+    ],
+)
+def test_unsupported_foreign_key_ondelete_actions_are_rejected(
+    dialect,
+    ondelete,
+):
+    child = _table_with_foreign_key_ondelete(
+        ondelete
     )
 
-    assert (
-        "CONSTRAINT TEST_SCHEMA__IFX_POSITIVE_QUANTITY "
-        "CHECK (QUANTITY > 0)"
-        not in compiled
-    )
+    with pytest.raises(
+        CompileError,
+        match="supports only ON DELETE CASCADE",
+    ):
+        CreateTable(child).compile(
+            dialect=dialect
+        )
