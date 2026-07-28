@@ -32,6 +32,18 @@ from sqlalchemy.testing.requirements import SuiteRequirements
 from sqlalchemy.testing import exclusions
 
 
+def _supports_isolated_owner_namespaces(config) -> bool:
+    dialect = config.db.dialect
+
+    return bool(
+        getattr(
+            dialect,
+            "is_ansi_database",
+            False,
+        )
+    )
+
+
 class Requirements(SuiteRequirements):
 
     @property
@@ -62,6 +74,18 @@ class Requirements(SuiteRequirements):
         """Temporary views are outside this dialect's Informix contract."""
 
         return exclusions.closed()
+
+    @property
+    def foreign_key_constraint_option_reflection_ondelete(self):
+        """Informix reflects ``ON DELETE CASCADE`` from SYSREFERENCES.
+
+        ``SYSREFERENCES.delrule`` stores ``C`` for cascading deletes and
+        ``R`` for both the default rule and restrict semantics. The reflector
+        publishes ``CASCADE`` for ``C`` and omits ``R`` because the catalog
+        cannot distinguish an explicit ``RESTRICT`` from the default.
+        """
+
+        return exclusions.open()
 
     @property
     def on_update_cascade(self):
@@ -105,7 +129,62 @@ class Requirements(SuiteRequirements):
     def schemas(self):
         """SQLAlchemy schema-qualified ownership is outside this contract."""
 
+        return exclusions.only_if(
+            _supports_isolated_owner_namespaces,
+            (
+                "Informix provides separate namespaces by "
+                "owner only in databases created in ANSI mode. In non-"
+                "ANSI databases, the simple names of tables, views, sequences, and "
+                "synonyms must be unique throughout the database."
+            ),
+        )
+
+    @property
+    def cross_schema_fk_reflection(self):
+        """Allow reflection of foreign keys between different owners."""
+
+        return exclusions.only_if(
+            _supports_isolated_owner_namespaces,
+            (
+                "The SQLAlchemy suite's cross-schema reflection requires "
+                "an Informix ANSI-mode database with separate namespaces "
+                "for each owner."
+            ),
+        )
+
+    @property
+    def schema_create_delete(self):
+        """Informix schemas are authorization-based object ownership.
+
+        The dialect does not promise portable CREATE SCHEMA / DROP SCHEMA
+        lifecycle management.
+        """
+
         return exclusions.closed()
+
+    @property
+    def table_ddl_if_exists(self):
+        """Informix supports idempotent table DDL.
+
+        ``CREATE TABLE IF NOT EXISTS`` and ``DROP TABLE IF EXISTS`` are
+        native Informix syntax. SQLAlchemy's generic DDL compiler already
+        renders both forms in the correct keyword order for this dialect.
+        """
+
+        return exclusions.open()
+
+
+    @property
+    def index_ddl_if_exists(self):
+        """Informix supports idempotent index DDL.
+
+        ``CREATE INDEX IF NOT EXISTS`` and ``DROP INDEX IF EXISTS`` are
+        native Informix syntax. SQLAlchemy's generic DDL compiler already
+        renders both forms in the required keyword order for this dialect.
+        """
+
+        return exclusions.open()
+
 
     @property
     def temporary_tables(self):
@@ -127,15 +206,15 @@ class Requirements(SuiteRequirements):
 
     @property
     def check_constraint_reflection(self):
-        """Informix CHECK constraint reflection is not implemented yet."""
+        """Informix CHECK constraint reflection is supported."""
 
-        return exclusions.closed()
+        return exclusions.open()
 
     @property
     def inline_check_constraint_reflection(self):
-        """Informix inline CHECK constraint reflection is not implemented."""
+        """Informix inline CHECK constraint reflection is supported."""
 
-        return exclusions.closed()
+        return exclusions.open()
 
     @property
     def table_reflection(self):
@@ -162,6 +241,18 @@ class Requirements(SuiteRequirements):
         return exclusions.open()
 
     @property
+    def indexes_check_column_order(self):
+        """Informix preserves composite-index key order in SYSINDEXES.
+
+        The ``part1`` through ``part16`` catalog columns represent index
+        components in key order.  The reflector consumes them sequentially
+        and therefore returns ``column_names`` in the order declared by the
+        original ``CREATE INDEX`` statement.
+        """
+
+        return exclusions.open()
+
+    @property
     def reflects_pk_names(self):
         """Informix devuelve el nombre de la clave primaria."""
 
@@ -169,9 +260,14 @@ class Requirements(SuiteRequirements):
 
     @property
     def reflect_table_options(self):
-        """La reflexión de opciones físicas de tabla no está implementada."""
+        """Reflect native Informix table storage and locking metadata.
 
-        return exclusions.closed()
+        ``SYSTABLES`` exposes the lock level, first and next extent sizes,
+        and page size for base tables.  Views participate in the generic
+        multi-reflection API and correctly return an empty option mapping.
+        """
+
+        return exclusions.open()
 
     @property
     def unicode_data(self):
@@ -253,15 +349,66 @@ class Requirements(SuiteRequirements):
 
     @property
     def group_by_complex_expression(self):
-        """No se garantiza GROUP BY sobre expresiones compuestas."""
+        """Support composed GROUP BY expressions through projected aliases.
 
-        return exclusions.closed()
+        Informix rejects some arithmetic expressions when repeated directly
+        in ``GROUP BY``.  The compiler renders a projected SQLAlchemy label by
+        alias in ``GROUP BY`` while preserving ordinary expression rendering
+        for labels that are not part of the SELECT list.
+        """
+
+        return exclusions.open()
+
+    @property
+    def empty_inserts(self):
+        """Support a singleton empty INSERT for SERIAL-backed tables.
+
+        Informix has no portable ``DEFAULT VALUES`` form for this dialect.
+        The compiler instead emits an explicit zero for the table's
+        autoincrement SERIAL/SERIAL8/BIGSERIAL column, which instructs the
+        server to generate the next serial value.  Executemany remains a
+        separate capability and is intentionally not opened here.
+        """
+
+        return exclusions.open()
+
+    @property
+    def empty_inserts_executemany(self):
+        """Support executemany with empty parameter dictionaries.
+
+        The singleton empty-insert rewrite produces one reusable statement
+        that binds zero to the SERIAL/SERIAL8/BIGSERIAL autoincrement
+        column.  Each empty parameter dictionary therefore requests a new
+        server-generated serial value while preserving normal executemany
+        behavior.
+        """
+
+        return exclusions.open()
 
     @property
     def insert_from_select(self):
-        """No se garantiza INSERT FROM SELECT con defaults SQLAlchemy."""
+        """Informix supports ``INSERT INTO ... SELECT ...`` statements.
 
-        return exclusions.closed()
+        The target column list can omit a SERIAL/BIGSERIAL column so that
+        Informix generates its value. SQLAlchemy also expands Python and SQL
+        column defaults into the target and SELECT lists for this construct.
+        """
+
+        return exclusions.open()
+
+    @property
+    def dbapi_lastrowid(self):
+        """Expose generated serial values through ``CursorResult.lastrowid``.
+
+        The IBM Informix ODBC cursor does not provide a portable native
+        ``cursor.lastrowid`` attribute. The dialect implements the public
+        SQLAlchemy behavior in its execution context by querying
+        ``DBINFO('sqlca.sqlerrd1')`` immediately after a singleton INSERT.
+        SQLAlchemy's compliance suite guards that observable behavior with
+        the ``dbapi_lastrowid`` requirement.
+        """
+
+        return exclusions.open()
 
     @property
     def window_functions(self):
@@ -276,9 +423,15 @@ class Requirements(SuiteRequirements):
 
     @property
     def precision_numerics_enotation_large(self):
-        """target backend supports Decimal() objects using E notation
-        to represent very large values."""
-        return exclusions.closed()
+        """Informix preserves large and small scientific-notation decimals.
+
+        SQLAlchemy 2.0.51 uses this requirement for both its very-small
+        ``DECIMAL(18, 14)`` cases and its very-large ``DECIMAL(25, 2)``
+        cases.  Both precisions are below Informix's 32-digit DECIMAL
+        limit, and the pyodbc dialect returns them as ``Decimal`` values.
+        """
+
+        return exclusions.open()
 
     @property
     def precision_numerics_many_significant_digits(self):

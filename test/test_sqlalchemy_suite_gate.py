@@ -28,11 +28,15 @@ def test_supported_dialect_contract():
     dialect = IfxDialect_pyodbc()
 
     assert dialect.name == "informix"
-    assert dialect.driver == "pyodbc" or getattr(dialect, "driver", None) in (
+    assert dialect.driver == "pyodbc" or getattr(
+        dialect,
+        "driver",
+        None,
+    ) in (
         None,
         "pyodbc",
     )
-    assert dialect.supports_schemas is False
+    assert dialect.supports_schemas is True
 
 
 @pytest.mark.legacy_ifxpy
@@ -115,8 +119,6 @@ def test_sqlalchemy_suite_temp_table_name_listing_requirement_is_closed():
 @pytest.mark.parametrize(
     "requirement_name",
     [
-        "check_constraint_reflection",
-        "inline_check_constraint_reflection",
         "materialized_views",
     ],
 )
@@ -315,10 +317,7 @@ def test_limit_offset_compilation_is_statement_cache_safe():
         "temp_table_names",
         "temp_table_reflection",
         "temporary_views",
-        "schemas",
         "materialized_views",
-        "check_constraint_reflection",
-        "inline_check_constraint_reflection",
         "on_update_cascade",
         "datetime_microseconds",
         "time_microseconds",
@@ -335,9 +334,22 @@ def test_current_closed_requirements_are_part_of_contract(requirement_name):
 @pytest.mark.parametrize(
     "requirement_name",
     [
+        "check_constraint_reflection",
+        "inline_check_constraint_reflection",
+        "indexes_check_column_order",
+        "foreign_key_constraint_option_reflection_ondelete",
+        "insert_from_select",
+        "dbapi_lastrowid",
+        "group_by_complex_expression",
+        "empty_inserts",
+        "empty_inserts_executemany",
+        "table_ddl_if_exists",
+        "index_ddl_if_exists",
+        "reflect_table_options",
         "has_temp_table",
         "window_functions",
         "precision_numerics_enotation_small",
+        "precision_numerics_enotation_large",
         "precision_numerics_retains_significant_digits",
     ],
 )
@@ -349,14 +361,114 @@ def test_current_open_requirements_are_part_of_contract(requirement_name):
 
 @pytest.mark.sqlalchemy_suite
 def test_multi_check_constraints_requirement_contract():
-    assert Requirements().check_constraint_reflection.enabled is False
+    assert Requirements().check_constraint_reflection.enabled is True
 
 
 @pytest.mark.sqlalchemy_suite
-def test_check_constraint_reflection_returns_stable_empty_structure():
-    dialect = IfxDialect()
+def test_inline_check_constraint_reflection_is_open():
+    requirements = Requirements()
 
-    assert dialect.get_check_constraints(object(), "tabla") == []
+    assert requirements.inline_check_constraint_reflection.enabled is True
+
+
+@pytest.mark.sqlalchemy_suite
+def test_index_column_order_requirement_is_open():
+    requirements = Requirements()
+
+    assert requirements.indexes_check_column_order.enabled is True
+
+
+@pytest.mark.sqlalchemy_suite
+def test_foreign_key_ondelete_reflection_requirement_is_open():
+    requirements = Requirements()
+
+    assert (
+        requirements
+        .foreign_key_constraint_option_reflection_ondelete
+        .enabled
+        is True
+    )
+
+
+@pytest.mark.sqlalchemy_suite
+def test_insert_from_select_requirement_is_open():
+    requirements = Requirements()
+
+    assert requirements.insert_from_select.enabled is True
+
+
+@pytest.mark.sqlalchemy_suite
+def test_dbapi_lastrowid_requirement_is_open():
+    requirements = Requirements()
+
+    assert requirements.dbapi_lastrowid.enabled is True
+
+
+@pytest.mark.sqlalchemy_suite
+def test_group_by_complex_expression_requirement_is_open():
+    requirements = Requirements()
+
+    assert requirements.group_by_complex_expression.enabled is True
+
+
+@pytest.mark.sqlalchemy_suite
+def test_empty_inserts_requirement_is_open():
+    requirements = Requirements()
+
+    assert requirements.empty_inserts.enabled is True
+
+
+@pytest.mark.sqlalchemy_suite
+def test_empty_inserts_executemany_requirement_is_open():
+    requirements = Requirements()
+
+    assert requirements.empty_inserts_executemany.enabled is True
+
+
+@pytest.mark.sqlalchemy_suite
+def test_table_ddl_if_exists_requirement_is_open():
+    requirements = Requirements()
+
+    assert requirements.table_ddl_if_exists.enabled is True
+
+
+@pytest.mark.sqlalchemy_suite
+def test_index_ddl_if_exists_requirement_is_open():
+    requirements = Requirements()
+
+    assert requirements.index_ddl_if_exists.enabled is True
+
+
+@pytest.mark.sqlalchemy_suite
+def test_reflect_table_options_requirement_is_open():
+    requirements = Requirements()
+
+    assert requirements.reflect_table_options.enabled is True
+
+
+@pytest.mark.sqlalchemy_suite
+def test_informix_table_options_are_registered():
+    table = Table(
+        "native_options",
+        MetaData(),
+        Column("id", Integer),
+        informix_lock_level="ROW",
+        informix_first_extent=16,
+        informix_next_extent=32,
+        informix_page_size=4096,
+    )
+
+    assert table.dialect_options["informix"]["lock_level"] == "ROW"
+    assert table.dialect_options["informix"]["first_extent"] == 16
+    assert table.dialect_options["informix"]["next_extent"] == 32
+    assert table.dialect_options["informix"]["page_size"] == 4096
+
+
+@pytest.mark.sqlalchemy_suite
+def test_precision_numerics_enotation_large_requirement_is_open():
+    requirements = Requirements()
+
+    assert requirements.precision_numerics_enotation_large.enabled is True
 
 
 @pytest.mark.sqlalchemy_suite

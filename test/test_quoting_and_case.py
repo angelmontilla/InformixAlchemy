@@ -236,7 +236,9 @@ def test_get_view_definition_with_unquoted_name_does_not_find_quoted_mixed_case_
 
     with engine.connect() as conn:
         insp = inspect(conn)
-        assert insp.get_view_definition(view_name) is None
+        
+        with pytest.raises(exc.NoSuchTableError):
+            insp.get_view_definition(view_name)
 
 @pytest.mark.quoting
 def test_unquoted_lookup_for_real_unquoted_objects_stays_case_insensitive(

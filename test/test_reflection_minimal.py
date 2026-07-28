@@ -258,14 +258,16 @@ def test_get_table_comment_returns_none_text(engine, basic_reflection_objects):
 
 
 @pytest.mark.reflection_minimal
-def test_get_table_options_returns_empty_dict(engine, basic_reflection_objects):
+def test_get_table_options_is_explicitly_unsupported(
+    engine,
+    basic_reflection_objects,
+):
     table_name = basic_reflection_objects["table"]
 
     with engine.connect() as connection:
         insp = inspect(connection)
-        options = insp.get_table_options(table_name)
-
-    assert options == {}
+        with pytest.raises(NotImplementedError):
+            insp.get_table_options(table_name)
 
 
 @pytest.mark.reflection_minimal

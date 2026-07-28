@@ -10,6 +10,7 @@ from sqlalchemy import (
     Column,
     Date,
     DateTime,
+    ForeignKey,
     func,
     ForeignKeyConstraint,
     Index,
@@ -33,6 +34,7 @@ from sqlalchemy.sql.elements import (
     SavepointClause,
 )
 from sqlalchemy.schema import (
+    AddConstraint,
     CreateIndex,
     CreateSequence,
     CreateTable,
@@ -102,6 +104,182 @@ def test_create_table_compiles_basic_types(dialect, sample_table):
 
 
 @pytest.mark.ddl_compiler
+def test_self_referential_fk_is_deferred_until_after_create(
+    dialect,
+):
+    table = Table(
+        "ifx_self_ref",
+        MetaData(),
+        Column(
+            "id",
+            Integer,
+            primary_key=True,
+            autoincrement=False,
+        ),
+        Column(
+            "parent_id",
+            Integer,
+            ForeignKey(
+                "ifx_self_ref.id",
+                name="fk_ifx_self_ref_parent",
+            ),
+        ),
+    )
+
+    create_sql = _upper_sql(
+        str(CreateTable(table).compile(dialect=dialect))
+    )
+    constraint = next(iter(table.foreign_key_constraints))
+    alter_sql = _upper_sql(
+        str(AddConstraint(constraint).compile(dialect=dialect))
+    )
+
+    assert "PARENT_ID INTEGER" in create_sql
+    assert "REFERENCES" not in create_sql
+    assert "FOREIGN KEY(PARENT_ID)" not in create_sql
+    assert (
+        "ALTER TABLE IFX_SELF_REF ADD CONSTRAINT "
+        "FOREIGN KEY(PARENT_ID) REFERENCES IFX_SELF_REF (ID) "
+        "CONSTRAINT FK_IFX_SELF_REF_PARENT"
+        in alter_sql
+    )
+
+
+@pytest.mark.ddl_compiler
+def test_schema_constraint_names_are_physically_namespaced(dialect):
+    table = Table(
+        "ifx_ns_users",
+        MetaData(),
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("value", Integer),
+        CheckConstraint("value > 0", name="ifx_same_check"),
+        schema="test_schema",
+    )
+
+    compiled = _upper_sql(
+        str(CreateTable(table).compile(dialect=dialect))
+    )
+
+    assert (
+        "CHECK (VALUE > 0) CONSTRAINT "
+        "TEST_SCHEMA__IFX_SAME_CHECK"
+        in compiled
+    )
+    constraint = next(
+        item
+        for item in table.constraints
+        if isinstance(item, CheckConstraint)
+    )
+    assert constraint.name == "ifx_same_check"
+
+
+@pytest.mark.ddl_compiler
+def test_schema_foreign_key_name_is_physically_namespaced(dialect):
+    metadata = MetaData()
+    parent = Table(
+        "ifx_ns_parent",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        schema="test_schema",
+    )
+    child = Table(
+        "ifx_ns_child",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column(
+            "parent_id",
+            Integer,
+            ForeignKey(
+                "test_schema.ifx_ns_parent.id",
+                name="ifx_same_fk",
+                use_alter=True,
+            ),
+        ),
+        schema="test_schema",
+    )
+    _ = parent
+    constraint = next(iter(child.foreign_key_constraints))
+
+    compiled = _upper_sql(
+        str(AddConstraint(constraint).compile(dialect=dialect))
+    )
+
+    assert (
+        "FOREIGN KEY(PARENT_ID) REFERENCES "
+        "TEST_SCHEMA.IFX_NS_PARENT (ID) "
+        "CONSTRAINT TEST_SCHEMA__IFX_SAME_FK"
+        in compiled
+    )
+    assert constraint.name == "ifx_same_fk"
+
+
+@pytest.mark.ddl_compiler
+def test_foreign_key_ondelete_cascade_compiles(dialect):
+    metadata = MetaData()
+    parent = Table(
+        "ifx_cascade_parent",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+    )
+    child = Table(
+        "ifx_cascade_child",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column(
+            "parent_id",
+            Integer,
+            ForeignKey(
+                "ifx_cascade_parent.id",
+                name="fk_ifx_cascade_parent",
+                ondelete="CASCADE",
+                use_alter=True,
+            ),
+        ),
+    )
+    _ = parent
+    constraint = next(iter(child.foreign_key_constraints))
+
+    compiled = _upper_sql(
+        str(AddConstraint(constraint).compile(dialect=dialect))
+    )
+
+    assert (
+        "FOREIGN KEY(PARENT_ID) REFERENCES "
+        "IFX_CASCADE_PARENT (ID) "
+        "CONSTRAINT FK_IFX_CASCADE_PARENT "
+        "ON DELETE CASCADE"
+        in compiled
+    )
+
+
+@pytest.mark.ddl_compiler
+def test_schema_index_names_are_physically_namespaced(dialect):
+    table = Table(
+        "ifx_ns_users",
+        MetaData(),
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("value", Integer),
+        schema="test_schema",
+    )
+    index = Index("ifx_same_index", table.c.value)
+
+    create_sql = _upper_sql(
+        str(CreateIndex(index).compile(dialect=dialect))
+    )
+    drop_sql = _upper_sql(
+        str(DropIndex(index).compile(dialect=dialect))
+    )
+
+    assert (
+        "CREATE INDEX TEST_SCHEMA__IFX_SAME_INDEX "
+        'ON TEST_SCHEMA.IFX_NS_USERS ("VALUE")'
+        in create_sql
+    )
+    assert "DROP INDEX TEST_SCHEMA__IFX_SAME_INDEX" in drop_sql
+    assert index.name == "ifx_same_index"
+
+
+@pytest.mark.ddl_compiler
 def test_drop_table_compiles(dialect, sample_table):
     compiled = str(DropTable(sample_table).compile(dialect=dialect))
     upper = _upper_sql(compiled)
@@ -152,6 +330,86 @@ def test_drop_index_compiles(dialect, sample_table):
 
     assert "DROP INDEX" in upper
     assert "IX_SA_COMPILE_BASIC_NAME" in upper
+
+
+@pytest.mark.ddl_compiler
+def test_create_table_if_not_exists_compiles(dialect, sample_table):
+    compiled = str(
+        CreateTable(sample_table, if_not_exists=True).compile(
+            dialect=dialect
+        )
+    )
+
+    assert _upper_sql(compiled).startswith(
+        "CREATE TABLE IF NOT EXISTS SA_COMPILE_BASIC ("
+    )
+
+
+@pytest.mark.ddl_compiler
+def test_drop_table_if_exists_compiles(dialect, sample_table):
+    compiled = str(
+        DropTable(sample_table, if_exists=True).compile(dialect=dialect)
+    )
+
+    assert _upper_sql(compiled) == (
+        "DROP TABLE IF EXISTS SA_COMPILE_BASIC"
+    )
+
+
+@pytest.mark.ddl_compiler
+def test_create_index_if_not_exists_compiles(dialect, sample_table):
+    index = next(iter(sample_table.indexes))
+
+    compiled = str(
+        CreateIndex(index, if_not_exists=True).compile(dialect=dialect)
+    )
+
+    assert _upper_sql(compiled) == (
+        "CREATE INDEX IF NOT EXISTS IX_SA_COMPILE_BASIC_NAME "
+        "ON SA_COMPILE_BASIC (NAME)"
+    )
+
+
+@pytest.mark.ddl_compiler
+def test_drop_index_if_exists_compiles(dialect, sample_table):
+    index = next(iter(sample_table.indexes))
+
+    compiled = str(
+        DropIndex(index, if_exists=True).compile(dialect=dialect)
+    )
+
+    assert _upper_sql(compiled) == (
+        "DROP INDEX IF EXISTS IX_SA_COMPILE_BASIC_NAME"
+    )
+
+
+@pytest.mark.ddl_compiler
+def test_create_constraint_backing_index_if_not_exists_preserves_suffix(
+    dialect,
+):
+    metadata = MetaData()
+    table = Table(
+        "sa_compile_unique_ifne",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("name", String(50)),
+    )
+    index = Index(
+        "ix_sa_compile_unique_ifne_name",
+        table.c.name,
+        unique=True,
+    )
+    index.info["informix_unique_constraint_as_index"] = True
+
+    compiled = str(
+        CreateIndex(index, if_not_exists=True).compile(dialect=dialect)
+    )
+
+    assert _upper_sql(compiled) == (
+        "CREATE UNIQUE INDEX IF NOT EXISTS "
+        "IX_SA_COMPILE_UNIQUE_IFNE_NAME "
+        "ON SA_COMPILE_UNIQUE_IFNE (NAME) EXCLUDE NULL KEYS"
+    )
 
 
 @pytest.mark.ddl_compiler
