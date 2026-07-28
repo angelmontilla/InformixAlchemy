@@ -92,6 +92,28 @@ class BaseReflector(object):
 
         return name
 
+    def _logical_reflected_name(self, name, schema=None):
+        """Return the SQLAlchemy-visible name for a catalog object.
+
+        Constraint and index names belonging to an explicitly schema-owned
+        table are stored in Informix with ``<owner>__`` as a physical prefix.
+        Reflection must remove that implementation prefix so metadata
+        round-trips preserve the logical name supplied by the application.
+        Names from the default owner, system-generated names, and names whose
+        prefix does not match the requested owner are returned unchanged.
+        """
+        physical_name = self._coerce_name(name)
+        if physical_name is None:
+            return None
+
+        schema_name = self._coerce_name(schema)
+        if schema_name:
+            prefix = f"{schema_name}__"
+            if physical_name.casefold().startswith(prefix.casefold()):
+                physical_name = physical_name[len(prefix):]
+
+        return self.normalize_name(physical_name)
+
     def _get_default_schema_name(self, connection):
         """Return: current setting of the schema attribute"""
         default_schema_name = connection.exec_driver_sql(

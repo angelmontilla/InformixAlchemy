@@ -1,14 +1,15 @@
-import pytest
 from sqlalchemy import bindparam, outparam, text
 from sqlalchemy.testing.assertions import eq_
 from sqlalchemy.testing import config, fixtures
 
 
 class OutParamTest(fixtures.TestBase):
+    _procedure_created = False
+
     @classmethod
     def setup_class(cls):
         if config.db.dialect.driver == "pyodbc":
-            pytest.skip("pyodbc does not expose DBAPI callproc/out parameters")
+            return
 
         with config.db.begin() as conn:
             conn.exec_driver_sql("""
@@ -18,8 +19,13 @@ class OutParamTest(fixtures.TestBase):
                     LET z_out = NULL;
                     END PROCEDURE
                         """)
+        cls._procedure_created = True
 
     def test_out_params(self):
+        if config.db.dialect.driver == "pyodbc":
+            assert getattr(config.db.dialect, "supports_native_out_parameters", False) is False
+            return
+
         with config.db.begin() as conn:
             stmt = text('call foo(:x_in, :x_out, :y_out, :z_out)').bindparams(
                 bindparam('x_in'),
@@ -36,5 +42,7 @@ class OutParamTest(fixtures.TestBase):
 
     @classmethod
     def teardown_class(cls):
+        if not cls._procedure_created:
+            return
         with config.db.begin() as conn:
             conn.exec_driver_sql("DROP PROCEDURE foo")

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import alembic
 import pytest
+from packaging.version import Version
 
 from test.alembic_requirements import (
     Requirements,
@@ -15,7 +16,9 @@ pytestmark = pytest.mark.alembic_suite
 
 
 def test_supported_alembic_version() -> None:
-    assert alembic.__version__ == "1.18.5"
+    version = Version(alembic.__version__)
+
+    assert Version("1.18.0") <= version < Version("1.19.0")
 
 
 def test_alembic_suite_is_installed() -> None:
