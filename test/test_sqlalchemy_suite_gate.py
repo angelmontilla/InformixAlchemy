@@ -51,6 +51,16 @@ def test_legacy_ifxpy_keeps_statement_cache_contract():
 
 
 @pytest.mark.sqlalchemy_suite
+def test_native_boolean_contract_is_enabled():
+    dialect = IfxDialect_pyodbc()
+    requirements = Requirements()
+
+    assert dialect.supports_native_boolean is True
+    assert requirements.nullable_booleans.enabled is True
+    assert requirements.boolean_col_expressions.enabled is True
+
+
+@pytest.mark.sqlalchemy_suite
 def test_dialect_exposes_do_ping():
     dialect = IfxDialect_pyodbc()
     assert callable(getattr(dialect, "do_ping", None))
@@ -362,6 +372,7 @@ def test_current_closed_requirements_are_part_of_contract(requirement_name):
         "update_from",
         "delete_from",
         "boolean_col_expressions",
+        "nullable_booleans",
         "parens_in_union_contained_select_w_limit_offset",
         "parens_in_union_contained_select_wo_limit_offset",
         "order_by_label_with_expression",

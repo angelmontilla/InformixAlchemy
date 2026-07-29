@@ -178,25 +178,85 @@ RESERVED_WORDS = {
     'regr_count', 'within', 'asc'}
 
 
-class _IFXBoolean(sa_types.Boolean):
+class BOOLEAN(sa_types.Boolean):
+    """Native Informix BOOLEAN type.
+
+    Informix exposes BOOLEAN as a built-in opaque type whose documented
+    external values are ``t``, ``f`` and ``NULL``. The result processor also
+    accepts the common DBAPI representations used for SQL bit values so the
+    Python-facing value is consistently ``bool`` or ``None``.
+
+    SQLAlchemy's generic :class:`~sqlalchemy.types.Boolean` is adapted to this
+    class through ``colspecs`` so application code can continue to use either
+    ``Boolean`` or the dialect-specific ``BOOLEAN`` type.
+    """
+
+    cache_ok = True
+
+    _TRUE_TEXT_VALUES = frozenset({"1", "t", "true"})
+    _FALSE_TEXT_VALUES = frozenset({"0", "f", "false"})
+
+    def bind_processor(self, dialect):
+        strict_as_bool = self._strict_as_bool
+
+        def process(value):
+            value = strict_as_bool(value)
+            if value is None:
+                return None
+            return "t" if value else "f"
+
+        return process
 
     def result_processor(self, dialect, coltype):
         def process(value):
-            if value is None:
-                return None
-            else:
-                return bool(value)
+            if value is None or isinstance(value, bool):
+                return value
+
+            if isinstance(value, memoryview):
+                value = value.tobytes()
+            elif isinstance(value, bytearray):
+                value = bytes(value)
+
+            if isinstance(value, bytes):
+                if value == b"\x01":
+                    return True
+                if value == b"\x00":
+                    return False
+                value = value.strip(b"\x00 \t\r\n")
+                try:
+                    value = value.decode("ascii")
+                except UnicodeDecodeError as exc:
+                    raise ValueError(
+                        "Informix BOOLEAN returned non-ASCII bytes: "
+                        f"{value!r}"
+                    ) from exc
+
+            if isinstance(value, int):
+                if value in (0, 1):
+                    return bool(value)
+                raise ValueError(
+                    "Informix BOOLEAN returned an integer other than 0 or 1: "
+                    f"{value!r}"
+                )
+
+            if isinstance(value, str):
+                normalized = value.strip().casefold()
+                if normalized in self._TRUE_TEXT_VALUES:
+                    return True
+                if normalized in self._FALSE_TEXT_VALUES:
+                    return False
+
+            raise ValueError(
+                "Informix BOOLEAN returned an unsupported value: "
+                f"type={type(value).__name__}, value={value!r}"
+            )
+
         return process
 
-    def bind_processor(self, dialect):
-        def process(value):
-            if value is None:
-                return None
-            elif bool(value):
-                return '1'
-            else:
-                return '0'
-        return process
+
+# Backwards-compatible private name retained for code that imported it from
+# older IfxAlchemy releases.
+_IFXBoolean = BOOLEAN
 
 
 class _IFXTime(sa_types.Time):
@@ -690,6 +750,28 @@ def _ifx_current_default_for_column(type_compiler, column):
     return "CURRENT"
 
 
+def _normalize_ifx_boolean_default(value):
+    """Return SQLAlchemy's canonical spelling for an Informix BOOLEAN default."""
+    candidate = _strip_ifx_outer_parentheses(value)
+
+    if (
+        len(candidate) >= 2
+        and candidate[0] == candidate[-1]
+        and candidate[0] in {"'", '"'}
+    ):
+        candidate = candidate[1:-1].strip()
+
+    normalized = candidate.casefold()
+
+    if normalized in {"t", "true", "1"}:
+        return "true"
+
+    if normalized in {"f", "false", "0"}:
+        return "false"
+
+    return None
+
+
 def _normalize_ifx_reflected_default(raw_default, reflected_type):
     """Normalize a DEFAULT value obtained from Informix system catalogs.
 
@@ -704,8 +786,11 @@ def _normalize_ifx_reflected_default(raw_default, reflected_type):
         AAAAAA 0
         AACOrQ 2000-01-01
 
-    Character-family and BOOLEAN defaults contain only their textual
-    representation and must not have their first token removed.
+    Character-family defaults contain only their textual representation
+    and must not have their first token removed.
+
+    BOOLEAN defaults are normalized to SQLAlchemy's canonical ``true`` or
+    ``false`` spelling.
 
     SQL expressions such as ``CURRENT YEAR TO SECOND`` must also remain
     unchanged.
@@ -718,26 +803,32 @@ def _normalize_ifx_reflected_default(raw_default, reflected_type):
     if not value:
         return value
 
-    # Informix names the current DATETIME expression CURRENT (or SYSDATE),
+    # Informix stores native BOOLEAN defaults using values such as t/f,
+    # quoted t/f, true/false, or 1/0. SQLAlchemy's reflection contract
+    # expects the canonical true/false spelling.
+    if isinstance(reflected_type, sa_types.Boolean):
+        normalized_boolean = _normalize_ifx_boolean_default(value)
+
+        if normalized_boolean is not None:
+            return normalized_boolean
+
+        # Preserve unknown BOOLEAN expressions rather than corrupting them.
+        return value
+
+    # Character defaults are stored directly as their textual value.
+    # They do not contain Informix's encoded catalog prefix.
+    if isinstance(reflected_type, sa_types.String):
+        return value
+
+    # Informix names the current DATETIME expression CURRENT or SYSDATE,
     # while SQLAlchemy's generic server-default contract uses the canonical
     # CURRENT_TIMESTAMP spelling. Canonicalizing here makes reflected metadata
-    # stable and prevents false Alembic diffs.
+    # stable and prevents false Alembic differences.
     if isinstance(reflected_type, sa_types.DateTime):
         normalized_expression = " ".join(value.upper().split())
 
         if normalized_expression in {"CURRENT", "SYSDATE"}:
             return "CURRENT_TIMESTAMP"
-
-    # Informix stores these families directly as their ASCII
-    # representation, without the internal 6-bit prefix.
-    if isinstance(
-        reflected_type,
-        (
-            sa_types.String,
-            sa_types.Boolean,
-        ),
-    ):
-        return value
 
     encoded_prefix, separator, sql_literal = value.partition(" ")
 
@@ -793,7 +884,7 @@ def _normalize_ifx_reflected_column(column):
 
 
 colspecs = {
-    sa_types.Boolean: _IFXBoolean,
+    sa_types.Boolean: BOOLEAN,
     sa_types.Date: _IFXDate,
     sa_types.Time: _IFXTime,
     sa_types.Numeric: _IFXNumeric,
@@ -828,7 +919,7 @@ ischema_names = {
     'VARGRAPHIC': VARGRAPHIC,
     'LONGVARGRAPHIC': LONGVARGRAPHIC,
     'DBCLOB': DBCLOB,
-    'BOOLEAN': _IFXBoolean,
+    'BOOLEAN': BOOLEAN,
     'BYTE': sa_types.LargeBinary,
     'TEXT': sa_types.Text,
     'LVARCHAR': VARCHAR,
@@ -991,7 +1082,7 @@ class IfxTypeCompiler(compiler.GenericTypeCompiler):
         return self.visit_int(type_)
 
     def visit_boolean(self, type_):
-        return self.visit_smallint(type_)
+        return "BOOLEAN"
 
     def visit_unicode(self, type_):
         return self.visit_vargraphic(type_)
@@ -1103,13 +1194,12 @@ class IfxCompiler(compiler.SQLCompiler):
         Informix requires a search condition in ``CASE WHEN``.  SQLAlchemy
         Boolean values such as ``true()``, ``false()``, Boolean bind
         parameters and an existing ``CASE`` expression are already scalar
-        values (rendered as 1/0 by this dialect); wrapping them again would
-        produce invalid SQL such as ``CASE WHEN CASE ... THEN 1 ...``.
+        values; wrapping them again would produce an invalid nested predicate.
 
         ``_is_implicitly_boolean`` identifies expressions that are actual SQL
         predicates, including comparisons, ``IN`` and Boolean clause lists.
-        Only those expressions need to be converted to a deterministic 1/0
-        result when projected in the SELECT list.  ``EXISTS`` is handled by
+        Only those expressions need to be converted to a native BOOLEAN
+        scalar when projected in the SELECT list. ``EXISTS`` is handled by
         :meth:`visit_unary` and therefore is intentionally not wrapped here.
         """
         if not isinstance(column.type, sa_types.Boolean):
@@ -1140,10 +1230,10 @@ class IfxCompiler(compiler.SQLCompiler):
 
         rendered = sql.type_coerce(
             sql.case(
-                (element, sql.literal_column("1")),
-                else_=sql.literal_column("0"),
+                (element, sql.true()),
+                else_=sql.false(),
             ),
-            sa_types.Boolean(),
+            BOOLEAN(),
         )
 
         if label_name is not None:
@@ -1355,10 +1445,30 @@ class IfxCompiler(compiler.SQLCompiler):
         return _IFX_SINGLE_ROW_FROM
 
     def visit_false(self, expr, **kw):
-        return '0'
+        # Informix's native FALSE literal is the quoted external value 'f'.
+        return "'f'"
 
     def visit_true(self, expr, **kw):
-        return '1'
+        # Informix's native TRUE literal is the quoted external value 't'.
+        return "'t'"
+
+    def visit_is_true_unary_operator(self, element, operator, **kw):
+        operand = element.element
+        if getattr(operand, "_is_implicitly_boolean", False):
+            return self.process(operand, **kw)
+        return (
+            f"{self.process(operand, **kw)} = "
+            f"{self.visit_true(None)}"
+        )
+
+    def visit_is_false_unary_operator(self, element, operator, **kw):
+        operand = element.element
+        if getattr(operand, "_is_implicitly_boolean", False):
+            return f"NOT {self.process(operand, **kw)}"
+        return (
+            f"{self.process(operand, **kw)} = "
+            f"{self.visit_false(None)}"
+        )
 
     def get_cte_preamble(self, recursive):
         return "WITH"
@@ -1686,7 +1796,11 @@ class IfxCompiler(compiler.SQLCompiler):
             unary.operator == operators.exists
             and kw.get('within_columns_clause', False)
         ):
-            return "CASE WHEN " + usql + " THEN 1 ELSE 0 END"
+            return (
+                "CASE WHEN " + usql
+                + f" THEN {self.visit_true(None)}"
+                + f" ELSE {self.visit_false(None)} END"
+            )
 
         return usql
 
@@ -1699,7 +1813,7 @@ class IfxCompiler(compiler.SQLCompiler):
         lateral_from_linter=None,
         **kw,
     ):
-        """Compile binary expressions with Informix IN/NOT IN null typing."""
+        """Compile Informix-specific binary-expression semantics."""
         operator_ = override_operator or binary.operator
 
         if operator_ in (
@@ -1707,6 +1821,23 @@ class IfxCompiler(compiler.SQLCompiler):
             operators.not_in_op,
         ):
             binary = self._coerce_untyped_null_in_left(binary)
+
+        right_is_boolean_literal = isinstance(
+            binary.right,
+            (sql.elements.True_, sql.elements.False_),
+        )
+        if operator_ in (operators.is_, operators.is_not) and (
+            right_is_boolean_literal
+        ):
+            left = self.process(binary.left, **kw)
+            right = self.process(binary.right, **kw)
+
+            if operator_ is operators.is_:
+                return f"{left} = {right}"
+
+            # Informix documents equality against 't'/'f', not ``IS TRUE``.
+            # Preserve SQL ``IS NOT`` semantics by including NULL explicitly.
+            return f"({left} != {right} OR {left} IS NULL)"
 
         return super().visit_binary(
             binary,
@@ -1896,6 +2027,9 @@ class IfxDDLCompiler(compiler.DDLCompiler):
         Informix requires CURRENT to carry the same DATETIME qualifier as the
         target column. It also rejects quoted numeric defaults for numeric
         columns and arbitrary arithmetic expressions in DEFAULT clauses.
+
+        BOOLEAN defaults reflected as canonical true/false values are rendered
+        again using Informix's native t/f representation.
         """
         server_default = column.server_default
 
@@ -1920,6 +2054,17 @@ class IfxDDLCompiler(compiler.DDLCompiler):
             default_sql = default_arg.strip()
         else:
             default_sql = super().get_column_default_string(column)
+
+        if (
+            default_sql is not None
+            and isinstance(column.type, sa_types.Boolean)
+        ):
+            normalized_boolean = _normalize_ifx_boolean_default(default_sql)
+
+            if normalized_boolean == "true":
+                default_sql = "'t'"
+            elif normalized_boolean == "false":
+                default_sql = "'f'"
 
         if default_sql is not None:
             _validate_ifx_server_default(column, default_sql)
@@ -2388,7 +2533,7 @@ class IfxDialect(default.DefaultDialect):
     supports_sane_rowcount = True
     supports_sane_multi_rowcount = True
     supports_native_decimal = False
-    supports_native_boolean = False
+    supports_native_boolean = True
     insert_returning = False
     update_returning = False
     delete_returning = False

@@ -101,7 +101,7 @@ def test_create_table_compiles_basic_types(dialect, sample_table):
     assert "CREATED_ON DATE" in upper
     assert "UPDATED_AT DATETIME" in upper
     assert "AMOUNT DECIMAL(10, 2)" in upper
-    assert "FLAG SMALLINT" in upper
+    assert "FLAG BOOLEAN" in upper
 
 
 @pytest.mark.ddl_compiler
@@ -432,7 +432,7 @@ def test_type_compiler_smoke(dialect):
         == "DATETIME YEAR TO FRACTION(5)"
     )
 
-    assert type_compiler.process(Boolean()).upper() == "SMALLINT"
+    assert type_compiler.process(Boolean()).upper() == "BOOLEAN"
 
 
 @pytest.mark.ddl_compiler
@@ -875,7 +875,7 @@ def test_exists_in_columns_clause_wraps_as_case_expression(
     upper = _upper_sql(compiled)
 
     assert "CASE WHEN EXISTS (" in upper
-    assert "THEN 1 ELSE 0 END AS ANON_1" in upper
+    assert "THEN 'T' ELSE 'F' END AS ANON_1" in upper
 
 
 @pytest.mark.ddl_compiler

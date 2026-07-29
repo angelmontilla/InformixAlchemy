@@ -387,9 +387,15 @@ class Requirements(SuiteRequirements):
     def boolean_col_expressions(self):
         """Boolean predicates can be selected as result columns.
 
-        Informix receives a numeric ``CASE WHEN`` projection and SQLAlchemy
-        retains Boolean result processing for the returned value.
+        Informix receives a ``CASE WHEN`` expression whose result branches are
+        the native ``'t'`` and ``'f'`` BOOLEAN literals.
         """
+
+        return exclusions.open()
+
+    @property
+    def nullable_booleans(self):
+        """Native Informix BOOLEAN columns accept TRUE, FALSE and NULL."""
 
         return exclusions.open()
 

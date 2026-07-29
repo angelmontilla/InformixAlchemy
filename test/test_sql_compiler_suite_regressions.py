@@ -155,7 +155,7 @@ def test_numeric_scalar_empty_in_uses_typed_null(dialect):
     assert "SIMPLE_COL IN (CAST(NULL AS DECIMAL(10, 2)))" in sql
 
 
-def test_boolean_scalar_empty_in_uses_smallint(dialect):
+def test_boolean_scalar_empty_in_uses_native_boolean(dialect):
     simple_col = column("simple_col", Boolean())
 
     rendered = select(simple_col).where(simple_col.in_([])).compile(
@@ -165,7 +165,7 @@ def test_boolean_scalar_empty_in_uses_smallint(dialect):
 
     sql = _normalized(rendered)
 
-    assert "SIMPLE_COL IN (CAST(NULL AS SMALLINT))" in sql
+    assert "SIMPLE_COL IN (CAST(NULL AS BOOLEAN))" in sql
 
 
 def test_scalar_empty_not_in_uses_typed_null(dialect):
