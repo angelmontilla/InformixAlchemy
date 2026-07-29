@@ -161,7 +161,7 @@ def test_boolean_predicate_projection_uses_case(dialect, tables):
     sql = _normalized(select(source.c.id == 1), dialect)
 
     assert "SELECT CASE WHEN (SOME_TABLE.ID =" in sql
-    assert "THEN 1 ELSE 0 END AS" in sql
+    assert "THEN 'T' ELSE 'F' END AS" in sql
 
 
 def test_boolean_clause_list_projection_uses_single_case(dialect, tables):

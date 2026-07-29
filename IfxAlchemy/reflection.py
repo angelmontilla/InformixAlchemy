@@ -33,6 +33,13 @@ from .temporal import IFXTime
 from . import sqla_compat
 
 
+def _informix_boolean_type():
+    """Create the dialect BOOLEAN lazily to avoid an import cycle."""
+    from .base import BOOLEAN
+
+    return BOOLEAN()
+
+
 class BaseReflector(object):
     def __init__(self, dialect):
         self.dialect = dialect
@@ -213,7 +220,7 @@ class IfxReflector(BaseReflector):
         "INTERVAL": sa_types.Interval,
         "TEXT": sa_types.Text,
         "BYTE": sa_types.LargeBinary,
-        "BOOLEAN": sa_types.Boolean,
+        "BOOLEAN": _informix_boolean_type,
         "NULL": sa_types.NullType,
     }
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import Boolean, LargeBinary, Text, inspect
 
+from IfxAlchemy import BOOLEAN
+
 
 def test_decode_opaque_blob_clob_boolean_without_database():
     from IfxAlchemy.pyodbc import IfxDialect_pyodbc
@@ -23,6 +25,7 @@ def test_decode_opaque_blob_clob_boolean_without_database():
         41, 0, extended_id=3, extended_type_name="boolean"
     )
     assert isinstance(boolean, Boolean)
+    assert type(boolean) is BOOLEAN
 
 
 def test_decode_lvarchar_opaque_uses_extended_maxlen_without_database():
@@ -66,6 +69,7 @@ def test_reflect_opaque_types_round_trip(engine, name_factory):
         assert isinstance(cols["payload_blob"]["type"], LargeBinary)
         assert isinstance(cols["payload_clob"]["type"], Text)
         assert isinstance(cols["flag"]["type"], Boolean)
+        assert type(cols["flag"]["type"]) is BOOLEAN
     finally:
         with engine.begin() as conn:
             conn.exec_driver_sql(f"DROP TABLE {table_name}")
