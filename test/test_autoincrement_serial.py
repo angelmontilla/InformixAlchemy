@@ -64,7 +64,7 @@ def _assert_generated_lastrowid_roundtrip(engine, name_factory, prefix, type_):
 
 
 class _RecordingCursor:
-    """Cursor DBAPI simulado para probar la recuperación de lastrowid."""
+    """Mock DBAPI cursor used to test lastrowid retrieval."""
 
     def __init__(self, row):
         self.row = row
@@ -82,7 +82,7 @@ class _RecordingCursor:
 
 
 class _RecordingDbapiConnection:
-    """Conexión DBAPI simulada que entrega un cursor secundario."""
+    """Mock DBAPI connection that provides a secondary cursor."""
 
     def __init__(self, cursor):
         self.cursor_obj = cursor
@@ -122,21 +122,21 @@ def test_lastrowid_post_exec_uses_separate_dbapi_cursor():
 
     context.post_exec()
 
-    # El cursor que ejecutó el INSERT no debe reutilizarse.
+    # The cursor that executed the INSERT must not be reused.
     assert insert_cursor.executed == []
 
-    # DBINFO debe ejecutarse en un cursor nuevo de la misma conexión.
+    # DBINFO must run on a new cursor from the same connection.
     assert lastrowid_cursor.executed == [
         context._lastrowid_query
     ]
 
-    # El cursor auxiliar debe cerrarse siempre.
+    # The auxiliary cursor must always be closed.
     assert lastrowid_cursor.closed is True
 
-    # Solo debe solicitarse un cursor auxiliar.
+    # Only one auxiliary cursor should be requested.
     assert dbapi_connection.cursor_calls == 1
 
-    # El valor devuelto por DBINFO debe normalizarse a int.
+    # The value returned by DBINFO must be normalized to int.
     assert context.get_lastrowid() == 42
 
 

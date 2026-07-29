@@ -92,12 +92,11 @@ _OFFICIAL_SUITE_FILES = {
 
 def _is_official_suite_run(config) -> bool:
     """
-    Indica si pytest se está ejecutando mediante uno de los runners
-    de las suites oficiales.
+    Return whether pytest is running through an official suite runner.
 
-    Tanto la suite de SQLAlchemy como la suite externa de Alembic
-    utilizan sqlalchemy.testing.plugin.pytestplugin y reciben la URL
-    de la base de datos mediante la opción --dburi.
+    Both the SQLAlchemy suite and the external Alembic suite use
+    sqlalchemy.testing.plugin.pytestplugin and receive the database URL
+    through the --dburi option.
     """
     if config.pluginmanager.hasplugin(
         "sqlalchemy.testing.plugin.pytestplugin"
@@ -112,11 +111,11 @@ def _is_official_suite_run(config) -> bool:
 
 def pytest_ignore_collect(collection_path, config):
     """
-    Evita que una ejecución normal de pytest recoja accidentalmente
-    las suites oficiales.
+    Prevent a normal pytest run from collecting the official suites
+    accidentally.
 
-    Los runners run_tests.py y run_alembic_tests.py cargan el plugin
-    oficial y, por tanto, sí pueden recoger sus ficheros respectivos.
+    The run_tests.py and run_alembic_tests.py runners load the official
+    plugin and can therefore collect their respective files.
     """
     if collection_path.name in _OFFICIAL_SUITE_FILES:
         return not _is_official_suite_run(config)
@@ -157,8 +156,8 @@ def conn(engine):
 @pytest.fixture
 def pinned_connection_session(engine):
     """
-    Fija Session + Connection a la misma conexión física.
-    Es clave para TEMP TABLES en Informix.
+    Pin Session and Connection to the same physical connection.
+    This is essential for TEMP TABLES in Informix.
     """
     with engine.connect() as connection:
         with Session(bind=connection, expire_on_commit=False) as session:
@@ -180,10 +179,10 @@ def db_builder(engine):
     """
     build(create_sqls, drop_sqls)
 
-    - create_sqls: str o iterable[str]
-    - drop_sqls: str o iterable[str]
+    - create_sqls: str or iterable[str]
+    - drop_sqls: str or iterable[str]
 
-    Hace CREATE con commit explícito y limpia al final en orden inverso.
+    Execute CREATE with an explicit commit and clean up in reverse order.
     """
     created_groups: list[list[str]] = []
 

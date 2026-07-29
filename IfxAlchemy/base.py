@@ -1650,7 +1650,7 @@ class IfxCompiler(compiler.SQLCompiler):
                     limit_expression, **kwargs
                 )
 
-        # SQLAlchemy conserva aquí su advertencia oficial para DISTINCT ON.
+        # SQLAlchemy retains its official DISTINCT ON warning here.
         text += super().get_select_precolumns(select, **kwargs)
         return text
 

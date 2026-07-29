@@ -89,8 +89,8 @@ def test_bigint_converter_accepts_signed_little_endian_binary(
 def test_bigint_converter_prefers_decimal_ascii_for_eight_byte_value():
     converter = get_converter()
 
-    # Aunque tiene exactamente ocho bytes, representa el texto decimal
-    # "12345678" y no debe interpretarse como un entero binario.
+    # Although it is exactly eight bytes long, it represents the decimal text
+    # "12345678" and must not be interpreted as a binary integer.
     assert converter(b"12345678") == 12345678
 
 

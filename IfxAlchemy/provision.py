@@ -54,11 +54,11 @@ def _clean_catalog_name(value: Any) -> str | None:
 
 def _suite_object_owners(cfg, connection) -> tuple[str, ...]:
     """
-    Devuelve los propietarios cuyo contenido puede crear la suite oficial.
+    Return the owners whose contents may be created by the official suite.
 
-    Se incluyen el propietario por defecto de la conexión y los dos
-    propietarios configurados por SQLAlchemy. La comparación se hace sin
-    distinguir mayúsculas para evitar ejecutar dos veces el mismo borrado.
+    The default connection owner and the two owners configured by SQLAlchemy
+    are included. Comparison is case-insensitive to avoid running the same
+    cleanup twice.
     """
     default_owner = _clean_catalog_name(
         getattr(
@@ -109,11 +109,11 @@ def _catalog_objects(
     tabtypes: tuple[str, ...],
 ) -> list[dict[str, Any]]:
     """
-    Inventaría objetos de usuario directamente desde ``systables``.
+    Inventory user objects directly from ``systables``.
 
-    ``tabid >= 100`` excluye los catálogos del sistema. El propietario se
-    consulta por separado para mantener una parametrización simple y segura
-    con el driver ODBC de Informix.
+    ``tabid >= 100`` excludes the system catalogs. Each owner is queried
+    separately to keep parameterization simple and safe with the Informix
+    ODBC driver.
     """
     if not tabtypes:
         return []
@@ -171,7 +171,7 @@ def _catalog_objects(
 
 
 def _drop_catalog_object(connection, catalog_object) -> None:
-    """Elimina un objeto ya inventariado con DDL cualificado."""
+    """Drop a previously inventoried object using qualified DDL."""
     object_type = catalog_object["type"]
     qualified_name = _qualified_identifier(
         connection,
@@ -204,7 +204,7 @@ def _drop_catalog_object(connection, catalog_object) -> None:
 
 
 def _ensure_test_schema_owner(connection, owner):
-    """Garantiza que owner pueda poseer objetos en la BD de pruebas."""
+    """Ensure that owner can own objects in the test database."""
 
     row = connection.exec_driver_sql(
         """
@@ -250,7 +250,7 @@ def _informix_post_configure_engine(
     engine,
     follower_ident,
 ):
-    """Prepara los dos propietarios usados por la suite oficial."""
+    """Prepare the two owners used by the official suite."""
 
     _ = (
         url,
@@ -278,10 +278,10 @@ def _informix_post_configure_engine(
 @drop_all_schema_objects_pre_tables.for_db("informix")
 def _informix_drop_all_schema_objects_pre_tables(cfg, eng):
     """
-    Elimina vistas y tablas residuales antes del barrido genérico.
+    Remove stale views and tables before the generic cleanup.
 
-    Las vistas se eliminan antes que las tablas para romper dependencias. Las
-    tablas se borran con ``CASCADE`` para retirar claves foráneas dependientes.
+    Views are dropped before tables to break dependencies. Tables are dropped
+    with ``CASCADE`` to remove dependent foreign keys.
     """
     with eng.begin() as connection:
         owners = _suite_object_owners(
@@ -305,7 +305,7 @@ def _informix_drop_all_schema_objects_pre_tables(cfg, eng):
 
 @drop_all_schema_objects_post_tables.for_db("informix")
 def _informix_drop_all_schema_objects_post_tables(cfg, eng):
-    """Elimina secuencias residuales después de retirar las tablas."""
+    """Remove stale sequences after the tables have been dropped."""
     with eng.begin() as connection:
         owners = _suite_object_owners(
             cfg,

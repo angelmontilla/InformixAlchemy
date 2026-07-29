@@ -19,13 +19,13 @@
 
 __version__ = "1.1.0"
 
-# Importaciones de los módulos necesarios para el dialecto pyodbc y tipos de datos
+# Imports of the modules required for the pyodbc dialect and data types
 from . import pyodbc, base
 
-# Dialecto por defecto: pyodbc
+# Default dialect: pyodbc
 dialect = pyodbc.IfxDialect_pyodbc
 
-# Tipos de datos soportados por el dialecto Informix
+# Data types supported by the Informix dialect
 from .base import (
     BIGINT,
     BIGSERIAL,
@@ -50,7 +50,7 @@ from .base import (
     VARGRAPHIC,
 )
 
-# Lista de elementos públicos exportados por este módulo
+# List of public elements exported by this module
 __all__ = (
     "BIGINT",
     "BIGSERIAL",

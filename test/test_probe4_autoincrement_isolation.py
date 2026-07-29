@@ -1,25 +1,26 @@
 from __future__ import annotations
 
 """
-Aísla el caso exacto del probe opcional de prueba4.py para responder con claridad:
+Isolate the exact case from the optional probe in prueba4.py to answer clearly:
 
-¿Falla realmente SERIAL en el dialecto, o falló solo ese probe concreto por cómo
-estaba montado / por el estado previo de la conexión?
+Does SERIAL actually fail in the dialect, or did only that specific probe fail
+because of how it was set up or because of the connection's prior state?
 
-Este módulo no prueba "autoincrement" de forma genérica (eso ya lo cubren
-`test_autoincrement_serial.py` y compañía), sino el flujo exacto de `prueba4.py`:
+This module does not test autoincrement generically (that is already covered by
+`test_autoincrement_serial.py` and related tests). Instead, it tests the exact
+`prueba4.py` flow:
 
-1. crear una tabla ORM con `Integer(primary_key=True)` -> compilada como SERIAL
-2. hacer `session.flush()` sin asignar PK
-3. comprobar que la PK se rellena
-4. comprobar que la fila existe y que la reflexión marca autoincrement=True
-5. repetir el mismo flujo después de provocar el mismo SAVEPOINT inválido que
-   falló en `prueba4.py`
+1. create an ORM table with `Integer(primary_key=True)` -> compiled as SERIAL
+2. call `session.flush()` without assigning a primary key
+3. verify that the primary key is populated
+4. verify that the row exists and reflection reports autoincrement=True
+5. repeat the same flow after triggering the same invalid SAVEPOINT that failed
+   in `prueba4.py`
 
-Si ambos tests pasan, la conclusión es fuerte:
-- SERIAL NO falla de forma general en el dialecto.
-- El fallo opcional de `prueba4.py` no era "SERIAL roto", sino el probe concreto
-  o el contexto en el que se ejecutaba.
+If both tests pass, the conclusion is strong:
+- SERIAL does NOT fail generally in the dialect.
+- The optional `prueba4.py` failure was not "broken SERIAL"; it was the specific
+  probe or the context in which it ran.
 """
 
 import uuid
@@ -51,10 +52,10 @@ def unique_name(name_factory):
 @pytest.fixture
 def force_unsupported_savepoint_sql(engine):
     """
-    Ejecuta exactamente el SQL de SAVEPOINT que falló en `prueba4.py` y deja la
-    conexión realmente limpia (rollback + invalidation del handle físico), para
-    verificar si ese fallo contamina o no un probe posterior de
-    SERIAL/autoincrement.
+    Execute the exact SAVEPOINT SQL that failed in `prueba4.py` and leave the
+    connection fully clean (rollback plus physical handle invalidation) to
+    determine whether that failure contaminates a later SERIAL/autoincrement
+    probe.
     """
 
     def _run() -> str:
@@ -66,9 +67,9 @@ def force_unsupported_savepoint_sql(engine):
                 try:
                     tx.rollback()
                 finally:
-                    # El SQL legado de savepoint deja esta sesión ODBC en un
-                    # estado poco fiable para el siguiente DDL; invalidamos el
-                    # handle para forzar una conexión fresca desde el pool.
+                    # The legacy savepoint SQL leaves this ODBC session in an
+                    # unreliable state for the next DDL statement, so invalidate
+                    # the handle to force a fresh connection from the pool.
                     conn.invalidate()
                 return "failed_as_expected"
             else:
@@ -84,8 +85,8 @@ def _drop_table_if_exists(engine, table):
             if inspect(conn).has_table(table.name):
                 table.drop(conn)
         except Exception:
-            # último intento por SQL directo; si tampoco sale, dejamos que la
-            # siguiente operación revele el problema real.
+            # Make one final attempt with direct SQL. If that also fails, let
+            # the next operation reveal the actual problem.
             try:
                 conn.exec_driver_sql(f'DROP TABLE "{table.name}"')
             except Exception:
@@ -94,11 +95,11 @@ def _drop_table_if_exists(engine, table):
 
 def _run_probe4_style_autoincrement_roundtrip(engine, table_name: str) -> dict:
     """
-    Reproduce el mismo patrón que el probe opcional de `prueba4.py`, pero con
-    asserts más finos y limpieza robusta.
+    Reproduce the same pattern as the optional `prueba4.py` probe, but with
+    more precise assertions and robust cleanup.
 
-    Tabla deliberadamente similar a ProbeAuto:
-      id Integer, primary_key=True   -> el dialecto la compila como SERIAL
+    The table is deliberately similar to ProbeAuto:
+      id Integer, primary_key=True   -> the dialect compiles it as SERIAL
       payload String(50)
     """
     metadata = MetaData()
@@ -156,10 +157,10 @@ def _run_probe4_style_autoincrement_roundtrip(engine, table_name: str) -> dict:
 
 def test_probe4_style_autoincrement_works_on_pristine_engine(engine, unique_name):
     """
-    Responde a la pregunta principal sin ruido externo:
+    Answer the main question without unrelated noise:
 
-    Si este test pasa, el patrón exacto de `prueba4.py` NO tiene un fallo general
-    de SERIAL/autoincrement.
+    If this test passes, the exact `prueba4.py` pattern does NOT have a general
+    SERIAL/autoincrement failure.
     """
     result = _run_probe4_style_autoincrement_roundtrip(engine, unique_name())
 
@@ -178,12 +179,12 @@ def test_probe4_style_autoincrement_still_works_after_failed_savepoint(
     force_unsupported_savepoint_sql,
 ):
     """
-    Aísla la hipótesis de contaminación por el SAVEPOINT fallido anterior.
+    Isolate the hypothesis of contamination from the previous failed SAVEPOINT.
 
-    Si este test pasa también, la respuesta es muy fuerte:
-    - SERIAL no falla.
-    - ni siquiera un SAVEPOINT inválido previo deja el engine en un estado que
-      rompa este roundtrip de autoincrement, siempre que la conexión se limpie.
+    If this test also passes, the conclusion is very strong:
+    - SERIAL does not fail.
+    - Even a prior invalid SAVEPOINT does not leave the engine in a state that
+      breaks this autoincrement round trip, provided the connection is cleaned.
     """
     savepoint_outcome = force_unsupported_savepoint_sql()
     result = _run_probe4_style_autoincrement_roundtrip(engine, unique_name())
@@ -202,10 +203,10 @@ def test_probe4_style_autoincrement_still_works_after_failed_savepoint(
 @pytest.mark.optional_probe_isolation
 def test_probe4_style_autoincrement_matches_existing_working_contract(engine, unique_name):
     """
-    Cruza el caso de `prueba4.py` con el contrato que ya sabíamos que funciona:
-    Integer(primary_key=True) debe compilar como SERIAL para Informix.
+    Compare the `prueba4.py` case with the contract already known to work:
+    Integer(primary_key=True) must compile as SERIAL for Informix.
 
-    Esto evita confundir un fallo de SQL/DDL con un fallo del ORM flush.
+    This prevents confusing a SQL/DDL failure with an ORM flush failure.
     """
     table_name = unique_name()
     metadata = MetaData()

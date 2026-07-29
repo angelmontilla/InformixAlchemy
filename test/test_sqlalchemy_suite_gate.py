@@ -37,8 +37,8 @@ def test_supported_dialect_contract():
         None,
         "pyodbc",
     )
-    # Informix solo ofrece namespaces de propietario aislados en
-    # bases ANSI. Antes de initialize(), el valor conservador es False.
+    # Informix provides isolated owner namespaces only in ANSI databases.
+    # Before initialize(), the conservative value is False.
     assert dialect.supports_schemas is False
     assert dialect.is_ansi_database is False
 

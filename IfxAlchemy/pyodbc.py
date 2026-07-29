@@ -29,7 +29,6 @@ from sqlalchemy import util
 from sqlalchemy.connectors.pyodbc import PyODBCConnector
 from sqlalchemy.engine import BindTyping
 
-# from . import reflection as ifx_reflection
 from .base import (
     DBCLOB,
     LONGVARGRAPHIC,

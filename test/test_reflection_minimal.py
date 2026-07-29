@@ -39,7 +39,7 @@ def db_builder(engine):
     - create_sqls: str | list[str]
     - drop_sqls: str | list[str]
 
-    Ejecuta CREATE con commit explícito y limpia al final en orden inverso.
+    Execute CREATE with an explicit commit and clean up in reverse order.
     """
     created_groups: list[list[str]] = []
 
@@ -175,7 +175,7 @@ def test_has_table_and_get_table_names(engine, basic_reflection_objects):
         table_names = insp.get_table_names()
         assert table_name in table_names, table_names
 
-        # get_table_names() debe listar tablas, no vistas
+        # get_table_names() must list tables, not views
         assert view_name not in table_names, table_names
 
 
@@ -426,7 +426,7 @@ def test_get_foreign_keys_single_column(engine, single_fk_objects):
     with engine.connect() as connection:
         insp = inspect(connection)
 
-        # Pasamos schema explícito para congelar también referred_schema
+        # Pass an explicit schema to make referred_schema deterministic as well
         fks = insp.get_foreign_keys(child_name, schema=expected_schema)
 
     assert len(fks) == 1, fks

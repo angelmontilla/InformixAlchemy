@@ -290,7 +290,7 @@ class IfxReflector(BaseReflector):
         }
 
     def _resolved_owner(self, schema=None):
-        """Convierte un schema SQLAlchemy en propietario Informix."""
+        """Convert a SQLAlchemy schema into an Informix owner."""
 
         owner = (
             self.default_schema_name
@@ -322,8 +322,8 @@ class IfxReflector(BaseReflector):
         cleaned = self._clean_str(name)
         if cleaned is None:
             return None
-        # Informix persiste los identificadores no quoted en minúsculas
-        # dentro del catálogo con DELIMIDENT=Y.
+        # Informix stores unquoted identifiers in lowercase in the catalog
+        # when DELIMIDENT=Y is enabled.
         return cleaned.lower()
 
     def _get_table_row(self, connection, table_name, schema=None, tabtypes=None):
@@ -338,9 +338,9 @@ class IfxReflector(BaseReflector):
         if is_explicitly_quoted:
             lookup_name = cleaned_name
         else:
-            # Un nombre no quoted en Informix debe plegarse a la forma
-            # case-insensitive del catálogo, no buscarse con el mixed-case
-            # recibido desde Python.
+            # An unquoted Informix name must be folded to the catalog's
+            # case-insensitive form instead of being looked up with the
+            # mixed-case value received from Python.
             lookup_name = self._fold_unquoted_lookup_name(cleaned_name)
 
         placeholders = ", ".join("?" for _ in tabtypes)
@@ -1212,7 +1212,7 @@ class IfxReflector(BaseReflector):
 
     @reflection.cache
     def get_schema_names(self, connection, **kw):
-        """Enumera propietarios de objetos y usuarios capaces de poseerlos."""
+        """List object owners and users capable of owning objects."""
 
         _ = kw
 

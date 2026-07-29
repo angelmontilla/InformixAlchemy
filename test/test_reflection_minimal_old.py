@@ -18,11 +18,11 @@ def _norm(value: str | None) -> str | None:
 @pytest.fixture
 def reflected_table(engine):
     """
-    Crea una tabla real, mínima y limpia al final.
+    Create a real minimal table and clean it up afterward.
 
-    Ojo:
-    - Usamos SQL nativo a propósito para no mezclar este test con DDL del dialecto.
-    - Hacemos commit explícito tras CREATE/DROP.
+    Note:
+    - Native SQL is used intentionally to avoid mixing this test with dialect DDL.
+    - Commit explicitly after CREATE/DROP.
     """
     table_name = _name()
 
@@ -86,8 +86,8 @@ def test_get_columns(engine, reflected_table):
     assert by_name["name"]["type"]._type_affinity is sqltypes.String
 
     # qty
-    # nullable puede venir como True o None según cómo esté devolviendo reflection
-    # en esta fase temprana; lo importante aquí es nombre + afinidad de tipo.
+    # nullable may be True or None depending on the reflection result at this
+    # early stage; the important properties here are the name and type affinity.
     assert by_name["qty"]["type"]._type_affinity is sqltypes.Integer
 
 

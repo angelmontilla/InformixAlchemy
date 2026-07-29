@@ -254,7 +254,7 @@ class Requirements(SuiteRequirements):
 
     @property
     def reflects_pk_names(self):
-        """Informix devuelve el nombre de la clave primaria."""
+        """Informix returns the primary key name."""
 
         return exclusions.open()
 
@@ -271,61 +271,61 @@ class Requirements(SuiteRequirements):
 
     @property
     def unicode_data(self):
-        """El contrato actual no garantiza Unicode arbitrario extremo a extremo."""
+        """The current contract does not guarantee arbitrary end-to-end Unicode."""
 
         return exclusions.closed()
 
     @property
     def unicode_data_no_special_types(self):
-        """VARCHAR/TEXT no garantizan todos los caracteres Unicode del test."""
+        """VARCHAR/TEXT do not guarantee every Unicode character used by the test."""
 
         return exclusions.closed()
 
     @property
     def time(self):
-        """Time se representa como DATETIME HOUR TO SECOND."""
+        """Time is represented as DATETIME HOUR TO SECOND."""
 
         return exclusions.open()
 
     @property
     def time_implicit_bound(self):
-        """Un parámetro TIME aislado carece de contexto de tipo fiable en ODBC."""
+        """An isolated TIME parameter lacks reliable ODBC type context."""
 
         return exclusions.closed()
 
     @property
     def date_implicit_bound(self):
-        """Un parámetro DATE aislado no se tipa de forma fiable."""
+        """An isolated DATE parameter is not typed reliably."""
 
         return exclusions.closed()
 
     @property
     def datetime_implicit_bound(self):
-        """Un parámetro DATETIME aislado no se tipa de forma fiable."""
+        """An isolated DATETIME parameter is not typed reliably."""
 
         return exclusions.closed()
 
     @property
     def standalone_null_binds_whereclause(self):
-        """Un NULL sin columna asociada no tiene tipo ODBC determinable."""
+        """A NULL without an associated column has no determinable ODBC type."""
 
         return exclusions.closed()
 
     @property
     def implicit_decimal_binds(self):
-        """DECIMAL seleccionado como parámetro aislado no está garantizado."""
+        """DECIMAL selected as an isolated parameter is not guaranteed."""
 
         return exclusions.closed()
 
     @property
     def literal_float_coercion(self):
-        """FLOAT seleccionado como parámetro aislado no está garantizado."""
+        """FLOAT selected as an isolated parameter is not guaranteed."""
 
         return exclusions.closed()
 
     @property
     def expressions_against_unbounded_text(self):
-        """Informix TEXT es un LOB y no admite comparaciones ordinarias."""
+        """Informix TEXT is a LOB and does not support ordinary comparisons."""
 
         return exclusions.closed()
 
@@ -440,7 +440,7 @@ class Requirements(SuiteRequirements):
 
     @property
     def sql_expression_limit_offset(self):
-        """FIRST/SKIP requieren valores enteros compatibles, no expresiones."""
+        """FIRST/SKIP require compatible integer values, not expressions."""
 
         return exclusions.closed()
 

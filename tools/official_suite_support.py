@@ -74,10 +74,10 @@ def split_names(raw: str) -> set[str]:
 
 def load_official_suite_environment() -> Path:
     """
-    Carga el fichero exclusivo de las suites oficiales.
+    Load the environment file used exclusively by the official suites.
 
-    override=True evita que variables antiguas de CMD hagan
-    que la suite se conecte accidentalmente a otra base.
+    override=True prevents stale CMD variables from causing the suite to
+    connect accidentally to another database.
     """
     if not OFFICIAL_ENV_FILE.is_file():
         raise RuntimeError(
@@ -101,10 +101,10 @@ def load_official_suite_environment() -> Path:
 
 def official_suite_dburi() -> str:
     """
-    Devuelve exclusivamente la URL de las suites oficiales.
+    Return only the official suites' database URL.
 
-    No existe fallback a INFORMIX_SQLALCHEMY_URL porque esa
-    variable apunta a prueba4db y no debe utilizarse aquí.
+    There is no fallback to INFORMIX_SQLALCHEMY_URL because that variable
+    points to prueba4db and must not be used here.
     """
     url = os.getenv(
         "INFORMIX_SQLALCHEMY_SUITE_URL",
@@ -129,7 +129,7 @@ def resolve_junit_file(
     default_name: str,
 ) -> Path:
     """
-    Resuelve y crea el directorio padre del informe JUnit.
+    Resolve and create the parent directory for the JUnit report.
     """
     value = raw_path.strip()
 
@@ -186,10 +186,10 @@ def _collect_official_suite_inventory(
     connection,
 ) -> dict[str, dict[str, list[str]]]:
     """
-    Inventaría tablas, vistas y secuencias de todos los propietarios de test.
+    Inventory tables, views, and sequences for all test owners.
 
-    Se consulta directamente ``systables`` para que la autorización previa no
-    dependa de las funciones de reflexión que la suite oficial está validando.
+    Query ``systables`` directly so prior authorization does not depend on the
+    reflection functions being validated by the official suite.
     """
     default_owner = _clean_catalog_name(
         connection.exec_driver_sql(
@@ -268,11 +268,11 @@ def verify_official_suite_database(
     require_empty: bool | None = None,
 ) -> dict[str, Any]:
     """
-    Verifica la identidad y el inventario de la base destructiva.
+    Verify the identity and inventory of the destructive test database.
 
-    ``require_empty=False`` sólo relaja la comprobación de inventario. Nunca
-    desactiva las barreras de nombre esperado, bases prohibidas o autorización
-    destructiva explícita.
+    ``require_empty=False`` only relaxes the inventory check. It never disables
+    the expected-name guard, prohibited-database guard, or explicit destructive
+    authorization requirement.
     """
     if not env_bool(
         "ALLOW_OFFICIAL_SUITE_DESTRUCTIVE_TESTS",

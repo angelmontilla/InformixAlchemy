@@ -16,28 +16,28 @@ class Requirements(
     AlembicSuiteRequirements,
 ):
     """
-    Requisitos usados exclusivamente por la
-    suite externa de Alembic.
+    Requirements used exclusively by the external
+    Alembic suite.
 
-    InformixRequirements conserva las capacidades
-    y limitaciones del dialecto.
+    InformixRequirements preserves the dialect's
+    capabilities and limitations.
 
-    AlembicSuiteRequirements añade propiedades
-    que no existen en la suite normal de
-    SQLAlchemy, por ejemplo:
+    AlembicSuiteRequirements adds properties
+    that do not exist in the regular SQLAlchemy
+    suite, for example:
 
     - comments
     - alter_column
     - computed_columns
     - identity_columns
     - foreign_key_name_reflection
-    - opciones FK propias de Alembic
+    - Alembic-specific foreign key options
     """
 
     @property
     def fk_onupdate(self):
         """
-        Informix no soporta acciones referenciales
-        ON UPDATE en el contrato actual.
+        Informix does not support ON UPDATE referential
+        actions under the current contract.
         """
         return exclusions.closed()
