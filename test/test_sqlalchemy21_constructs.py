@@ -150,5 +150,5 @@ else:
         assert " AS SELECT " in compiled.upper()
         assert compiled == (
             "CREATE TABLE sa21_literal AS SELECT 1 AS one, 'x' AS txt "
-            "FROM systables WHERE tabid = 1"
+            "FROM sysmaster:informix.sysdual"
         )
