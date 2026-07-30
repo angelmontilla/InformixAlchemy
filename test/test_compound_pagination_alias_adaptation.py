@@ -2,21 +2,14 @@ from __future__ import annotations
 
 import re
 
-import pytest
 from sqlalchemy import Column
 from sqlalchemy import Integer
 from sqlalchemy import MetaData
 from sqlalchemy import Table
 from sqlalchemy import select
 from sqlalchemy import union
-from sqlalchemy.exc import SADeprecationWarning
 
 from IfxAlchemy.pyodbc import IfxDialect_pyodbc
-
-
-_DEPRECATED_COLUMNS_MESSAGE = (
-    "The SelectBase.c and SelectBase.columns attributes are deprecated"
-)
 
 
 def _table() -> Table:
@@ -30,12 +23,8 @@ def _table() -> Table:
     )
 
 
-def _ordered_through_deprecated_compound_column(compound):
-    with pytest.warns(
-        SADeprecationWarning,
-        match=re.escape(_DEPRECATED_COLUMNS_MESSAGE),
-    ):
-        return compound.order_by(compound.c.id)
+def _ordered_by_compound_result_column(compound):
+    return compound.order_by(compound.selected_columns.id)
 
 
 def _compiled_sql(statement) -> str:
@@ -62,7 +51,7 @@ def test_distinct_selectable_in_unions_uses_current_outer_alias():
     first = select(table).where(table.c.id == 2).distinct()
     second = select(table).where(table.c.id == 3).distinct()
 
-    statement = _ordered_through_deprecated_compound_column(
+    statement = _ordered_by_compound_result_column(
         union(first, second).limit(2)
     )
     sql = _assert_outer_order_by_uses_outer_compound_alias(statement)
@@ -89,7 +78,7 @@ def test_limit_offset_aliased_selectable_in_unions_uses_current_outer_alias():
         .select()
     )
 
-    statement = _ordered_through_deprecated_compound_column(
+    statement = _ordered_by_compound_result_column(
         union(first, second).limit(2)
     )
     sql = _assert_outer_order_by_uses_outer_compound_alias(statement)
@@ -112,7 +101,7 @@ def test_limit_offset_selectable_in_unions_uses_current_outer_alias():
         .order_by(table.c.id)
     )
 
-    statement = _ordered_through_deprecated_compound_column(
+    statement = _ordered_by_compound_result_column(
         union(first, second).limit(2)
     )
     sql = _assert_outer_order_by_uses_outer_compound_alias(statement)
@@ -125,7 +114,7 @@ def test_order_by_selectable_in_unions_uses_current_outer_alias():
     first = select(table).where(table.c.id == 2).order_by(table.c.id)
     second = select(table).where(table.c.id == 3).order_by(table.c.id)
 
-    statement = _ordered_through_deprecated_compound_column(
+    statement = _ordered_by_compound_result_column(
         union(first, second).limit(2)
     )
     sql = _assert_outer_order_by_uses_outer_compound_alias(statement)
@@ -138,7 +127,7 @@ def test_skip_first_compound_uses_current_outer_alias():
     first = select(table).where(table.c.id <= 2)
     second = select(table).where(table.c.id >= 3)
 
-    statement = _ordered_through_deprecated_compound_column(
+    statement = _ordered_by_compound_result_column(
         union(first, second).limit(2).offset(1)
     )
     sql = _assert_outer_order_by_uses_outer_compound_alias(statement)
