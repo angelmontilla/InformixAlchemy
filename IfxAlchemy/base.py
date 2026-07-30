@@ -1955,13 +1955,13 @@ class IfxCompiler(compiler.SQLCompiler):
 
         inner = cs.order_by(None).limit(None).offset(None)
         inner_alias = inner.alias()
-        # A CompoundSelect.c reference creates a deprecated implicit alias.
-        # Once the compound is cloned without its row limit and wrapped in a
-        # new derived table, that old alias is no longer present in the FROM
-        # clause.  Normal proxy adaptation cannot always relate the two alias
-        # objects, even though they export the same compound-result columns.
-        # Name fallback is safe here because ORDER BY belongs to the compound
-        # result and must therefore resolve against the unique exported column
+        # ORDER BY expressions can reference columns exported by the original
+        # CompoundSelect. Once the compound is cloned without pagination and
+        # wrapped in a new derived table, those expressions must be adapted to
+        # the current outer alias.
+        #
+        # Name-based fallback is safe here because ORDER BY belongs to the
+        # compound result and therefore resolves against the exported column
         # namespace of ``inner_alias``.
         adapter = sql_util.ClauseAdapter(
             inner_alias,
