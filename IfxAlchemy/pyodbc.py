@@ -23,11 +23,13 @@
 # limitations under the License.
 
 from urllib.parse import unquote
+import threading
 
 from sqlalchemy import types as sa_types
 from sqlalchemy import util
 from sqlalchemy.connectors.pyodbc import PyODBCConnector
 from sqlalchemy.engine import BindTyping
+from sqlalchemy.exc import ArgumentError
 
 from .base import (
     DBCLOB,
@@ -207,6 +209,58 @@ class IfxExecutionContext_pyodbc(
 
 
 class IfxDialect_pyodbc(PyODBCConnector, IfxDialect):
+    # ODBC transaction isolation constants are stable values defined by the
+    # ODBC specification.  The runtime DBAPI constants are preferred when
+    # available, while these values keep the dialect testable with lightweight
+    # DBAPI doubles and older pyodbc builds.
+    _odbc_sql_txn_read_uncommitted = 1
+    _odbc_sql_txn_read_committed = 2
+    _odbc_sql_txn_repeatable_read = 4
+    _odbc_sql_txn_serializable = 8
+
+    # Informix exposes four native session isolation modes through
+    # ``SET ISOLATION``: DIRTY READ, COMMITTED READ, CURSOR STABILITY and
+    # REPEATABLE READ.  The ODBC connection attribute only exposes three
+    # generic levels and cannot distinguish COMMITTED READ from CURSOR
+    # STABILITY, so SQLAlchemy isolation changes are emitted with Informix SQL
+    # rather than SQL_ATTR_TXN_ISOLATION.
+    #
+    # READ STABILITY / RS is retained as a compatibility spelling from the
+    # legacy IfxPy backend. Informix has no separate native READ STABILITY
+    # mode, therefore it maps conservatively to strict REPEATABLE READ.
+    _isolation_level_to_informix_sql = {
+        "DIRTY READ": "DIRTY READ",
+        "UNCOMMITTED READ": "DIRTY READ",
+        "UR": "DIRTY READ",
+        "READ UNCOMMITTED": "DIRTY READ",
+        "COMMITTED READ": "COMMITTED READ",
+        "READ COMMITTED": "COMMITTED READ",
+        "CURSOR STABILITY": "CURSOR STABILITY",
+        "CS": "CURSOR STABILITY",
+        "READ STABILITY": "REPEATABLE READ",
+        "RS": "REPEATABLE READ",
+        "REPEATABLE READ": "REPEATABLE READ",
+        "RR": "REPEATABLE READ",
+        "SERIALIZABLE": "REPEATABLE READ",
+    }
+
+    _advertised_isolation_levels = (
+        "AUTOCOMMIT",
+        "READ UNCOMMITTED",
+        "READ COMMITTED",
+        "REPEATABLE READ",
+        "SERIALIZABLE",
+        "DIRTY READ",
+        "UNCOMMITTED READ",
+        "UR",
+        "COMMITTED READ",
+        "CURSOR STABILITY",
+        "CS",
+        "READ STABILITY",
+        "RS",
+        "RR",
+    )
+
     # Informix TEXT parameters must be described to the ODBC driver as
     # SQL_LONGVARCHAR. Restrict setinputsizes() to that DBAPI type so that
     # ordinary parameters continue to use pyodbc's normal type inference.
@@ -243,6 +297,25 @@ class IfxDialect_pyodbc(PyODBCConnector, IfxDialect):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+
+        # SQLAlchemy stores the create_engine(isolation_level=...) value on
+        # the dialect and compares it with default_isolation_level when a
+        # pooled connection is reset. Normalize the engine-level spelling at
+        # construction time so aliases such as ``cursor_stability`` use the
+        # same canonical form reported by get_isolation_level().
+        if self._on_connect_isolation_level is not None:
+            self._on_connect_isolation_level = self._normalize_isolation_level(
+                self._on_connect_isolation_level
+            )
+
+        # pyodbc exposes SQLSetConnectAttr through set_attr(), but it does not
+        # expose SQLGetConnectAttr.  Keep the last successfully requested
+        # level per physical DBAPI connection so Connection.get_isolation_level
+        # can report the effective setting and SQLAlchemy can restore pooled
+        # connections deterministically.  Entries are removed when the DBAPI
+        # connection is physically closed.
+        self._isolation_level_by_connection_id = {}
+        self._isolation_level_state_lock = threading.RLock()
 
         if self.dbapi is not None:
             sql_longvarchar = getattr(
@@ -283,6 +356,198 @@ class IfxDialect_pyodbc(PyODBCConnector, IfxDialect):
     def import_dbapi(cls):
         return __import__("pyodbc")
 
+    @staticmethod
+    def _normalize_isolation_level(level):
+        if level is None:
+            return ""
+
+        normalized = str(level).strip().upper()
+        normalized = normalized.replace("_", " ").replace("-", " ")
+        return " ".join(normalized.split())
+
+    def _dbapi_constant(self, name, fallback):
+        if self.dbapi is None:
+            return fallback
+        return getattr(self.dbapi, name, fallback)
+
+    def _remember_isolation_level(self, dbapi_connection, level):
+        with self._isolation_level_state_lock:
+            self._isolation_level_by_connection_id[id(dbapi_connection)] = level
+
+    def _remembered_isolation_level(self, dbapi_connection):
+        with self._isolation_level_state_lock:
+            return self._isolation_level_by_connection_id.get(
+                id(dbapi_connection)
+            )
+
+    def _forget_isolation_level(self, dbapi_connection):
+        with self._isolation_level_state_lock:
+            self._isolation_level_by_connection_id.pop(
+                id(dbapi_connection),
+                None,
+            )
+
+    def get_isolation_level_values(self, dbapi_connection):
+        """Return every isolation-level spelling accepted by the dialect."""
+
+        return list(self._advertised_isolation_levels)
+
+    def get_default_isolation_level(self, dbapi_connection):
+        """Return the SQLAlchemy reset baseline for this physical connection.
+
+        Without an engine-level isolation setting, the baseline is the ODBC
+        driver's ``SQL_DEFAULT_TXN_ISOLATION`` value.  When the Engine was
+        created with ``isolation_level=...``, SQLAlchemy applies that setting
+        through its built-in first-connect hook *before* dialect
+        initialization calls this method.  In that case, the configured level
+        is the initial connection level and therefore must become
+        ``default_isolation_level`` for this Engine.
+
+        Returning the raw driver default after an engine-level setting would
+        make ``DefaultDialect.reset_isolation_level()`` compare two different
+        baselines and fail during pool check-in.  AUTOCOMMIT is the exception:
+        it is a DBAPI mode layered over an underlying transactional level, so
+        the latter remains the reset baseline reported here.
+        """
+
+        default_value = self._odbc_sql_txn_read_committed
+        info_code = None
+
+        if self.dbapi is not None:
+            info_code = getattr(
+                self.dbapi,
+                "SQL_DEFAULT_TXN_ISOLATION",
+                None,
+            )
+
+        if info_code is not None and hasattr(dbapi_connection, "getinfo"):
+            try:
+                default_value = int(dbapi_connection.getinfo(info_code))
+            except Exception:
+                # SQLAlchemy requires this method not to leak driver-specific
+                # exceptions during first-connect initialization.
+                default_value = self._odbc_sql_txn_read_committed
+
+        default_names = {
+            self._dbapi_constant(
+                "SQL_TXN_READ_UNCOMMITTED",
+                self._odbc_sql_txn_read_uncommitted,
+            ): "READ UNCOMMITTED",
+            self._dbapi_constant(
+                "SQL_TXN_READ_COMMITTED",
+                self._odbc_sql_txn_read_committed,
+            ): "READ COMMITTED",
+            self._dbapi_constant(
+                "SQL_TXN_REPEATABLE_READ",
+                self._odbc_sql_txn_repeatable_read,
+            ): "READ STABILITY",
+            self._dbapi_constant(
+                "SQL_TXN_SERIALIZABLE",
+                self._odbc_sql_txn_serializable,
+            ): "SERIALIZABLE",
+        }
+        driver_default_level = default_names.get(
+            default_value,
+            "READ COMMITTED",
+        )
+
+        engine_level = self._on_connect_isolation_level
+        if engine_level and engine_level != "AUTOCOMMIT":
+            # The built-in on-connect listener has already called
+            # set_isolation_level(), so the remembered value is the effective
+            # server setting.  Fall back to the normalized engine value only
+            # for lightweight DBAPI doubles that bypass that listener.
+            initial_level = (
+                self._remembered_isolation_level(dbapi_connection)
+                or engine_level
+            )
+            self._remember_isolation_level(
+                dbapi_connection,
+                initial_level,
+            )
+            return initial_level
+
+        # No engine-wide override (or AUTOCOMMIT, which does not replace the
+        # underlying transactional level): retain the physical driver default.
+        if self._remembered_isolation_level(dbapi_connection) is None:
+            self._remember_isolation_level(
+                dbapi_connection,
+                driver_default_level,
+            )
+
+        return driver_default_level
+
+    def get_isolation_level(self, dbapi_connection):
+        """Return the last effective non-autocommit level for a connection."""
+
+        level = self._remembered_isolation_level(dbapi_connection)
+        if level is not None:
+            return level
+        return self.get_default_isolation_level(dbapi_connection)
+
+    def set_isolation_level(self, dbapi_connection, level):
+        """Set the enduring Informix session isolation level.
+
+        Informix 14.10+ supports ``SET ISOLATION`` as a complete-connection
+        setting.  Using the native statement is required to preserve the
+        distinction between COMMITTED READ and CURSOR STABILITY, which the
+        generic ODBC isolation attribute cannot represent.
+
+        SQLAlchemy invokes this hook only when no SQLAlchemy transaction is
+        active.  If the connection was in DBAPI autocommit mode, leave that
+        mode before applying a transactional isolation level.
+        """
+
+        normalized_level = self._normalize_isolation_level(level)
+
+        if normalized_level == "AUTOCOMMIT":
+            dbapi_connection.autocommit = True
+            return
+
+        isolation_clause = self._isolation_level_to_informix_sql.get(
+            normalized_level
+        )
+        if isolation_clause is None:
+            raise ArgumentError(
+                "Invalid value %r for isolation_level. "
+                "Valid isolation levels for %r are %s"
+                % (
+                    normalized_level,
+                    self.name,
+                    ", ".join(self._advertised_isolation_levels),
+                )
+            )
+
+        was_autocommit = bool(
+            getattr(dbapi_connection, "autocommit", False)
+        )
+        if was_autocommit:
+            dbapi_connection.autocommit = False
+
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute(
+                "SET ISOLATION TO %s" % isolation_clause
+            )
+        except Exception:
+            # Do not publish an isolation level that the server rejected. If
+            # this call was leaving AUTOCOMMIT, restore the original DBAPI
+            # mode so the failed operation has no hidden side effect.
+            if was_autocommit:
+                dbapi_connection.autocommit = True
+            raise
+        finally:
+            cursor.close()
+
+        self._remember_isolation_level(
+            dbapi_connection,
+            normalized_level,
+        )
+
+    def do_close(self, dbapi_connection):
+        self._forget_isolation_level(dbapi_connection)
+        super().do_close(dbapi_connection)
+
     def on_connect(self):
         super_on_connect = super().on_connect()
 
@@ -306,6 +571,21 @@ class IfxDialect_pyodbc(PyODBCConnector, IfxDialect):
         return on_connect
 
     def do_ping(self, dbapi_connection):
+        """Check the connection without leaving an Informix transaction open.
+
+        The Informix ODBC driver starts a transaction for the SELECT used by
+        pool pre-ping when DBAPI autocommit is disabled.  SQLAlchemy performs
+        pre-ping before it creates the public ``Connection`` transaction
+        state, so an unclosed driver transaction is invisible to SQLAlchemy.
+        A subsequent ``SQL_ATTR_TXN_ISOLATION`` change then fails with
+        ``HY011 / -11119`` (attribute cannot be set now).
+
+        Roll back only after a successful ping and only in manual-commit
+        mode.  Pool pre-ping runs while the physical connection is checked
+        out and after the previous pool reset, so no user transaction can be
+        active at this point.
+        """
+
         cursor = dbapi_connection.cursor()
 
         try:
@@ -315,9 +595,13 @@ class IfxDialect_pyodbc(PyODBCConnector, IfxDialect):
                 "ORDER BY tabname"
             )
             cursor.fetchone()
-            return True
         finally:
             cursor.close()
+
+        if not getattr(dbapi_connection, "autocommit", False):
+            dbapi_connection.rollback()
+
+        return True
 
     def create_connect_args(self, url):
         """

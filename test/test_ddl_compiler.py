@@ -507,7 +507,7 @@ def test_fetch_compiles_as_first(dialect, sample_table):
 
 
 @pytest.mark.ddl_compiler
-def test_limit_offset_compiles_with_row_number_wrapper(dialect, sample_table):
+def test_limit_offset_compiles_with_native_skip_first(dialect, sample_table):
     stmt = (
         select(sample_table.c.id, sample_table.c.name)
         .order_by(sample_table.c.id)
@@ -518,14 +518,16 @@ def test_limit_offset_compiles_with_row_number_wrapper(dialect, sample_table):
     compiled = str(stmt.compile(dialect=dialect))
     upper = _upper_sql(compiled)
 
-    assert "ROW_NUMBER() OVER (ORDER BY SA_COMPILE_BASIC.ID)" in upper
-    assert "IFX_RN" in upper
-    _assert_row_number_lower_bound(upper)
-    _assert_row_number_upper_bound(upper)
+    assert upper.startswith(
+        "SELECT SKIP __[POSTCOMPILE_PARAM_1] "
+        "FIRST __[POSTCOMPILE_PARAM_2]"
+    )
+    assert "ROW_NUMBER" not in upper
+    assert upper.endswith("ORDER BY SA_COMPILE_BASIC.ID")
 
 
 @pytest.mark.ddl_compiler
-def test_fetch_offset_compiles_with_row_number_wrapper(dialect, sample_table):
+def test_fetch_offset_compiles_with_native_skip_first(dialect, sample_table):
     stmt = (
         select(sample_table.c.id, sample_table.c.name)
         .order_by(sample_table.c.id)
@@ -536,15 +538,19 @@ def test_fetch_offset_compiles_with_row_number_wrapper(dialect, sample_table):
     compiled = str(stmt.compile(dialect=dialect))
     upper = _upper_sql(compiled)
 
-    assert "ROW_NUMBER() OVER (ORDER BY SA_COMPILE_BASIC.ID)" in upper
-    assert "IFX_RN" in upper
-    _assert_row_number_lower_bound(upper)
-    _assert_row_number_upper_bound(upper)
+    assert upper.startswith(
+        "SELECT SKIP __[POSTCOMPILE_PARAM_1] "
+        "FIRST __[POSTCOMPILE_PARAM_2]"
+    )
+    assert "ROW_NUMBER" not in upper
     assert "FETCH FIRST" not in upper
 
 
 @pytest.mark.ddl_compiler
-def test_limit_offset_with_bound_parameters_compiles(dialect, sample_table):
+def test_limit_offset_integer_values_compile_as_postcompile_skip_first(
+    dialect,
+    sample_table,
+):
     stmt = (
         select(sample_table.c.id)
         .order_by(sample_table.c.id)
@@ -555,14 +561,15 @@ def test_limit_offset_with_bound_parameters_compiles(dialect, sample_table):
     compiled = str(stmt.compile(dialect=dialect))
     upper = _upper_sql(compiled)
 
-    assert "ROW_NUMBER()" in upper
-    assert "IFX_RN" in upper
-    _assert_row_number_lower_bound(upper)
-    _assert_row_number_upper_bound(upper)
+    assert upper.startswith(
+        "SELECT SKIP __[POSTCOMPILE_PARAM_1] "
+        "FIRST __[POSTCOMPILE_PARAM_2]"
+    )
+    assert "ROW_NUMBER" not in upper
 
 
 @pytest.mark.ddl_compiler
-def test_offset_zero_keeps_cache_safe_lower_bound(dialect, sample_table):
+def test_offset_zero_keeps_cache_safe_native_skip(dialect, sample_table):
     stmt = (
         select(sample_table.c.id)
         .order_by(sample_table.c.id)
@@ -573,9 +580,11 @@ def test_offset_zero_keeps_cache_safe_lower_bound(dialect, sample_table):
     compiled = str(stmt.compile(dialect=dialect))
     upper = _upper_sql(compiled)
 
-    assert "ROW_NUMBER()" in upper
-    _assert_row_number_lower_bound(upper)
-    _assert_row_number_upper_bound(upper)
+    assert upper.startswith(
+        "SELECT SKIP __[POSTCOMPILE_PARAM_1] "
+        "FIRST __[POSTCOMPILE_PARAM_2]"
+    )
+    assert "ROW_NUMBER" not in upper
 
 
 @pytest.mark.ddl_compiler
@@ -622,7 +631,11 @@ def test_limit_offset_keeps_scalar_subquery_projection_intact(
         "(SELECT SQ.CODE FROM SA_COMPILE_BASIC AS SQ "
         "WHERE SQ.ID = SA_COMPILE_BASIC.ID) AS CODE_COPY"
     ) in upper
-    assert "ROW_NUMBER() OVER (ORDER BY SA_COMPILE_BASIC.ID)" in upper
+    assert upper.startswith(
+        "SELECT SKIP __[POSTCOMPILE_PARAM_1] "
+        "FIRST __[POSTCOMPILE_PARAM_2]"
+    )
+    assert "ROW_NUMBER" not in upper
 
 
 @pytest.mark.ddl_compiler
@@ -647,6 +660,11 @@ def test_limit_offset_keeps_function_arguments_with_commas_intact(
         "__[POSTCOMPILE_REPLACE_2]) AS NAME2"
     ) in upper
     assert compiled.literal_execute_params
+    assert upper.startswith(
+        "SELECT SKIP __[POSTCOMPILE_PARAM_1] "
+        "FIRST __[POSTCOMPILE_PARAM_2]"
+    )
+    assert "ROW_NUMBER" not in upper
 
 
 @pytest.mark.ddl_compiler
@@ -665,7 +683,11 @@ def test_limit_offset_keeps_unlabeled_function_projection_intact(
     assert "REPLACE(SA_COMPILE_BASIC.NAME," in upper
     assert "AS REPLACE_1" in upper
     assert "__IFX_" not in upper
-    assert "ROW_NUMBER() OVER () AS IFX_RN" in upper
+    assert upper.startswith(
+        "SELECT SKIP __[POSTCOMPILE_PARAM_1] "
+        "FIRST __[POSTCOMPILE_PARAM_2]"
+    )
+    assert "ROW_NUMBER" not in upper
 
 
 @pytest.mark.ddl_compiler
@@ -677,13 +699,10 @@ def test_offset_keeps_unlabeled_replace_projection_intact_without_limit(
     compiled = stmt.compile(dialect=dialect)
     upper = _upper_sql(str(compiled))
 
-    assert (
-        "FROM (SELECT REPLACE(SA_COMPILE_BASIC.NAME, "
-        "__[POSTCOMPILE_REPLACE_"
-    ) in upper
+    assert upper.startswith("SELECT SKIP __[POSTCOMPILE_PARAM_1]")
+    assert "REPLACE(SA_COMPILE_BASIC.NAME, __[POSTCOMPILE_REPLACE_" in upper
     assert compiled.literal_execute_params
-    assert ") AS REPLACE_1, ROW_NUMBER() OVER () AS IFX_RN" in upper
-    assert "WHERE ANON_1.IFX_RN > __[POSTCOMPILE_" in upper
+    assert "ROW_NUMBER" not in upper
     assert "__IFX_" not in upper
 
 
@@ -706,11 +725,12 @@ def test_limit_offset_keeps_cte_projection_intact(dialect, sample_table):
         "SA_COMPILE_BASIC.NAME AS NAME FROM SA_COMPILE_BASIC)"
     ) in upper
     assert (
-        "FROM (SELECT CTE1.ID AS ID, CTE1.NAME AS NAME, "
-        "ROW_NUMBER() OVER () AS IFX_RN FROM CTE1) AS ANON_1"
+        "SELECT SKIP __[POSTCOMPILE_PARAM_1] "
+        "FIRST __[POSTCOMPILE_PARAM_2] CTE1.ID, CTE1.NAME FROM CTE1"
     ) in upper
     assert " AS ID AS " not in upper
     assert "__IFX_" not in upper
+    assert "ROW_NUMBER" not in upper
 
 
 @pytest.mark.ddl_compiler
@@ -728,16 +748,15 @@ def test_limit_offset_keeps_direct_cte_projection_intact(
         "SA_COMPILE_BASIC.NAME AS NAME FROM SA_COMPILE_BASIC)"
     ) in upper
     assert (
-        "FROM (SELECT CTE1.ID AS ID, CTE1.NAME AS NAME, "
-        "ROW_NUMBER() OVER () AS IFX_RN FROM CTE1) AS ANON_1"
+        "SELECT SKIP __[POSTCOMPILE_PARAM_1] "
+        "FIRST __[POSTCOMPILE_PARAM_2] CTE1.ID, CTE1.NAME FROM CTE1"
     ) in upper
-    _assert_row_number_lower_bound(upper)
-    _assert_row_number_upper_bound(upper)
     assert "__IFX_" not in upper
+    assert "ROW_NUMBER" not in upper
 
 
 @pytest.mark.ddl_compiler
-def test_offset_with_order_by_compiles_with_row_number_wrapper(
+def test_offset_with_order_by_compiles_with_native_skip(
     dialect, sample_table
 ):
     stmt = (
@@ -749,13 +768,11 @@ def test_offset_with_order_by_compiles_with_row_number_wrapper(
     compiled = str(stmt.compile(dialect=dialect))
     upper = _upper_sql(compiled)
 
-    assert (
-        "ROW_NUMBER() OVER (ORDER BY SA_COMPILE_BASIC.NAME, "
-        "SA_COMPILE_BASIC.ID)"
-    ) in upper
-    assert "ORDER BY ANON_1.IFX_RN" in upper
-    _assert_row_number_lower_bound(upper)
-    assert "<=" not in upper
+    assert upper.startswith("SELECT SKIP __[POSTCOMPILE_PARAM_1]")
+    assert upper.endswith(
+        "ORDER BY SA_COMPILE_BASIC.NAME, SA_COMPILE_BASIC.ID"
+    )
+    assert "ROW_NUMBER" not in upper
 
 
 @pytest.mark.ddl_compiler
@@ -1095,25 +1112,68 @@ def test_drop_sequence_compiles(dialect):
 
 
 @pytest.mark.ddl_compiler
-def test_create_sequence_if_not_exists_is_rejected(dialect):
-    statement = CreateSequence(
-        Sequence("other_seq"),
-        if_not_exists=True,
-    )
+def test_create_sequence_if_not_exists_compiles_natively(dialect):
+    sql = str(
+        CreateSequence(
+            Sequence("other_seq"),
+            if_not_exists=True,
+        ).compile(dialect=dialect)
+    ).upper()
 
-    with pytest.raises(CompileError, match="IF NOT EXISTS"):
-        statement.compile(dialect=dialect)
+    assert sql == "CREATE SEQUENCE IF NOT EXISTS OTHER_SEQ"
 
 
 @pytest.mark.ddl_compiler
-def test_drop_sequence_if_exists_is_rejected(dialect):
-    statement = DropSequence(
-        Sequence("other_seq"),
-        if_exists=True,
+def test_create_sequence_if_not_exists_preserves_schema_and_options(dialect):
+    sequence = Sequence(
+        "orders_id_seq",
+        schema="reporting",
+        start=10,
+        increment=5,
+        minvalue=1,
+        maxvalue=1000,
+        cache=20,
+        cycle=True,
     )
 
-    with pytest.raises(CompileError, match="IF EXISTS"):
-        statement.compile(dialect=dialect)
+    sql = _upper_sql(
+        str(
+            CreateSequence(
+                sequence,
+                if_not_exists=True,
+            ).compile(dialect=dialect)
+        )
+    )
+
+    assert sql == (
+        "CREATE SEQUENCE IF NOT EXISTS REPORTING.ORDERS_ID_SEQ "
+        "START WITH 10 INCREMENT BY 5 MINVALUE 1 MAXVALUE 1000 "
+        "CACHE 20 CYCLE"
+    )
+
+
+@pytest.mark.ddl_compiler
+def test_drop_sequence_if_exists_compiles_natively(dialect):
+    sql = str(
+        DropSequence(
+            Sequence("other_seq"),
+            if_exists=True,
+        ).compile(dialect=dialect)
+    ).upper()
+
+    assert sql == "DROP SEQUENCE IF EXISTS OTHER_SEQ"
+
+
+@pytest.mark.ddl_compiler
+def test_drop_sequence_if_exists_preserves_schema(dialect):
+    sql = str(
+        DropSequence(
+            Sequence("orders_id_seq", schema="reporting"),
+            if_exists=True,
+        ).compile(dialect=dialect)
+    ).upper()
+
+    assert sql == "DROP SEQUENCE IF EXISTS REPORTING.ORDERS_ID_SEQ"
 
 
 @pytest.mark.ddl_compiler
@@ -1130,13 +1190,13 @@ def test_limit_offset_untyped_bindparams_are_integer_typed(sample_table):
     compiled = statement.compile(dialect=dialect)
     sql_text = _upper_sql(str(compiled))
 
-    assert "IFX_RN > ?" in sql_text
-    assert "IFX_RN <= ? + ?" in sql_text
+    assert sql_text.startswith("SELECT SKIP ? FIRST ?")
+    assert "ROW_NUMBER" not in sql_text
 
     assert "__[POSTCOMPILE_L]" not in sql_text
     assert "__[POSTCOMPILE_O]" not in sql_text
 
-    assert compiled.positiontup == ["o", "l", "o"]
+    assert compiled.positiontup == ["o", "l"]
 
     assert isinstance(
         compiled.binds["l"].type,

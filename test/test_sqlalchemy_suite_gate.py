@@ -369,6 +369,7 @@ def test_current_closed_requirements_are_part_of_contract(requirement_name):
         "except_",
         "ctes",
         "ctes_with_update_delete",
+        "ctes_with_values",
         "update_from",
         "delete_from",
         "boolean_col_expressions",
@@ -379,6 +380,9 @@ def test_current_closed_requirements_are_part_of_contract(requirement_name):
         "fetch_first",
         "fetch_no_order_by",
         "fetch_expression",
+        "offset",
+        "bound_limit_offset",
+        "sql_expression_limit_offset",
     ],
 )
 def test_current_open_requirements_are_part_of_contract(requirement_name):
@@ -395,6 +399,7 @@ def test_current_open_requirements_are_part_of_contract(requirement_name):
         "except_",
         "ctes",
         "ctes_with_update_delete",
+        "ctes_with_values",
         "update_from",
         "delete_from",
         "boolean_col_expressions",
@@ -404,6 +409,9 @@ def test_current_open_requirements_are_part_of_contract(requirement_name):
         "fetch_first",
         "fetch_no_order_by",
         "fetch_expression",
+        "offset",
+        "bound_limit_offset",
+        "sql_expression_limit_offset",
     ],
 )
 def test_sql_expression_capabilities_are_officially_declared(

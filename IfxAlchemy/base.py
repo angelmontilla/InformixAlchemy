@@ -1473,6 +1473,142 @@ class IfxCompiler(compiler.SQLCompiler):
     def get_cte_preamble(self, recursive):
         return "WITH"
 
+    def _ifx_values_cte_cast_type(self, type_):
+        """Return an Informix type that can type a SELECT-list marker.
+
+        Informix accepts parameter markers in this context when the marker is
+        the operand of a native CAST expression.  Generic SQLAlchemy String
+        has no length, while Informix VARCHAR normally requires one in the
+        dialect type compiler, so use native LVARCHAR for that specific case.
+        """
+
+        if isinstance(type_, sa_types.NullType):
+            raise exc.CompileError(
+                "Informix parameterized VALUES-backed CTE columns require "
+                "an explicit SQLAlchemy type"
+            )
+
+        adapted_type = self.dialect.type_descriptor(type_)
+
+        if (
+            isinstance(adapted_type, sa_types.String)
+            and not isinstance(adapted_type, sa_types.CHAR)
+            and getattr(adapted_type, "length", None) in (None, 0)
+        ):
+            return "LVARCHAR"
+
+        try:
+            return self.dialect.type_compiler_instance.process(adapted_type)
+        except exc.CompileError as error:
+            raise exc.CompileError(
+                "Informix cannot derive a CAST target for a parameterized "
+                "VALUES-backed CTE column of type "
+                f"{type_!r}"
+            ) from error
+
+    def _ifx_render_values_cte_expression(self, expression, **kw):
+        """Render one typed VALUES expression for an Informix SELECT list."""
+
+        rendered = self.process(expression, **kw)
+
+        if (
+            kw.get("literal_binds")
+            or not isinstance(expression, sql.elements.BindParameter)
+            or expression.literal_execute
+        ):
+            return rendered
+
+        cast_type = self._ifx_values_cte_cast_type(expression.type)
+        return f"CAST({rendered} AS {cast_type})"
+
+    def _ifx_render_values_cte_row(
+        self,
+        row,
+        column_types,
+        **kw,
+    ):
+        """Render one ``Values`` row as a single-row Informix SELECT."""
+
+        row = tuple(row)
+        if len(row) != len(column_types):
+            raise exc.CompileError(
+                "Informix VALUES-backed CTE row has "
+                f"{len(row)} values for {len(column_types)} columns"
+            )
+
+        typed_row = sql.elements.Tuple(
+            *row,
+            types=column_types,
+        )
+        expressions = ", ".join(
+            self._ifx_render_values_cte_expression(expression, **kw)
+            for expression in typed_row.clauses
+        )
+        return f"SELECT {expressions}{self.default_from()}"
+
+    def _ifx_render_values_cte(self, element, **kw):
+        """Emulate a VALUES-backed CTE using SELECT branches and UNION ALL."""
+
+        rows = sqla_compat.get_values_rows(element)
+        if not rows:
+            raise exc.CompileError(
+                "Informix VALUES-backed CTE requires at least one row"
+            )
+
+        column_types = sqla_compat.get_values_column_types(element)
+        render_kw = dict(kw)
+        render_kw.setdefault(
+            "literal_binds",
+            sqla_compat.get_values_literal_binds(element),
+        )
+
+        return " UNION ALL ".join(
+            self._ifx_render_values_cte_row(
+                row,
+                column_types,
+                **render_kw,
+            )
+            for row in rows
+        )
+
+    def visit_values(
+        self,
+        element,
+        asfrom=False,
+        from_linter=None,
+        visiting_cte=None,
+        **kw,
+    ):
+        """Compile a direct ``Values.cte()`` body for Informix.
+
+        Informix does not accept SQLAlchemy's native ``VALUES (...)`` body in
+        this position.  Restrict the emulation to the direct body of a CTE;
+        every other ``Values`` usage keeps SQLAlchemy's standard compilation
+        and remains outside the advertised capability.
+        """
+
+        if visiting_cte is not None and visiting_cte.element is element:
+            if sqla_compat.get_values_independent_ctes(element):
+                self._dispatch_independent_ctes(element, kw)
+
+            if sqla_compat.values_is_lateral(element):
+                raise exc.CompileError(
+                    "Can't use a LATERAL VALUES expression inside of a CTE"
+                )
+            return self._ifx_render_values_cte(
+                element,
+                visiting_cte=visiting_cte,
+                **kw,
+            )
+
+        return super().visit_values(
+            element,
+            asfrom=asfrom,
+            from_linter=from_linter,
+            visiting_cte=visiting_cte,
+            **kw,
+        )
+
     def visit_now_func(self, fn, **kw):
         return "CURRENT_TIMESTAMP"
 
@@ -1533,6 +1669,55 @@ class IfxCompiler(compiler.SQLCompiler):
         return "mod(%s, %s)" % (self.process(binary.left),
                                 self.process(binary.right))
 
+    def _ifx_visit_bitwise_binary(
+        self,
+        binary,
+        function_name,
+        **kw,
+    ):
+        """Render a SQLAlchemy bitwise binary operator as an Informix function.
+
+        Informix exposes bitwise arithmetic through named functions rather
+        than the portable ``&``, ``|``, ``^``, ``<<`` and ``>>`` tokens.
+        Preserve the compiler keyword arguments for aliases, literal binds,
+        post-compile parameters and nested expression context.
+        """
+        left = self.process(binary.left, **kw)
+        right = self.process(binary.right, **kw)
+        return f"{function_name}({left}, {right})"
+
+    def visit_bitwise_and_op_binary(self, binary, operator, **kw):
+        return self._ifx_visit_bitwise_binary(binary, "BITAND", **kw)
+
+    def visit_bitwise_or_op_binary(self, binary, operator, **kw):
+        return self._ifx_visit_bitwise_binary(binary, "BITOR", **kw)
+
+    def visit_bitwise_xor_op_binary(self, binary, operator, **kw):
+        return self._ifx_visit_bitwise_binary(binary, "BITXOR", **kw)
+
+    def visit_bitwise_lshift_op_binary(self, binary, operator, **kw):
+        return self._ifx_visit_bitwise_binary(
+            binary,
+            "IFX_BIT_LEFTSHIFT",
+            **kw,
+        )
+
+    def visit_bitwise_rshift_op_binary(self, binary, operator, **kw):
+        return self._ifx_visit_bitwise_binary(
+            binary,
+            "IFX_BIT_RIGHTSHIFT",
+            **kw,
+        )
+
+    def visit_bitwise_not_op_unary_operator(
+        self,
+        element,
+        operator,
+        **kw,
+    ):
+        operand = self.process(element.element, **kw)
+        return f"BITNOT({operand})"
+
     def _ifx_fetch_options(self, select):
         return sqla_compat.get_fetch_clause_options(select)
 
@@ -1569,6 +1754,48 @@ class IfxCompiler(compiler.SQLCompiler):
             )
 
         return clause
+
+    def _ifx_native_row_count_clause(self, select, clause):
+        """Return whether *clause* is safe in Informix SKIP/FIRST.
+
+        Informix accepts integer literals and integer host variables in the
+        SELECT pre-column SKIP/FIRST syntax.  SQLAlchemy represents ordinary
+        ``limit(5)`` / ``offset(2)`` values as special post-compile bind
+        parameters, while explicit ``bindparam()`` values remain regular host
+        variables.  Arbitrary SQL expressions are intentionally excluded and
+        continue through the ROW_NUMBER emulation.
+        """
+        if clause is None:
+            return True
+
+        if sqla_compat.simple_int_clause(select, clause):
+            return True
+
+        if not isinstance(clause, sql.elements.BindParameter):
+            return False
+
+        return isinstance(
+            clause.type,
+            (sa_types.Integer, sa_types.NullType),
+        )
+
+    def _ifx_uses_native_skip_first(self, select):
+        limit_clause = self._ifx_limit_fetch_clause(select)
+        offset_clause = sqla_compat.get_offset_clause(select)
+
+        if limit_clause is None and offset_clause is None:
+            return False
+
+        if offset_clause is not None and sqla_compat.get_distinct(select):
+            # Keep the established two-level DISTINCT rewrite.  Adding
+            # ROW_NUMBER only after DISTINCT is important for both result
+            # cardinality and ORDER BY adaptation.
+            return False
+
+        return (
+            self._ifx_native_row_count_clause(select, limit_clause)
+            and self._ifx_native_row_count_clause(select, offset_clause)
+        )
 
     def _row_limit_upper_bound(self, select, limit_clause, offset_clause):
         limit_expression = self._row_limit_expression(select, limit_clause)
@@ -1615,17 +1842,10 @@ class IfxCompiler(compiler.SQLCompiler):
         limit_clause,
         offset_clause,
     ):
-        if offset_clause is not None:
-            return True
-
-        if limit_clause is None:
+        if limit_clause is None and offset_clause is None:
             return False
 
-        # Informix FIRST accepts integer literals and host variables, but not
-        # arbitrary SQL expressions.  Route non-literal FETCH/LIMIT values
-        # through the ROW_NUMBER emulation so expression semantics remain
-        # available without emitting invalid FIRST <expression> syntax.
-        return not sqla_compat.simple_int_clause(select, limit_clause)
+        return not self._ifx_uses_native_skip_first(select)
 
     def _translate_offset_select(self, select):
         limit_clause = self._ifx_limit_fetch_clause(select)
@@ -1705,6 +1925,76 @@ class IfxCompiler(compiler.SQLCompiler):
     def translate_select_structure(self, select_stmt, **kwargs):
         return self._translate_offset_select(select_stmt)
 
+    def visit_compound_select(
+        self,
+        cs,
+        asfrom=False,
+        compound_index=None,
+        **kwargs,
+    ):
+        """Apply compound-query pagination through an Informix table expression.
+
+        SQLAlchemy normally renders a compound LIMIT/OFFSET after the UNION.
+        Informix places SKIP/FIRST immediately after SELECT, so a paginated
+        compound is exposed as a derived table and paginated by an outer
+        SELECT.  Branch-local limits continue to use the existing grouping
+        rewrite and can therefore also use native FIRST/SKIP.
+        """
+        limit_clause = self._ifx_limit_fetch_clause(cs)
+        offset_clause = sqla_compat.get_offset_clause(cs)
+
+        if limit_clause is None and offset_clause is None:
+            return super().visit_compound_select(
+                cs,
+                asfrom=asfrom,
+                compound_index=compound_index,
+                **kwargs,
+            )
+
+        order_by_clauses = list(sqla_compat.get_order_by_clauses(cs))
+
+        inner = cs.order_by(None).limit(None).offset(None)
+        inner_alias = inner.alias()
+        # A CompoundSelect.c reference creates a deprecated implicit alias.
+        # Once the compound is cloned without its row limit and wrapped in a
+        # new derived table, that old alias is no longer present in the FROM
+        # clause.  Normal proxy adaptation cannot always relate the two alias
+        # objects, even though they export the same compound-result columns.
+        # Name fallback is safe here because ORDER BY belongs to the compound
+        # result and must therefore resolve against the unique exported column
+        # namespace of ``inner_alias``.
+        adapter = sql_util.ClauseAdapter(
+            inner_alias,
+            adapt_on_names=True,
+        )
+        adapted_order_by = [
+            adapted
+            for adapted in (
+                adapter.traverse(elem) for elem in order_by_clauses
+            )
+            if adapted is not None
+        ]
+
+        paged = sql.select(*inner_alias.c).select_from(inner_alias)
+        if adapted_order_by:
+            paged = paged.order_by(*adapted_order_by)
+
+        fetch_clause = sqla_compat.get_fetch_clause(cs)
+        if fetch_clause is not None:
+            fetch_options = self._ifx_fetch_options(cs)
+            paged = paged.fetch(
+                fetch_clause,
+                percent=fetch_options.get("percent", False),
+                with_ties=fetch_options.get("with_ties", False),
+            )
+        elif limit_clause is not None:
+            paged = paged.limit(limit_clause)
+
+        if offset_clause is not None:
+            paged = paged.offset(offset_clause)
+
+        return self.process(paged, asfrom=asfrom, **kwargs)
+
     def visit_sequence(self, sequence, **kw):
         return "%s.NEXTVAL" % self.preparer.format_sequence(sequence)
 
@@ -1749,11 +2039,21 @@ class IfxCompiler(compiler.SQLCompiler):
     def get_select_precolumns(self, select, **kwargs):
         text = ""
         limit_clause = self._ifx_limit_fetch_clause(select)
+        offset_clause = sqla_compat.get_offset_clause(select)
+        native_skip_first = self._ifx_uses_native_skip_first(select)
+
+        if native_skip_first and offset_clause is not None:
+            offset_expression = self._row_limit_expression(
+                select,
+                offset_clause,
+            )
+            text += "SKIP %s " % self.process(
+                offset_expression,
+                **kwargs,
+            )
 
         # Informix: SELECT FIRST n DISTINCT ...
-        if (limit_clause is not None) and (
-            sqla_compat.get_offset_clause(select) is None
-        ):
+        if native_skip_first and limit_clause is not None:
             limit_expression = self._row_limit_expression(select, limit_clause)
             if limit_expression is not None:
                 text += "FIRST %s " % self.process(
@@ -1964,14 +2264,206 @@ class IfxCompiler(compiler.SQLCompiler):
 
 class IfxDDLCompiler(compiler.DDLCompiler):
 
-    def visit_create_sequence(self, create, prefix=None, **kw):
-        if create.if_not_exists:
+    _WRITABLE_TABLE_LOCK_LEVELS = frozenset({"PAGE", "ROW"})
+
+    @staticmethod
+    def _positive_table_storage_value(
+        option_name,
+        value,
+        *,
+        error_name=None,
+    ):
+        """Validate one native Informix table storage value.
+
+        Informix expresses EXTENT SIZE and NEXT SIZE in kilobytes.  SQLAlchemy
+        table dialect options and executable DDL parameters are deliberately
+        restricted to positive Python integers so generated SQL cannot contain
+        arbitrary expressions.
+        """
+        if value is None:
+            return None
+
+        display_name = error_name or f"informix_{option_name}"
+
+        if isinstance(value, bool) or not isinstance(value, int):
             raise exc.CompileError(
-                "Informix does not support CREATE SEQUENCE IF NOT EXISTS"
+                f"{display_name} must be a positive integer "
+                "expressed in kilobytes"
             )
 
+        if value <= 0:
+            raise exc.CompileError(
+                f"{display_name} must be greater than zero"
+            )
+
+        return value
+
+    def _normalize_writable_table_lock_level(
+        self,
+        lock_level,
+        *,
+        option_name,
+        allow_reflected_catalog_state=False,
+    ):
+        """Validate a lock level accepted by native Informix DDL.
+
+        ``PAGE_AND_ROW`` is a catalog state, not a writable CREATE/ALTER
+        clause.  It is ignored only when recompiling metadata that the
+        Informix reflector marked explicitly; user-authored values and ALTER
+        operations remain strictly limited to PAGE and ROW.
+        """
+        if not isinstance(lock_level, str):
+            raise exc.CompileError(
+                f"{option_name} must be either 'PAGE' or 'ROW'"
+            )
+
+        normalized = lock_level.strip().upper()
+        if normalized in self._WRITABLE_TABLE_LOCK_LEVELS:
+            return normalized
+
+        if (
+            allow_reflected_catalog_state
+            and normalized == "PAGE_AND_ROW"
+            and getattr(
+                lock_level,
+                "_informix_reflected_lock_level",
+                False,
+            )
+        ):
+            return None
+
+        raise exc.CompileError(
+            f"{option_name} must be either 'PAGE' or 'ROW'; "
+            f"received {lock_level!r}"
+        )
+
+    def _table_lock_mode_clause(self, table_options):
+        lock_level = table_options.get("lock_level")
+        if lock_level is None:
+            return None
+
+        normalized = self._normalize_writable_table_lock_level(
+            lock_level,
+            option_name="informix_lock_level",
+            allow_reflected_catalog_state=True,
+        )
+        if normalized is None:
+            # Informix can report the catalog-only B state, but CREATE TABLE
+            # accepts only PAGE or ROW. Preserve the reflected metadata
+            # without inventing a lossy DDL translation.
+            return None
+
+        return f"LOCK MODE {normalized}"
+
+    def visit_set_table_lock_mode(self, alter, **kw):
+        """Render ``ALTER TABLE ... LOCK MODE (...)`` for Informix."""
+        lock_level = self._normalize_writable_table_lock_level(
+            alter.lock_mode,
+            option_name="lock_mode",
+        )
+        table_name = self.preparer.format_table(alter.table)
+        return f"ALTER TABLE {table_name} LOCK MODE ({lock_level})"
+
+    def visit_modify_table_extents(self, alter, **kw):
+        """Render native, validated Informix extent modifications."""
+        first_extent = self._positive_table_storage_value(
+            "first_extent",
+            alter.first_extent,
+            error_name="first_extent",
+        )
+        next_extent = self._positive_table_storage_value(
+            "next_extent",
+            alter.next_extent,
+            error_name="next_extent",
+        )
+
+        clauses = []
+        if first_extent is not None:
+            clauses.append(f"EXTENT SIZE {first_extent}")
+        if next_extent is not None:
+            clauses.append(f"NEXT SIZE {next_extent}")
+
+        # The construct rejects an empty operation in __init__.  Keep this
+        # defensive guard because executable DDL objects remain mutable.
+        if not clauses:
+            raise exc.CompileError(
+                "ModifyTableExtents requires first_extent and/or "
+                "next_extent"
+            )
+
+        table_name = self.preparer.format_table(alter.table)
+        return f"ALTER TABLE {table_name} MODIFY {' '.join(clauses)}"
+
+    @staticmethod
+    def _validate_table_page_size(table_options):
+        """Reject user-authored page sizes while accepting reflected metadata.
+
+        Informix page size belongs to the dbspace, not to an individual table.
+        SYSTABLES exposes the effective page size, so reflection retains it as
+        ``informix_page_size``.  The reflector marks that integer internally;
+        only such reflected values may pass through table re-compilation.
+        """
+        page_size = table_options.get("page_size")
+        if page_size is None:
+            return
+
+        if getattr(page_size, "_informix_reflected_page_size", False):
+            return
+
+        raise exc.CompileError(
+            "informix_page_size is reflection-only because Informix page "
+            "size is defined by the dbspace, not by CREATE TABLE. Place the "
+            "table in a dbspace with the required page size instead."
+        )
+
+    def post_create_table(self, table):
+        """Render native Informix physical table options.
+
+        Informix 14.10 and later accept EXTENT SIZE, NEXT SIZE, and LOCK MODE
+        after the closing parenthesis of CREATE TABLE.  Page size is not
+        emitted because it is inherited from the selected dbspace.
+        """
+        table_options = table.dialect_options["informix"]
+        self._validate_table_page_size(table_options)
+
+        clauses = []
+        first_extent = self._positive_table_storage_value(
+            "first_extent",
+            table_options.get("first_extent"),
+        )
+        next_extent = self._positive_table_storage_value(
+            "next_extent",
+            table_options.get("next_extent"),
+        )
+
+        if first_extent is not None:
+            clauses.append(f"EXTENT SIZE {first_extent}")
+        if next_extent is not None:
+            clauses.append(f"NEXT SIZE {next_extent}")
+
+        lock_clause = self._table_lock_mode_clause(table_options)
+        if lock_clause is not None:
+            clauses.append(lock_clause)
+
+        if not clauses:
+            return ""
+
+        return " " + " ".join(clauses)
+
+    def visit_create_sequence(self, create, prefix=None, **kw):
+        """Render native Informix CREATE SEQUENCE DDL.
+
+        Informix 14.10 and later support ``IF NOT EXISTS`` immediately after
+        the ``CREATE SEQUENCE`` keywords.  Use SQLAlchemy's
+        :class:`~sqlalchemy.schema.CreateSequence` flag directly instead of
+        emulating idempotency with a catalog lookup, which would be vulnerable
+        to a check-then-create race.
+        """
         sequence = create.element
-        text = "CREATE SEQUENCE %s" % self.preparer.format_sequence(sequence)
+        text = "CREATE SEQUENCE "
+        if create.if_not_exists:
+            text += "IF NOT EXISTS "
+        text += self.preparer.format_sequence(sequence)
         options = []
 
         if sequence.start is not None:
@@ -1993,14 +2485,15 @@ class IfxDDLCompiler(compiler.DDLCompiler):
         return text
 
     def visit_drop_sequence(self, drop, **kw):
-        if drop.if_exists:
-            raise exc.CompileError(
-                "Informix does not support DROP SEQUENCE IF EXISTS"
-            )
+        """Render native Informix DROP SEQUENCE DDL.
 
-        return "DROP SEQUENCE %s" % self.preparer.format_sequence(
-            drop.element
-        )
+        Informix 14.10 and later support ``IF EXISTS`` immediately after the
+        ``DROP SEQUENCE`` keywords.
+        """
+        text = "DROP SEQUENCE "
+        if drop.if_exists:
+            text += "IF EXISTS "
+        return text + self.preparer.format_sequence(drop.element)
 
     def get_server_version_info(self, dialect):
         """Returns the Informix server major and minor version as a list of ints."""

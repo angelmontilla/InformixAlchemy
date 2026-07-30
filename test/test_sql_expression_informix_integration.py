@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import (
     Boolean,
+    bindparam,
     Column,
     Integer,
     MetaData,
@@ -266,3 +267,32 @@ def test_fetch_variants_round_trip(conn, expression_tables):
         .fetch(two)
         .offset(two)
     ).scalars().all() == [3, 4]
+
+
+def test_native_skip_first_variants_round_trip(conn, expression_tables):
+    source, _ = expression_tables
+
+    assert conn.execute(
+        select(source.c.id).order_by(source.c.id).offset(2)
+    ).scalars().all() == [3, 4, 5]
+
+    assert conn.execute(
+        select(source.c.id).order_by(source.c.id).limit(2).offset(2)
+    ).scalars().all() == [3, 4]
+
+    bounded = (
+        select(source.c.id)
+        .order_by(source.c.id)
+        .limit(bindparam("limit_count"))
+        .offset(bindparam("offset_count"))
+    )
+    assert conn.execute(
+        bounded,
+        {"limit_count": 2, "offset_count": 1},
+    ).scalars().all() == [2, 3]
+
+    combined = union(
+        select(source.c.id).where(source.c.id <= 3),
+        select(source.c.id).where(source.c.id >= 3),
+    ).order_by("id").limit(2).offset(1)
+    assert conn.execute(combined).scalars().all() == [2, 3]

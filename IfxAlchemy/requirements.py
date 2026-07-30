@@ -47,6 +47,48 @@ def _supports_isolated_owner_namespaces(config) -> bool:
 class Requirements(SuiteRequirements):
 
     @property
+    def isolation_level(self):
+        """The pyodbc backend supports SQLAlchemy isolation-level APIs.
+
+        Informix levels and their legacy abbreviations are translated to the
+        native session-level ``SET ISOLATION`` statement. The dialect reports
+        and restores the configured level when pooled connections are
+        returned.
+        """
+
+        return exclusions.open()
+
+    @property
+    def supports_bitwise_and(self):
+        """Informix exposes bitwise AND through ``BITAND``."""
+
+        return exclusions.open()
+
+    @property
+    def supports_bitwise_or(self):
+        """Informix exposes bitwise OR through ``BITOR``."""
+
+        return exclusions.open()
+
+    @property
+    def supports_bitwise_xor(self):
+        """Informix exposes bitwise XOR through ``BITXOR``."""
+
+        return exclusions.open()
+
+    @property
+    def supports_bitwise_not(self):
+        """Informix exposes bitwise complement through ``BITNOT``."""
+
+        return exclusions.open()
+
+    @property
+    def supports_bitwise_shift(self):
+        """Informix exposes integer left and right bit shifts."""
+
+        return exclusions.open()
+
+    @property
     def has_temp_table(self):
         """target dialect supports checking a single temp table name"""
 
@@ -363,6 +405,17 @@ class Requirements(SuiteRequirements):
         return exclusions.open()
 
     @property
+    def ctes_with_values(self):
+        """Support ``Values.cte()`` through compiler-level emulation.
+
+        Informix does not accept a native ``VALUES (...)`` CTE body.  The
+        compiler preserves SQLAlchemy's public construct while rendering the
+        rows as typed single-row SELECT statements joined by ``UNION ALL``.
+        """
+
+        return exclusions.open()
+
+    @property
     def update_from(self):
         """Provide SQLAlchemy's multi-table UPDATE behavior on Informix.
 
@@ -445,10 +498,22 @@ class Requirements(SuiteRequirements):
         return exclusions.open()
 
     @property
-    def sql_expression_limit_offset(self):
-        """FIRST/SKIP require compatible integer values, not expressions."""
+    def offset(self):
+        """Use native Informix SKIP for compatible OFFSET values."""
 
-        return exclusions.closed()
+        return exclusions.open()
+
+    @property
+    def bound_limit_offset(self):
+        """Allow integer host variables in Informix SKIP/FIRST."""
+
+        return exclusions.open()
+
+    @property
+    def sql_expression_limit_offset(self):
+        """Emulate expression-valued LIMIT/OFFSET through ROW_NUMBER."""
+
+        return exclusions.open()
 
     @property
     def group_by_complex_expression(self):
