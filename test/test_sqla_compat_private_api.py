@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import Column, Integer, MetaData, Table
-from sqlalchemy import column, insert, literal_column, select, table
+from sqlalchemy import String
+from sqlalchemy import column, insert, literal_column, select, table, values
 
 from IfxAlchemy import sqla_compat
 from IfxAlchemy.pyodbc import IfxDialect_pyodbc
@@ -110,6 +111,34 @@ def test_get_table_autoincrement_column_and_sorted_constraints():
 
     assert sqla_compat.get_table_autoincrement_column(tbl) is tbl.c.id
     assert tuple(sqla_compat.get_table_sorted_constraints(tbl))
+
+
+def test_values_private_api_helpers_preserve_chunks_rows_and_types():
+    value_rows = (
+        values(
+            column("name", String),
+            column("id", Integer),
+            literal_binds=True,
+        )
+        .data([("a", 1)])
+        .data([("b", 2), ("c", 3)])
+    )
+
+    assert sqla_compat.get_values_data(value_rows) == (
+        (("a", 1),),
+        (("b", 2), ("c", 3)),
+    )
+    assert sqla_compat.get_values_rows(value_rows) == (
+        ("a", 1),
+        ("b", 2),
+        ("c", 3),
+    )
+    assert tuple(type_ for type_ in sqla_compat.get_values_column_types(
+        value_rows
+    )) == tuple(column_.type for column_ in value_rows.columns)
+    assert sqla_compat.get_values_literal_binds(value_rows) is True
+    assert sqla_compat.values_is_lateral(value_rows) is False
+    assert sqla_compat.get_values_independent_ctes(value_rows) == ()
 
 
 def test_identifier_requires_quotes():

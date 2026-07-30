@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """SQLAlchemy compatibility helpers for IfxAlchemy.
 
-All direct access to SQLAlchemy private Select internals must live here.
+All direct access to SQLAlchemy private selectable internals must live here.
 The compiler must import helpers from this module instead of touching
 private attributes inline.
 """
@@ -154,6 +154,66 @@ def get_table_sorted_constraints(table):
     """Return SQLAlchemy's internally sorted constraints for DDL emission."""
 
     return getattr(table, "_sorted_constraints", ())
+
+
+def get_values_data(values_clause):
+    """Return the private data chunks stored by a ``Values`` construct.
+
+    SQLAlchemy stores each call to :meth:`Values.data` as a separate chunk.
+    Keep that private representation behind this compatibility boundary so
+    the Informix compiler does not depend on it directly.
+    """
+
+    data = getattr(values_clause, "_data", None)
+    if data is None:
+        raise _missing_private_api("Values._data")
+
+    return tuple(tuple(chunk) for chunk in data)
+
+
+def get_values_rows(values_clause):
+    """Return all rows from a ``Values`` construct in insertion order."""
+
+    return tuple(
+        tuple(row)
+        for chunk in get_values_data(values_clause)
+        for row in chunk
+    )
+
+
+def get_values_column_types(values_clause):
+    """Return SQLAlchemy's private type list for a ``Values`` construct."""
+
+    column_types = getattr(values_clause, "_column_types", None)
+    if column_types is None:
+        raise _missing_private_api("Values._column_types")
+
+    return tuple(column_types)
+
+
+def get_values_literal_binds(values_clause):
+    """Return whether a ``Values`` construct requests literal rendering."""
+
+    if not hasattr(values_clause, "literal_binds"):
+        raise _missing_private_api("Values.literal_binds")
+
+    return bool(values_clause.literal_binds)
+
+
+def values_is_lateral(values_clause):
+    """Return whether a ``Values`` construct is marked as lateral."""
+
+    return bool(getattr(values_clause, "_is_lateral", False))
+
+
+def get_values_independent_ctes(values_clause):
+    """Return CTEs attached directly to a ``Values`` construct."""
+
+    independent_ctes = getattr(values_clause, "_independent_ctes", None)
+    if independent_ctes is None:
+        raise _missing_private_api("Values._independent_ctes")
+
+    return tuple(independent_ctes)
 
 
 def identifier_requires_quotes(preparer, value):

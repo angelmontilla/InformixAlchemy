@@ -25,6 +25,9 @@ from . import pyodbc, base
 # Default dialect: pyodbc
 dialect = pyodbc.IfxDialect_pyodbc
 
+# Informix-specific executable DDL constructs
+from .ddl import ModifyTableExtents, SetTableLockMode
+
 # Data types supported by the Informix dialect
 from .base import (
     BIGINT,
@@ -67,10 +70,12 @@ __all__ = (
     "INTEGER",
     "LONGVARCHAR",
     "NUMERIC",
+    "ModifyTableExtents",
     "SMALLINT",
     "REAL",
     "SERIAL",
     "SERIAL8",
+    "SetTableLockMode",
     "TIME",
     "TIMESTAMP",
     "VARCHAR",

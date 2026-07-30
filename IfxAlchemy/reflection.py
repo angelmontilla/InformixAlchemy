@@ -33,6 +33,24 @@ from .temporal import IFXTime
 from . import sqla_compat
 
 
+class _ReflectedTableLockLevel(str):
+    """String marker for a locking mode read from SYSTABLES."""
+
+    _informix_reflected_lock_level = True
+
+
+class _ReflectedTablePageSize(int):
+    """Integer marker for a dbspace page size read from SYSTABLES.
+
+    The value intentionally remains an ``int`` for SQLAlchemy metadata and
+    public inspection APIs.  The marker prevents the DDL compiler from
+    confusing reflected, read-only metadata with a user-authored CREATE TABLE
+    option.
+    """
+
+    _informix_reflected_page_size = True
+
+
 def _informix_boolean_type():
     """Create the dialect BOOLEAN lazily to avoid an import cycle."""
     from .base import BOOLEAN
@@ -1614,16 +1632,23 @@ class IfxReflector(BaseReflector):
         lock_code = (self._clean_str(row[1]) or "").upper()
         lock_level = self._TABLE_LOCK_LEVELS.get(lock_code)
         if lock_level is not None:
-            options["informix_lock_level"] = lock_level
+            options["informix_lock_level"] = _ReflectedTableLockLevel(
+                lock_level
+            )
 
         for key, raw_value in (
             ("informix_first_extent", row[2]),
             ("informix_next_extent", row[3]),
-            ("informix_page_size", row[4]),
         ):
             value = self._positive_catalog_int(raw_value)
             if value is not None:
                 options[key] = value
+
+        page_size = self._positive_catalog_int(row[4])
+        if page_size is not None:
+            options["informix_page_size"] = _ReflectedTablePageSize(
+                page_size
+            )
 
         return options
 

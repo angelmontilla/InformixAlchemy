@@ -132,6 +132,58 @@ The dialect supports:
 
 `NeedODBCTypesOnly=1` prevents ordinary types from being unnecessarily exposed through Informix-specific ODBC codes. As an additional defense, the dialect registers a converter for `SQL_INFX_BIGINT (-114)` and normalizes integers, decimal text and eight-byte binary representations to Python `int`.
 
+## Transaction isolation with pyodbc
+
+The maintained `informix+pyodbc` backend implements SQLAlchemy's engine and
+connection isolation APIs with Informix's native, session-level
+`SET ISOLATION` statement.  The setting is restored when a pooled connection
+is returned.
+
+Using native SQL is intentional. The Informix ODBC attribute exposes only
+three generic isolation values and cannot preserve the server's distinction
+between `COMMITTED READ` and `CURSOR STABILITY`.
+
+```python
+engine = create_engine(
+    "informix+pyodbc://...",
+    isolation_level="CURSOR STABILITY",
+)
+
+with engine.connect() as connection:
+    connection = connection.execution_options(
+        isolation_level="REPEATABLE READ"
+    )
+    assert connection.get_isolation_level() == "REPEATABLE READ"
+```
+
+Native Informix mappings are:
+
+| Requested level | Native statement |
+|---|---|
+| `DIRTY READ`, `UNCOMMITTED READ`, `UR`, `READ UNCOMMITTED` | `SET ISOLATION TO DIRTY READ` |
+| `COMMITTED READ`, `READ COMMITTED` | `SET ISOLATION TO COMMITTED READ` |
+| `CURSOR STABILITY`, `CS` | `SET ISOLATION TO CURSOR STABILITY` |
+| `REPEATABLE READ`, `RR`, `SERIALIZABLE` | `SET ISOLATION TO REPEATABLE READ` |
+
+`READ STABILITY` and `RS` remain accepted for compatibility with the legacy
+IfxPy backend. Informix does not define a separate native READ STABILITY mode,
+so these spellings map conservatively to native `REPEATABLE READ`; they are
+not presented as a fifth Informix isolation level.
+
+`AUTOCOMMIT` remains available through the normal SQLAlchemy pyodbc connector.
+`Connection.get_isolation_level()` reports the last successfully applied
+non-autocommit level. The ODBC `SQL_DEFAULT_TXN_ISOLATION` information value
+is used only to discover the connection's initial default.
+
+Pool pre-ping is transaction-neutral: after its diagnostic `SELECT`, the
+dialect rolls back the driver transaction created in manual-commit mode. This
+prevents an invisible transaction from leaking into the checked-out
+connection.
+
+Session controls such as `SET LOCK MODE`, `SET OPTIMIZATION`,
+`SET PDQPRIORITY` and `SET STATEMENT CACHE` are independent of transaction
+isolation and are not overloaded onto `isolation_level`.
+
 ## Minimal example
 
 ```python
@@ -167,7 +219,7 @@ with engine.begin() as connection:
 
 - `CREATE TABLE IF NOT EXISTS` and `DROP TABLE IF EXISTS`.
 - `CREATE INDEX IF NOT EXISTS` and `DROP INDEX IF EXISTS`.
-- Informix sequences with `START WITH`, `INCREMENT BY`, `MINVALUE`, `MAXVALUE`, `CACHE` and `CYCLE`.
+- Informix sequences with native `CREATE SEQUENCE IF NOT EXISTS` and `DROP SEQUENCE IF EXISTS`, plus `START WITH`, `INCREMENT BY`, `MINVALUE`, `MAXVALUE`, `CACHE` and `CYCLE`.
 - `Sequence.next_value()` compiled via `.NEXTVAL`.
 - Autoincrement integer primary keys translated to `SERIAL`, `SERIAL8` or `BIGSERIAL` according to type.
 - Retrieval of generated key via `DBINFO(...)` in a secondary cursor on the same connection.
@@ -177,11 +229,14 @@ with engine.begin() as connection:
 - Nullable unique constraints via `EXCLUDE NULL KEYS` indexes when appropriate.
 - Literal and temporal server defaults validated for Informix syntax.
 - Physical index and constraint names isolated by owner in ANSI databases, keeping the logical name when reflecting.
-- Physical table options:
-  - `informix_lock_level`
-  - `informix_first_extent`
-  - `informix_next_extent`
-  - `informix_page_size`
+- Native writable physical table options:
+  - `informix_lock_level` (`PAGE` or `ROW`)
+  - `informix_first_extent` (positive integer, in KB)
+  - `informix_next_extent` (positive integer, in KB)
+- Reflected physical metadata:
+  - `informix_page_size` is returned by inspection as a positive integer,
+    but it is read-only because Informix defines page size on the dbspace,
+    not in `CREATE TABLE`.
 
 Example:
 
@@ -197,9 +252,18 @@ table = Table(
     informix_lock_level="ROW",
     informix_first_extent=64,
     informix_next_extent=64,
-    informix_page_size=4096,
 )
 ```
+
+The generated suffix is:
+
+```sql
+EXTENT SIZE 64 NEXT SIZE 64 LOCK MODE ROW
+```
+
+Passing `informix_page_size` while creating a table raises `CompileError`.
+Select a dbspace with the required page size instead; reflection will expose
+the effective value reported by `SYSTABLES.pagesize`.
 
 ### SQL and compilation
 
@@ -302,11 +366,10 @@ Informix 14.10 has capabilities that do not yet have a first-level abstraction i
 5. A `MERGE` construct to combine `UPDATE`/`DELETE` with `INSERT`.
 6. Table and index fragmentation and partitioning, including `FRAGMENT/PARTITION BY`, `RANGE INTERVAL`, `PUT`, dbspace location and compression.
 7. Functional indexes, R-tree, forest-of-trees, operator classes and access methods.
-8. `CREATE SEQUENCE IF NOT EXISTS`; the current compiler rejects it and must be aligned with Informix 14.10.
-9. Synonyms for tables, views and sequences, including public/private synonyms and reflection.
-10. `CREATE TABLE ... AS SELECT` and `SELECT ... INTO TEMP/RAW/STANDARD` as declarative constructs.
-11. Optimizer directives integrated with SQLAlchemy's hint API.
-12. Enriched reflection of comments, fragments, compression, access methods and user-defined opaque types.
+8. Synonyms for tables, views and sequences, including public/private synonyms and reflection.
+9. `CREATE TABLE ... AS SELECT` and `SELECT ... INTO TEMP/RAW/STANDARD` as declarative constructs.
+10. Optimizer directives integrated with SQLAlchemy's hint API.
+11. Enriched reflection of comments, fragments, compression, access methods and user-defined opaque types.
 
 These capabilities are roadmap: they must not be announced as supported until compilation, execution, reflection and integration tests are incorporated.
 

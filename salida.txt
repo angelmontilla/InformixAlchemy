@@ -1,0 +1,1371 @@
+============================= test session starts =============================
+platform win32 -- Python 3.12.0, pytest-9.1.1, pluggy-1.6.0
+rootdir: D:\PYTHON\InformixAlchemy
+configfile: pytest.ini
+testpaths: test
+plugins: cov-7.1.0
+collected 995 items
+
+test\test_001_CRUD.py .                                                  [  0%]
+test\test_002_Extended_DataType.py .                                     [  0%]
+test\test_alembic_suite_gate.py ......                                   [  0%]
+test\test_autoincrement_serial.py ................                       [  2%]
+test\test_bigint_roundtrip.py .......                                    [  3%]
+test\test_bitwise_compilation.py ..................                      [  4%]
+test\test_bitwise_informix_integration.py ......                         [  5%]
+test\test_cast_type_decorator.py .                                       [  5%]
+test\test_compound_pagination_alias_adaptation.py .....                  [  6%]
+test\test_cte_values_compilation.py ........................             [  8%]
+test\test_cte_values_informix_integration.py ........                    [  9%]
+test\test_date_bind_processor.py .......................                 [ 11%]
+test\test_date_complete_diagnostic.py ......                             [ 12%]
+test\test_ddl_compiler.py .............................................. [ 16%]
+......................................                                   [ 20%]
+test\test_ddl_execute.py ....                                            [ 21%]
+test\test_distribution_metadata.py ..                                    [ 21%]
+test\test_engine_name.py ...                                             [ 21%]
+test\test_has_table_contract.py ........                                 [ 22%]
+test\test_ifxpy_dialect.py ...                                           [ 22%]
+test\test_import_dbapi.py ..                                             [ 22%]
+test\test_informix_constraint_probe.py ....                              [ 23%]
+test\test_limit_scalar_subquery.py .                                     [ 23%]
+test\test_multi_reflection_schemas.py .................................. [ 26%]
+........................................................................ [ 34%]
+........................................................................ [ 41%]
+................................                                         [ 44%]
+test\test_multi_reflection_views.py .                                    [ 44%]
+test\test_named_constraint_compilation.py ...                            [ 44%]
+test\test_native_boolean.py .............................                [ 47%]
+test\test_native_skip_first.py .....                                     [ 48%]
+test\test_official_suite_support.py .......                              [ 49%]
+test\test_packaging_entrypoints.py ....                                  [ 49%]
+test\test_probe4_autoincrement_isolation.py .....                        [ 49%]
+test\test_provision_cleanup.py .......                                   [ 50%]
+test\test_pyodbc_bigint.py .................................             [ 53%]
+test\test_pyodbc_connect_args.py .............                           [ 55%]
+test\test_pyodbc_isolation.py .............................              [ 58%]
+test\test_pyodbc_isolation_integration.py FFFFFFFFFFFFFFFF               [ 59%]
+test\test_quoting_and_case.py ..............                             [ 61%]
+test\test_reflected_default_normalization.py .................           [ 62%]
+test\test_reflection_composite.py ............                           [ 64%]
+test\test_reflection_defaults.py ........................                [ 66%]
+test\test_reflection_minimal.py ...............                          [ 68%]
+test\test_reflection_minimal_old.py ...                                  [ 68%]
+test\test_reflection_name_folding.py ........                            [ 69%]
+test\test_reflection_opaque_types.py ...                                 [ 69%]
+test\test_reflection_select_style.py ...                                 [ 69%]
+test\test_reflection_suite_regressions.py ..............                 [ 71%]
+test\test_schema_support.py ....                                         [ 71%]
+test\test_select_limit_offset_fetch_compilation.py ...............       [ 73%]
+test\test_sequence_if_exists.py .                                        [ 73%]
+test\test_server_default_integration.py .....                            [ 73%]
+test\test_sql_compiler_suite_regressions.py ..........................   [ 76%]
+test\test_sql_expression_capabilities.py ........................        [ 78%]
+test\test_sql_expression_certification_runner.py .....                   [ 79%]
+test\test_sql_expression_informix_integration.py ..........              [ 80%]
+test\test_sqla_compat_private_api.py ..........................          [ 82%]
+test\test_sqlalchemy20_textual_sql.py .                                  [ 82%]
+test\test_sqlalchemy21_constructs.py .                                   [ 83%]
+test\test_sqlalchemy_suite_gate.py ..................................... [ 86%]
+........................................................................ [ 93%]
+....................                                                     [ 95%]
+test\test_table_physical_options.py ......................               [ 98%]
+test\test_temp_tables.py ......                                          [ 98%]
+test\test_temporal_precision.py ...........                              [ 99%]
+test\test_text_lob.py .                                                  [100%]
+
+================================== FAILURES ===================================
+_ test_connection_execution_option_sets_and_reports_isolation[READ UNCOMMITTED] _
+
+engine = Engine(informix+pyodbc://informix:***@127.0.0.1/prueba4db?DELIMIDENT=Y&driver=IBM+INFORMIX+ODBC+DRIVER+%2864-bit%29&protocol=onsoctcp&server=informix&service=9088)
+level = 'READ UNCOMMITTED'
+
+    @pytest.mark.parametrize(
+        "level",
+        [
+            "READ UNCOMMITTED",
+            "DIRTY READ",
+            "READ COMMITTED",
+            "COMMITTED READ",
+            "REPEATABLE READ",
+            "SERIALIZABLE",
+            "UNCOMMITTED READ",
+            "UR",
+            "CURSOR STABILITY",
+            "CS",
+            "READ STABILITY",
+            "RS",
+            "RR",
+        ],
+    )
+    def test_connection_execution_option_sets_and_reports_isolation(engine, level):
+        """Exercise SQLAlchemy's public per-Connection isolation API."""
+    
+        with engine.connect() as connection:
+>           connection.execution_options(isolation_level=level)
+
+test\test_pyodbc_isolation_integration.py:34: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+.venv\Lib\site-packages\sqlalchemy\engine\base.py:515: in execution_options
+    self.dialect.set_connection_execution_options(self, opt)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:665: in set_connection_execution_options
+    self._set_connection_characteristics(connection, characteristics)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:690: in _set_connection_characteristics
+    characteristic.set_connection_characteristic(
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:71: in set_connection_characteristic
+    self.set_characteristic(dialect, dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:108: in set_characteristic
+    dialect._assert_and_set_isolation_level(dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:1002: in _assert_and_set_isolation_level
+    self.set_isolation_level(dbapi_conn, level)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <IfxAlchemy.pyodbc.IfxDialect_pyodbc object at 0x000001F294615F40>
+dbapi_connection = <pyodbc.Connection object at 0x000001F2959797C0>
+level = 'READ UNCOMMITTED'
+
+    def set_isolation_level(self, dbapi_connection, level):
+        """Set an Informix isolation level through SQLSetConnectAttr.
+    
+        pyodbc.Connection.set_attr() is the direct Python exposure of the
+        native ODBC SQLSetConnectAttr API documented by Informix 14.10+.
+        SQLAlchemy calls this method only before a transaction begins.
+        """
+    
+        normalized_level = self._normalize_isolation_level(level)
+    
+        if normalized_level == "AUTOCOMMIT":
+            dbapi_connection.autocommit = True
+            return
+    
+        if normalized_level not in self._isolation_level_to_odbc_name:
+            raise ArgumentError(
+                "Invalid value %r for isolation_level. "
+                "Valid isolation levels for %r are %s"
+                % (
+                    normalized_level,
+                    self.name,
+                    ", ".join(self._advertised_isolation_levels),
+                )
+            )
+    
+        # Leaving AUTOCOMMIT must happen before changing the ODBC transaction
+        # attribute.  SQLAlchemy ensures there is no active transaction here.
+        dbapi_connection.autocommit = False
+        attr = self._dbapi_constant(
+            "SQL_ATTR_TXN_ISOLATION",
+            self._odbc_sql_attr_txn_isolation,
+        )
+        value = self._odbc_isolation_value(normalized_level)
+>       dbapi_connection.set_attr(attr, value)
+E       pyodbc.Error: ('HY011', '[HY011] [Informix][Informix ODBC Driver]Attribute cannot be set now. (-11119) (SQLSetConnectAttr)')
+
+IfxAlchemy\pyodbc.py:494: Error
+___ test_connection_execution_option_sets_and_reports_isolation[DIRTY READ] ___
+
+engine = Engine(informix+pyodbc://informix:***@127.0.0.1/prueba4db?DELIMIDENT=Y&driver=IBM+INFORMIX+ODBC+DRIVER+%2864-bit%29&protocol=onsoctcp&server=informix&service=9088)
+level = 'DIRTY READ'
+
+    @pytest.mark.parametrize(
+        "level",
+        [
+            "READ UNCOMMITTED",
+            "DIRTY READ",
+            "READ COMMITTED",
+            "COMMITTED READ",
+            "REPEATABLE READ",
+            "SERIALIZABLE",
+            "UNCOMMITTED READ",
+            "UR",
+            "CURSOR STABILITY",
+            "CS",
+            "READ STABILITY",
+            "RS",
+            "RR",
+        ],
+    )
+    def test_connection_execution_option_sets_and_reports_isolation(engine, level):
+        """Exercise SQLAlchemy's public per-Connection isolation API."""
+    
+        with engine.connect() as connection:
+>           connection.execution_options(isolation_level=level)
+
+test\test_pyodbc_isolation_integration.py:34: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+.venv\Lib\site-packages\sqlalchemy\engine\base.py:515: in execution_options
+    self.dialect.set_connection_execution_options(self, opt)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:665: in set_connection_execution_options
+    self._set_connection_characteristics(connection, characteristics)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:690: in _set_connection_characteristics
+    characteristic.set_connection_characteristic(
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:71: in set_connection_characteristic
+    self.set_characteristic(dialect, dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:108: in set_characteristic
+    dialect._assert_and_set_isolation_level(dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:1002: in _assert_and_set_isolation_level
+    self.set_isolation_level(dbapi_conn, level)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <IfxAlchemy.pyodbc.IfxDialect_pyodbc object at 0x000001F294615F40>
+dbapi_connection = <pyodbc.Connection object at 0x000001F294DC89F0>
+level = 'DIRTY READ'
+
+    def set_isolation_level(self, dbapi_connection, level):
+        """Set an Informix isolation level through SQLSetConnectAttr.
+    
+        pyodbc.Connection.set_attr() is the direct Python exposure of the
+        native ODBC SQLSetConnectAttr API documented by Informix 14.10+.
+        SQLAlchemy calls this method only before a transaction begins.
+        """
+    
+        normalized_level = self._normalize_isolation_level(level)
+    
+        if normalized_level == "AUTOCOMMIT":
+            dbapi_connection.autocommit = True
+            return
+    
+        if normalized_level not in self._isolation_level_to_odbc_name:
+            raise ArgumentError(
+                "Invalid value %r for isolation_level. "
+                "Valid isolation levels for %r are %s"
+                % (
+                    normalized_level,
+                    self.name,
+                    ", ".join(self._advertised_isolation_levels),
+                )
+            )
+    
+        # Leaving AUTOCOMMIT must happen before changing the ODBC transaction
+        # attribute.  SQLAlchemy ensures there is no active transaction here.
+        dbapi_connection.autocommit = False
+        attr = self._dbapi_constant(
+            "SQL_ATTR_TXN_ISOLATION",
+            self._odbc_sql_attr_txn_isolation,
+        )
+        value = self._odbc_isolation_value(normalized_level)
+>       dbapi_connection.set_attr(attr, value)
+E       pyodbc.Error: ('HY011', '[HY011] [Informix][Informix ODBC Driver]Attribute cannot be set now. (-11119) (SQLSetConnectAttr)')
+
+IfxAlchemy\pyodbc.py:494: Error
+_ test_connection_execution_option_sets_and_reports_isolation[READ COMMITTED] _
+
+engine = Engine(informix+pyodbc://informix:***@127.0.0.1/prueba4db?DELIMIDENT=Y&driver=IBM+INFORMIX+ODBC+DRIVER+%2864-bit%29&protocol=onsoctcp&server=informix&service=9088)
+level = 'READ COMMITTED'
+
+    @pytest.mark.parametrize(
+        "level",
+        [
+            "READ UNCOMMITTED",
+            "DIRTY READ",
+            "READ COMMITTED",
+            "COMMITTED READ",
+            "REPEATABLE READ",
+            "SERIALIZABLE",
+            "UNCOMMITTED READ",
+            "UR",
+            "CURSOR STABILITY",
+            "CS",
+            "READ STABILITY",
+            "RS",
+            "RR",
+        ],
+    )
+    def test_connection_execution_option_sets_and_reports_isolation(engine, level):
+        """Exercise SQLAlchemy's public per-Connection isolation API."""
+    
+        with engine.connect() as connection:
+>           connection.execution_options(isolation_level=level)
+
+test\test_pyodbc_isolation_integration.py:34: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+.venv\Lib\site-packages\sqlalchemy\engine\base.py:515: in execution_options
+    self.dialect.set_connection_execution_options(self, opt)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:665: in set_connection_execution_options
+    self._set_connection_characteristics(connection, characteristics)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:690: in _set_connection_characteristics
+    characteristic.set_connection_characteristic(
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:71: in set_connection_characteristic
+    self.set_characteristic(dialect, dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:108: in set_characteristic
+    dialect._assert_and_set_isolation_level(dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:1002: in _assert_and_set_isolation_level
+    self.set_isolation_level(dbapi_conn, level)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <IfxAlchemy.pyodbc.IfxDialect_pyodbc object at 0x000001F294615F40>
+dbapi_connection = <pyodbc.Connection object at 0x000001F2959797C0>
+level = 'READ COMMITTED'
+
+    def set_isolation_level(self, dbapi_connection, level):
+        """Set an Informix isolation level through SQLSetConnectAttr.
+    
+        pyodbc.Connection.set_attr() is the direct Python exposure of the
+        native ODBC SQLSetConnectAttr API documented by Informix 14.10+.
+        SQLAlchemy calls this method only before a transaction begins.
+        """
+    
+        normalized_level = self._normalize_isolation_level(level)
+    
+        if normalized_level == "AUTOCOMMIT":
+            dbapi_connection.autocommit = True
+            return
+    
+        if normalized_level not in self._isolation_level_to_odbc_name:
+            raise ArgumentError(
+                "Invalid value %r for isolation_level. "
+                "Valid isolation levels for %r are %s"
+                % (
+                    normalized_level,
+                    self.name,
+                    ", ".join(self._advertised_isolation_levels),
+                )
+            )
+    
+        # Leaving AUTOCOMMIT must happen before changing the ODBC transaction
+        # attribute.  SQLAlchemy ensures there is no active transaction here.
+        dbapi_connection.autocommit = False
+        attr = self._dbapi_constant(
+            "SQL_ATTR_TXN_ISOLATION",
+            self._odbc_sql_attr_txn_isolation,
+        )
+        value = self._odbc_isolation_value(normalized_level)
+>       dbapi_connection.set_attr(attr, value)
+E       pyodbc.Error: ('HY011', '[HY011] [Informix][Informix ODBC Driver]Attribute cannot be set now. (-11119) (SQLSetConnectAttr)')
+
+IfxAlchemy\pyodbc.py:494: Error
+_ test_connection_execution_option_sets_and_reports_isolation[COMMITTED READ] _
+
+engine = Engine(informix+pyodbc://informix:***@127.0.0.1/prueba4db?DELIMIDENT=Y&driver=IBM+INFORMIX+ODBC+DRIVER+%2864-bit%29&protocol=onsoctcp&server=informix&service=9088)
+level = 'COMMITTED READ'
+
+    @pytest.mark.parametrize(
+        "level",
+        [
+            "READ UNCOMMITTED",
+            "DIRTY READ",
+            "READ COMMITTED",
+            "COMMITTED READ",
+            "REPEATABLE READ",
+            "SERIALIZABLE",
+            "UNCOMMITTED READ",
+            "UR",
+            "CURSOR STABILITY",
+            "CS",
+            "READ STABILITY",
+            "RS",
+            "RR",
+        ],
+    )
+    def test_connection_execution_option_sets_and_reports_isolation(engine, level):
+        """Exercise SQLAlchemy's public per-Connection isolation API."""
+    
+        with engine.connect() as connection:
+>           connection.execution_options(isolation_level=level)
+
+test\test_pyodbc_isolation_integration.py:34: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+.venv\Lib\site-packages\sqlalchemy\engine\base.py:515: in execution_options
+    self.dialect.set_connection_execution_options(self, opt)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:665: in set_connection_execution_options
+    self._set_connection_characteristics(connection, characteristics)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:690: in _set_connection_characteristics
+    characteristic.set_connection_characteristic(
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:71: in set_connection_characteristic
+    self.set_characteristic(dialect, dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:108: in set_characteristic
+    dialect._assert_and_set_isolation_level(dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:1002: in _assert_and_set_isolation_level
+    self.set_isolation_level(dbapi_conn, level)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <IfxAlchemy.pyodbc.IfxDialect_pyodbc object at 0x000001F294615F40>
+dbapi_connection = <pyodbc.Connection object at 0x000001F294DC89F0>
+level = 'COMMITTED READ'
+
+    def set_isolation_level(self, dbapi_connection, level):
+        """Set an Informix isolation level through SQLSetConnectAttr.
+    
+        pyodbc.Connection.set_attr() is the direct Python exposure of the
+        native ODBC SQLSetConnectAttr API documented by Informix 14.10+.
+        SQLAlchemy calls this method only before a transaction begins.
+        """
+    
+        normalized_level = self._normalize_isolation_level(level)
+    
+        if normalized_level == "AUTOCOMMIT":
+            dbapi_connection.autocommit = True
+            return
+    
+        if normalized_level not in self._isolation_level_to_odbc_name:
+            raise ArgumentError(
+                "Invalid value %r for isolation_level. "
+                "Valid isolation levels for %r are %s"
+                % (
+                    normalized_level,
+                    self.name,
+                    ", ".join(self._advertised_isolation_levels),
+                )
+            )
+    
+        # Leaving AUTOCOMMIT must happen before changing the ODBC transaction
+        # attribute.  SQLAlchemy ensures there is no active transaction here.
+        dbapi_connection.autocommit = False
+        attr = self._dbapi_constant(
+            "SQL_ATTR_TXN_ISOLATION",
+            self._odbc_sql_attr_txn_isolation,
+        )
+        value = self._odbc_isolation_value(normalized_level)
+>       dbapi_connection.set_attr(attr, value)
+E       pyodbc.Error: ('HY011', '[HY011] [Informix][Informix ODBC Driver]Attribute cannot be set now. (-11119) (SQLSetConnectAttr)')
+
+IfxAlchemy\pyodbc.py:494: Error
+_ test_connection_execution_option_sets_and_reports_isolation[REPEATABLE READ] _
+
+engine = Engine(informix+pyodbc://informix:***@127.0.0.1/prueba4db?DELIMIDENT=Y&driver=IBM+INFORMIX+ODBC+DRIVER+%2864-bit%29&protocol=onsoctcp&server=informix&service=9088)
+level = 'REPEATABLE READ'
+
+    @pytest.mark.parametrize(
+        "level",
+        [
+            "READ UNCOMMITTED",
+            "DIRTY READ",
+            "READ COMMITTED",
+            "COMMITTED READ",
+            "REPEATABLE READ",
+            "SERIALIZABLE",
+            "UNCOMMITTED READ",
+            "UR",
+            "CURSOR STABILITY",
+            "CS",
+            "READ STABILITY",
+            "RS",
+            "RR",
+        ],
+    )
+    def test_connection_execution_option_sets_and_reports_isolation(engine, level):
+        """Exercise SQLAlchemy's public per-Connection isolation API."""
+    
+        with engine.connect() as connection:
+>           connection.execution_options(isolation_level=level)
+
+test\test_pyodbc_isolation_integration.py:34: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+.venv\Lib\site-packages\sqlalchemy\engine\base.py:515: in execution_options
+    self.dialect.set_connection_execution_options(self, opt)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:665: in set_connection_execution_options
+    self._set_connection_characteristics(connection, characteristics)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:690: in _set_connection_characteristics
+    characteristic.set_connection_characteristic(
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:71: in set_connection_characteristic
+    self.set_characteristic(dialect, dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:108: in set_characteristic
+    dialect._assert_and_set_isolation_level(dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:1002: in _assert_and_set_isolation_level
+    self.set_isolation_level(dbapi_conn, level)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <IfxAlchemy.pyodbc.IfxDialect_pyodbc object at 0x000001F294615F40>
+dbapi_connection = <pyodbc.Connection object at 0x000001F2959797C0>
+level = 'REPEATABLE READ'
+
+    def set_isolation_level(self, dbapi_connection, level):
+        """Set an Informix isolation level through SQLSetConnectAttr.
+    
+        pyodbc.Connection.set_attr() is the direct Python exposure of the
+        native ODBC SQLSetConnectAttr API documented by Informix 14.10+.
+        SQLAlchemy calls this method only before a transaction begins.
+        """
+    
+        normalized_level = self._normalize_isolation_level(level)
+    
+        if normalized_level == "AUTOCOMMIT":
+            dbapi_connection.autocommit = True
+            return
+    
+        if normalized_level not in self._isolation_level_to_odbc_name:
+            raise ArgumentError(
+                "Invalid value %r for isolation_level. "
+                "Valid isolation levels for %r are %s"
+                % (
+                    normalized_level,
+                    self.name,
+                    ", ".join(self._advertised_isolation_levels),
+                )
+            )
+    
+        # Leaving AUTOCOMMIT must happen before changing the ODBC transaction
+        # attribute.  SQLAlchemy ensures there is no active transaction here.
+        dbapi_connection.autocommit = False
+        attr = self._dbapi_constant(
+            "SQL_ATTR_TXN_ISOLATION",
+            self._odbc_sql_attr_txn_isolation,
+        )
+        value = self._odbc_isolation_value(normalized_level)
+>       dbapi_connection.set_attr(attr, value)
+E       pyodbc.Error: ('HY011', '[HY011] [Informix][Informix ODBC Driver]Attribute cannot be set now. (-11119) (SQLSetConnectAttr)')
+
+IfxAlchemy\pyodbc.py:494: Error
+__ test_connection_execution_option_sets_and_reports_isolation[SERIALIZABLE] __
+
+engine = Engine(informix+pyodbc://informix:***@127.0.0.1/prueba4db?DELIMIDENT=Y&driver=IBM+INFORMIX+ODBC+DRIVER+%2864-bit%29&protocol=onsoctcp&server=informix&service=9088)
+level = 'SERIALIZABLE'
+
+    @pytest.mark.parametrize(
+        "level",
+        [
+            "READ UNCOMMITTED",
+            "DIRTY READ",
+            "READ COMMITTED",
+            "COMMITTED READ",
+            "REPEATABLE READ",
+            "SERIALIZABLE",
+            "UNCOMMITTED READ",
+            "UR",
+            "CURSOR STABILITY",
+            "CS",
+            "READ STABILITY",
+            "RS",
+            "RR",
+        ],
+    )
+    def test_connection_execution_option_sets_and_reports_isolation(engine, level):
+        """Exercise SQLAlchemy's public per-Connection isolation API."""
+    
+        with engine.connect() as connection:
+>           connection.execution_options(isolation_level=level)
+
+test\test_pyodbc_isolation_integration.py:34: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+.venv\Lib\site-packages\sqlalchemy\engine\base.py:515: in execution_options
+    self.dialect.set_connection_execution_options(self, opt)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:665: in set_connection_execution_options
+    self._set_connection_characteristics(connection, characteristics)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:690: in _set_connection_characteristics
+    characteristic.set_connection_characteristic(
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:71: in set_connection_characteristic
+    self.set_characteristic(dialect, dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:108: in set_characteristic
+    dialect._assert_and_set_isolation_level(dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:1002: in _assert_and_set_isolation_level
+    self.set_isolation_level(dbapi_conn, level)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <IfxAlchemy.pyodbc.IfxDialect_pyodbc object at 0x000001F294615F40>
+dbapi_connection = <pyodbc.Connection object at 0x000001F294DC89F0>
+level = 'SERIALIZABLE'
+
+    def set_isolation_level(self, dbapi_connection, level):
+        """Set an Informix isolation level through SQLSetConnectAttr.
+    
+        pyodbc.Connection.set_attr() is the direct Python exposure of the
+        native ODBC SQLSetConnectAttr API documented by Informix 14.10+.
+        SQLAlchemy calls this method only before a transaction begins.
+        """
+    
+        normalized_level = self._normalize_isolation_level(level)
+    
+        if normalized_level == "AUTOCOMMIT":
+            dbapi_connection.autocommit = True
+            return
+    
+        if normalized_level not in self._isolation_level_to_odbc_name:
+            raise ArgumentError(
+                "Invalid value %r for isolation_level. "
+                "Valid isolation levels for %r are %s"
+                % (
+                    normalized_level,
+                    self.name,
+                    ", ".join(self._advertised_isolation_levels),
+                )
+            )
+    
+        # Leaving AUTOCOMMIT must happen before changing the ODBC transaction
+        # attribute.  SQLAlchemy ensures there is no active transaction here.
+        dbapi_connection.autocommit = False
+        attr = self._dbapi_constant(
+            "SQL_ATTR_TXN_ISOLATION",
+            self._odbc_sql_attr_txn_isolation,
+        )
+        value = self._odbc_isolation_value(normalized_level)
+>       dbapi_connection.set_attr(attr, value)
+E       pyodbc.Error: ('HY011', '[HY011] [Informix][Informix ODBC Driver]Attribute cannot be set now. (-11119) (SQLSetConnectAttr)')
+
+IfxAlchemy\pyodbc.py:494: Error
+_ test_connection_execution_option_sets_and_reports_isolation[UNCOMMITTED READ] _
+
+engine = Engine(informix+pyodbc://informix:***@127.0.0.1/prueba4db?DELIMIDENT=Y&driver=IBM+INFORMIX+ODBC+DRIVER+%2864-bit%29&protocol=onsoctcp&server=informix&service=9088)
+level = 'UNCOMMITTED READ'
+
+    @pytest.mark.parametrize(
+        "level",
+        [
+            "READ UNCOMMITTED",
+            "DIRTY READ",
+            "READ COMMITTED",
+            "COMMITTED READ",
+            "REPEATABLE READ",
+            "SERIALIZABLE",
+            "UNCOMMITTED READ",
+            "UR",
+            "CURSOR STABILITY",
+            "CS",
+            "READ STABILITY",
+            "RS",
+            "RR",
+        ],
+    )
+    def test_connection_execution_option_sets_and_reports_isolation(engine, level):
+        """Exercise SQLAlchemy's public per-Connection isolation API."""
+    
+        with engine.connect() as connection:
+>           connection.execution_options(isolation_level=level)
+
+test\test_pyodbc_isolation_integration.py:34: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+.venv\Lib\site-packages\sqlalchemy\engine\base.py:515: in execution_options
+    self.dialect.set_connection_execution_options(self, opt)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:665: in set_connection_execution_options
+    self._set_connection_characteristics(connection, characteristics)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:690: in _set_connection_characteristics
+    characteristic.set_connection_characteristic(
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:71: in set_connection_characteristic
+    self.set_characteristic(dialect, dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:108: in set_characteristic
+    dialect._assert_and_set_isolation_level(dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:1002: in _assert_and_set_isolation_level
+    self.set_isolation_level(dbapi_conn, level)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <IfxAlchemy.pyodbc.IfxDialect_pyodbc object at 0x000001F294615F40>
+dbapi_connection = <pyodbc.Connection object at 0x000001F2959797C0>
+level = 'UNCOMMITTED READ'
+
+    def set_isolation_level(self, dbapi_connection, level):
+        """Set an Informix isolation level through SQLSetConnectAttr.
+    
+        pyodbc.Connection.set_attr() is the direct Python exposure of the
+        native ODBC SQLSetConnectAttr API documented by Informix 14.10+.
+        SQLAlchemy calls this method only before a transaction begins.
+        """
+    
+        normalized_level = self._normalize_isolation_level(level)
+    
+        if normalized_level == "AUTOCOMMIT":
+            dbapi_connection.autocommit = True
+            return
+    
+        if normalized_level not in self._isolation_level_to_odbc_name:
+            raise ArgumentError(
+                "Invalid value %r for isolation_level. "
+                "Valid isolation levels for %r are %s"
+                % (
+                    normalized_level,
+                    self.name,
+                    ", ".join(self._advertised_isolation_levels),
+                )
+            )
+    
+        # Leaving AUTOCOMMIT must happen before changing the ODBC transaction
+        # attribute.  SQLAlchemy ensures there is no active transaction here.
+        dbapi_connection.autocommit = False
+        attr = self._dbapi_constant(
+            "SQL_ATTR_TXN_ISOLATION",
+            self._odbc_sql_attr_txn_isolation,
+        )
+        value = self._odbc_isolation_value(normalized_level)
+>       dbapi_connection.set_attr(attr, value)
+E       pyodbc.Error: ('HY011', '[HY011] [Informix][Informix ODBC Driver]Attribute cannot be set now. (-11119) (SQLSetConnectAttr)')
+
+IfxAlchemy\pyodbc.py:494: Error
+_______ test_connection_execution_option_sets_and_reports_isolation[UR] _______
+
+engine = Engine(informix+pyodbc://informix:***@127.0.0.1/prueba4db?DELIMIDENT=Y&driver=IBM+INFORMIX+ODBC+DRIVER+%2864-bit%29&protocol=onsoctcp&server=informix&service=9088)
+level = 'UR'
+
+    @pytest.mark.parametrize(
+        "level",
+        [
+            "READ UNCOMMITTED",
+            "DIRTY READ",
+            "READ COMMITTED",
+            "COMMITTED READ",
+            "REPEATABLE READ",
+            "SERIALIZABLE",
+            "UNCOMMITTED READ",
+            "UR",
+            "CURSOR STABILITY",
+            "CS",
+            "READ STABILITY",
+            "RS",
+            "RR",
+        ],
+    )
+    def test_connection_execution_option_sets_and_reports_isolation(engine, level):
+        """Exercise SQLAlchemy's public per-Connection isolation API."""
+    
+        with engine.connect() as connection:
+>           connection.execution_options(isolation_level=level)
+
+test\test_pyodbc_isolation_integration.py:34: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+.venv\Lib\site-packages\sqlalchemy\engine\base.py:515: in execution_options
+    self.dialect.set_connection_execution_options(self, opt)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:665: in set_connection_execution_options
+    self._set_connection_characteristics(connection, characteristics)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:690: in _set_connection_characteristics
+    characteristic.set_connection_characteristic(
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:71: in set_connection_characteristic
+    self.set_characteristic(dialect, dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:108: in set_characteristic
+    dialect._assert_and_set_isolation_level(dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:1002: in _assert_and_set_isolation_level
+    self.set_isolation_level(dbapi_conn, level)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <IfxAlchemy.pyodbc.IfxDialect_pyodbc object at 0x000001F294615F40>
+dbapi_connection = <pyodbc.Connection object at 0x000001F294DC89F0>
+level = 'UR'
+
+    def set_isolation_level(self, dbapi_connection, level):
+        """Set an Informix isolation level through SQLSetConnectAttr.
+    
+        pyodbc.Connection.set_attr() is the direct Python exposure of the
+        native ODBC SQLSetConnectAttr API documented by Informix 14.10+.
+        SQLAlchemy calls this method only before a transaction begins.
+        """
+    
+        normalized_level = self._normalize_isolation_level(level)
+    
+        if normalized_level == "AUTOCOMMIT":
+            dbapi_connection.autocommit = True
+            return
+    
+        if normalized_level not in self._isolation_level_to_odbc_name:
+            raise ArgumentError(
+                "Invalid value %r for isolation_level. "
+                "Valid isolation levels for %r are %s"
+                % (
+                    normalized_level,
+                    self.name,
+                    ", ".join(self._advertised_isolation_levels),
+                )
+            )
+    
+        # Leaving AUTOCOMMIT must happen before changing the ODBC transaction
+        # attribute.  SQLAlchemy ensures there is no active transaction here.
+        dbapi_connection.autocommit = False
+        attr = self._dbapi_constant(
+            "SQL_ATTR_TXN_ISOLATION",
+            self._odbc_sql_attr_txn_isolation,
+        )
+        value = self._odbc_isolation_value(normalized_level)
+>       dbapi_connection.set_attr(attr, value)
+E       pyodbc.Error: ('HY011', '[HY011] [Informix][Informix ODBC Driver]Attribute cannot be set now. (-11119) (SQLSetConnectAttr)')
+
+IfxAlchemy\pyodbc.py:494: Error
+_ test_connection_execution_option_sets_and_reports_isolation[CURSOR STABILITY] _
+
+engine = Engine(informix+pyodbc://informix:***@127.0.0.1/prueba4db?DELIMIDENT=Y&driver=IBM+INFORMIX+ODBC+DRIVER+%2864-bit%29&protocol=onsoctcp&server=informix&service=9088)
+level = 'CURSOR STABILITY'
+
+    @pytest.mark.parametrize(
+        "level",
+        [
+            "READ UNCOMMITTED",
+            "DIRTY READ",
+            "READ COMMITTED",
+            "COMMITTED READ",
+            "REPEATABLE READ",
+            "SERIALIZABLE",
+            "UNCOMMITTED READ",
+            "UR",
+            "CURSOR STABILITY",
+            "CS",
+            "READ STABILITY",
+            "RS",
+            "RR",
+        ],
+    )
+    def test_connection_execution_option_sets_and_reports_isolation(engine, level):
+        """Exercise SQLAlchemy's public per-Connection isolation API."""
+    
+        with engine.connect() as connection:
+>           connection.execution_options(isolation_level=level)
+
+test\test_pyodbc_isolation_integration.py:34: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+.venv\Lib\site-packages\sqlalchemy\engine\base.py:515: in execution_options
+    self.dialect.set_connection_execution_options(self, opt)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:665: in set_connection_execution_options
+    self._set_connection_characteristics(connection, characteristics)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:690: in _set_connection_characteristics
+    characteristic.set_connection_characteristic(
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:71: in set_connection_characteristic
+    self.set_characteristic(dialect, dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:108: in set_characteristic
+    dialect._assert_and_set_isolation_level(dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:1002: in _assert_and_set_isolation_level
+    self.set_isolation_level(dbapi_conn, level)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <IfxAlchemy.pyodbc.IfxDialect_pyodbc object at 0x000001F294615F40>
+dbapi_connection = <pyodbc.Connection object at 0x000001F2959797C0>
+level = 'CURSOR STABILITY'
+
+    def set_isolation_level(self, dbapi_connection, level):
+        """Set an Informix isolation level through SQLSetConnectAttr.
+    
+        pyodbc.Connection.set_attr() is the direct Python exposure of the
+        native ODBC SQLSetConnectAttr API documented by Informix 14.10+.
+        SQLAlchemy calls this method only before a transaction begins.
+        """
+    
+        normalized_level = self._normalize_isolation_level(level)
+    
+        if normalized_level == "AUTOCOMMIT":
+            dbapi_connection.autocommit = True
+            return
+    
+        if normalized_level not in self._isolation_level_to_odbc_name:
+            raise ArgumentError(
+                "Invalid value %r for isolation_level. "
+                "Valid isolation levels for %r are %s"
+                % (
+                    normalized_level,
+                    self.name,
+                    ", ".join(self._advertised_isolation_levels),
+                )
+            )
+    
+        # Leaving AUTOCOMMIT must happen before changing the ODBC transaction
+        # attribute.  SQLAlchemy ensures there is no active transaction here.
+        dbapi_connection.autocommit = False
+        attr = self._dbapi_constant(
+            "SQL_ATTR_TXN_ISOLATION",
+            self._odbc_sql_attr_txn_isolation,
+        )
+        value = self._odbc_isolation_value(normalized_level)
+>       dbapi_connection.set_attr(attr, value)
+E       pyodbc.Error: ('HY011', '[HY011] [Informix][Informix ODBC Driver]Attribute cannot be set now. (-11119) (SQLSetConnectAttr)')
+
+IfxAlchemy\pyodbc.py:494: Error
+_______ test_connection_execution_option_sets_and_reports_isolation[CS] _______
+
+engine = Engine(informix+pyodbc://informix:***@127.0.0.1/prueba4db?DELIMIDENT=Y&driver=IBM+INFORMIX+ODBC+DRIVER+%2864-bit%29&protocol=onsoctcp&server=informix&service=9088)
+level = 'CS'
+
+    @pytest.mark.parametrize(
+        "level",
+        [
+            "READ UNCOMMITTED",
+            "DIRTY READ",
+            "READ COMMITTED",
+            "COMMITTED READ",
+            "REPEATABLE READ",
+            "SERIALIZABLE",
+            "UNCOMMITTED READ",
+            "UR",
+            "CURSOR STABILITY",
+            "CS",
+            "READ STABILITY",
+            "RS",
+            "RR",
+        ],
+    )
+    def test_connection_execution_option_sets_and_reports_isolation(engine, level):
+        """Exercise SQLAlchemy's public per-Connection isolation API."""
+    
+        with engine.connect() as connection:
+>           connection.execution_options(isolation_level=level)
+
+test\test_pyodbc_isolation_integration.py:34: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+.venv\Lib\site-packages\sqlalchemy\engine\base.py:515: in execution_options
+    self.dialect.set_connection_execution_options(self, opt)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:665: in set_connection_execution_options
+    self._set_connection_characteristics(connection, characteristics)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:690: in _set_connection_characteristics
+    characteristic.set_connection_characteristic(
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:71: in set_connection_characteristic
+    self.set_characteristic(dialect, dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:108: in set_characteristic
+    dialect._assert_and_set_isolation_level(dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:1002: in _assert_and_set_isolation_level
+    self.set_isolation_level(dbapi_conn, level)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <IfxAlchemy.pyodbc.IfxDialect_pyodbc object at 0x000001F294615F40>
+dbapi_connection = <pyodbc.Connection object at 0x000001F294DC89F0>
+level = 'CS'
+
+    def set_isolation_level(self, dbapi_connection, level):
+        """Set an Informix isolation level through SQLSetConnectAttr.
+    
+        pyodbc.Connection.set_attr() is the direct Python exposure of the
+        native ODBC SQLSetConnectAttr API documented by Informix 14.10+.
+        SQLAlchemy calls this method only before a transaction begins.
+        """
+    
+        normalized_level = self._normalize_isolation_level(level)
+    
+        if normalized_level == "AUTOCOMMIT":
+            dbapi_connection.autocommit = True
+            return
+    
+        if normalized_level not in self._isolation_level_to_odbc_name:
+            raise ArgumentError(
+                "Invalid value %r for isolation_level. "
+                "Valid isolation levels for %r are %s"
+                % (
+                    normalized_level,
+                    self.name,
+                    ", ".join(self._advertised_isolation_levels),
+                )
+            )
+    
+        # Leaving AUTOCOMMIT must happen before changing the ODBC transaction
+        # attribute.  SQLAlchemy ensures there is no active transaction here.
+        dbapi_connection.autocommit = False
+        attr = self._dbapi_constant(
+            "SQL_ATTR_TXN_ISOLATION",
+            self._odbc_sql_attr_txn_isolation,
+        )
+        value = self._odbc_isolation_value(normalized_level)
+>       dbapi_connection.set_attr(attr, value)
+E       pyodbc.Error: ('HY011', '[HY011] [Informix][Informix ODBC Driver]Attribute cannot be set now. (-11119) (SQLSetConnectAttr)')
+
+IfxAlchemy\pyodbc.py:494: Error
+_ test_connection_execution_option_sets_and_reports_isolation[READ STABILITY] _
+
+engine = Engine(informix+pyodbc://informix:***@127.0.0.1/prueba4db?DELIMIDENT=Y&driver=IBM+INFORMIX+ODBC+DRIVER+%2864-bit%29&protocol=onsoctcp&server=informix&service=9088)
+level = 'READ STABILITY'
+
+    @pytest.mark.parametrize(
+        "level",
+        [
+            "READ UNCOMMITTED",
+            "DIRTY READ",
+            "READ COMMITTED",
+            "COMMITTED READ",
+            "REPEATABLE READ",
+            "SERIALIZABLE",
+            "UNCOMMITTED READ",
+            "UR",
+            "CURSOR STABILITY",
+            "CS",
+            "READ STABILITY",
+            "RS",
+            "RR",
+        ],
+    )
+    def test_connection_execution_option_sets_and_reports_isolation(engine, level):
+        """Exercise SQLAlchemy's public per-Connection isolation API."""
+    
+        with engine.connect() as connection:
+>           connection.execution_options(isolation_level=level)
+
+test\test_pyodbc_isolation_integration.py:34: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+.venv\Lib\site-packages\sqlalchemy\engine\base.py:515: in execution_options
+    self.dialect.set_connection_execution_options(self, opt)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:665: in set_connection_execution_options
+    self._set_connection_characteristics(connection, characteristics)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:690: in _set_connection_characteristics
+    characteristic.set_connection_characteristic(
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:71: in set_connection_characteristic
+    self.set_characteristic(dialect, dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:108: in set_characteristic
+    dialect._assert_and_set_isolation_level(dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:1002: in _assert_and_set_isolation_level
+    self.set_isolation_level(dbapi_conn, level)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <IfxAlchemy.pyodbc.IfxDialect_pyodbc object at 0x000001F294615F40>
+dbapi_connection = <pyodbc.Connection object at 0x000001F2959797C0>
+level = 'READ STABILITY'
+
+    def set_isolation_level(self, dbapi_connection, level):
+        """Set an Informix isolation level through SQLSetConnectAttr.
+    
+        pyodbc.Connection.set_attr() is the direct Python exposure of the
+        native ODBC SQLSetConnectAttr API documented by Informix 14.10+.
+        SQLAlchemy calls this method only before a transaction begins.
+        """
+    
+        normalized_level = self._normalize_isolation_level(level)
+    
+        if normalized_level == "AUTOCOMMIT":
+            dbapi_connection.autocommit = True
+            return
+    
+        if normalized_level not in self._isolation_level_to_odbc_name:
+            raise ArgumentError(
+                "Invalid value %r for isolation_level. "
+                "Valid isolation levels for %r are %s"
+                % (
+                    normalized_level,
+                    self.name,
+                    ", ".join(self._advertised_isolation_levels),
+                )
+            )
+    
+        # Leaving AUTOCOMMIT must happen before changing the ODBC transaction
+        # attribute.  SQLAlchemy ensures there is no active transaction here.
+        dbapi_connection.autocommit = False
+        attr = self._dbapi_constant(
+            "SQL_ATTR_TXN_ISOLATION",
+            self._odbc_sql_attr_txn_isolation,
+        )
+        value = self._odbc_isolation_value(normalized_level)
+>       dbapi_connection.set_attr(attr, value)
+E       pyodbc.Error: ('HY011', '[HY011] [Informix][Informix ODBC Driver]Attribute cannot be set now. (-11119) (SQLSetConnectAttr)')
+
+IfxAlchemy\pyodbc.py:494: Error
+_______ test_connection_execution_option_sets_and_reports_isolation[RS] _______
+
+engine = Engine(informix+pyodbc://informix:***@127.0.0.1/prueba4db?DELIMIDENT=Y&driver=IBM+INFORMIX+ODBC+DRIVER+%2864-bit%29&protocol=onsoctcp&server=informix&service=9088)
+level = 'RS'
+
+    @pytest.mark.parametrize(
+        "level",
+        [
+            "READ UNCOMMITTED",
+            "DIRTY READ",
+            "READ COMMITTED",
+            "COMMITTED READ",
+            "REPEATABLE READ",
+            "SERIALIZABLE",
+            "UNCOMMITTED READ",
+            "UR",
+            "CURSOR STABILITY",
+            "CS",
+            "READ STABILITY",
+            "RS",
+            "RR",
+        ],
+    )
+    def test_connection_execution_option_sets_and_reports_isolation(engine, level):
+        """Exercise SQLAlchemy's public per-Connection isolation API."""
+    
+        with engine.connect() as connection:
+>           connection.execution_options(isolation_level=level)
+
+test\test_pyodbc_isolation_integration.py:34: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+.venv\Lib\site-packages\sqlalchemy\engine\base.py:515: in execution_options
+    self.dialect.set_connection_execution_options(self, opt)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:665: in set_connection_execution_options
+    self._set_connection_characteristics(connection, characteristics)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:690: in _set_connection_characteristics
+    characteristic.set_connection_characteristic(
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:71: in set_connection_characteristic
+    self.set_characteristic(dialect, dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:108: in set_characteristic
+    dialect._assert_and_set_isolation_level(dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:1002: in _assert_and_set_isolation_level
+    self.set_isolation_level(dbapi_conn, level)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <IfxAlchemy.pyodbc.IfxDialect_pyodbc object at 0x000001F294615F40>
+dbapi_connection = <pyodbc.Connection object at 0x000001F294DC89F0>
+level = 'RS'
+
+    def set_isolation_level(self, dbapi_connection, level):
+        """Set an Informix isolation level through SQLSetConnectAttr.
+    
+        pyodbc.Connection.set_attr() is the direct Python exposure of the
+        native ODBC SQLSetConnectAttr API documented by Informix 14.10+.
+        SQLAlchemy calls this method only before a transaction begins.
+        """
+    
+        normalized_level = self._normalize_isolation_level(level)
+    
+        if normalized_level == "AUTOCOMMIT":
+            dbapi_connection.autocommit = True
+            return
+    
+        if normalized_level not in self._isolation_level_to_odbc_name:
+            raise ArgumentError(
+                "Invalid value %r for isolation_level. "
+                "Valid isolation levels for %r are %s"
+                % (
+                    normalized_level,
+                    self.name,
+                    ", ".join(self._advertised_isolation_levels),
+                )
+            )
+    
+        # Leaving AUTOCOMMIT must happen before changing the ODBC transaction
+        # attribute.  SQLAlchemy ensures there is no active transaction here.
+        dbapi_connection.autocommit = False
+        attr = self._dbapi_constant(
+            "SQL_ATTR_TXN_ISOLATION",
+            self._odbc_sql_attr_txn_isolation,
+        )
+        value = self._odbc_isolation_value(normalized_level)
+>       dbapi_connection.set_attr(attr, value)
+E       pyodbc.Error: ('HY011', '[HY011] [Informix][Informix ODBC Driver]Attribute cannot be set now. (-11119) (SQLSetConnectAttr)')
+
+IfxAlchemy\pyodbc.py:494: Error
+_______ test_connection_execution_option_sets_and_reports_isolation[RR] _______
+
+engine = Engine(informix+pyodbc://informix:***@127.0.0.1/prueba4db?DELIMIDENT=Y&driver=IBM+INFORMIX+ODBC+DRIVER+%2864-bit%29&protocol=onsoctcp&server=informix&service=9088)
+level = 'RR'
+
+    @pytest.mark.parametrize(
+        "level",
+        [
+            "READ UNCOMMITTED",
+            "DIRTY READ",
+            "READ COMMITTED",
+            "COMMITTED READ",
+            "REPEATABLE READ",
+            "SERIALIZABLE",
+            "UNCOMMITTED READ",
+            "UR",
+            "CURSOR STABILITY",
+            "CS",
+            "READ STABILITY",
+            "RS",
+            "RR",
+        ],
+    )
+    def test_connection_execution_option_sets_and_reports_isolation(engine, level):
+        """Exercise SQLAlchemy's public per-Connection isolation API."""
+    
+        with engine.connect() as connection:
+>           connection.execution_options(isolation_level=level)
+
+test\test_pyodbc_isolation_integration.py:34: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+.venv\Lib\site-packages\sqlalchemy\engine\base.py:515: in execution_options
+    self.dialect.set_connection_execution_options(self, opt)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:665: in set_connection_execution_options
+    self._set_connection_characteristics(connection, characteristics)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:690: in _set_connection_characteristics
+    characteristic.set_connection_characteristic(
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:71: in set_connection_characteristic
+    self.set_characteristic(dialect, dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:108: in set_characteristic
+    dialect._assert_and_set_isolation_level(dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:1002: in _assert_and_set_isolation_level
+    self.set_isolation_level(dbapi_conn, level)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <IfxAlchemy.pyodbc.IfxDialect_pyodbc object at 0x000001F294615F40>
+dbapi_connection = <pyodbc.Connection object at 0x000001F2959797C0>
+level = 'RR'
+
+    def set_isolation_level(self, dbapi_connection, level):
+        """Set an Informix isolation level through SQLSetConnectAttr.
+    
+        pyodbc.Connection.set_attr() is the direct Python exposure of the
+        native ODBC SQLSetConnectAttr API documented by Informix 14.10+.
+        SQLAlchemy calls this method only before a transaction begins.
+        """
+    
+        normalized_level = self._normalize_isolation_level(level)
+    
+        if normalized_level == "AUTOCOMMIT":
+            dbapi_connection.autocommit = True
+            return
+    
+        if normalized_level not in self._isolation_level_to_odbc_name:
+            raise ArgumentError(
+                "Invalid value %r for isolation_level. "
+                "Valid isolation levels for %r are %s"
+                % (
+                    normalized_level,
+                    self.name,
+                    ", ".join(self._advertised_isolation_levels),
+                )
+            )
+    
+        # Leaving AUTOCOMMIT must happen before changing the ODBC transaction
+        # attribute.  SQLAlchemy ensures there is no active transaction here.
+        dbapi_connection.autocommit = False
+        attr = self._dbapi_constant(
+            "SQL_ATTR_TXN_ISOLATION",
+            self._odbc_sql_attr_txn_isolation,
+        )
+        value = self._odbc_isolation_value(normalized_level)
+>       dbapi_connection.set_attr(attr, value)
+E       pyodbc.Error: ('HY011', '[HY011] [Informix][Informix ODBC Driver]Attribute cannot be set now. (-11119) (SQLSetConnectAttr)')
+
+IfxAlchemy\pyodbc.py:494: Error
+_____________ test_pool_checkout_restores_default_isolation_level _____________
+
+engine = Engine(informix+pyodbc://informix:***@127.0.0.1/prueba4db?DELIMIDENT=Y&driver=IBM+INFORMIX+ODBC+DRIVER+%2864-bit%29&protocol=onsoctcp&server=informix&service=9088)
+
+    def test_pool_checkout_restores_default_isolation_level(engine):
+        default = engine.dialect.default_isolation_level
+    
+        with engine.connect() as connection:
+>           connection.execution_options(isolation_level="RR")
+
+test\test_pyodbc_isolation_integration.py:47: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+.venv\Lib\site-packages\sqlalchemy\engine\base.py:515: in execution_options
+    self.dialect.set_connection_execution_options(self, opt)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:665: in set_connection_execution_options
+    self._set_connection_characteristics(connection, characteristics)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:690: in _set_connection_characteristics
+    characteristic.set_connection_characteristic(
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:71: in set_connection_characteristic
+    self.set_characteristic(dialect, dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:108: in set_characteristic
+    dialect._assert_and_set_isolation_level(dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:1002: in _assert_and_set_isolation_level
+    self.set_isolation_level(dbapi_conn, level)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <IfxAlchemy.pyodbc.IfxDialect_pyodbc object at 0x000001F294615F40>
+dbapi_connection = <pyodbc.Connection object at 0x000001F294DC89F0>
+level = 'RR'
+
+    def set_isolation_level(self, dbapi_connection, level):
+        """Set an Informix isolation level through SQLSetConnectAttr.
+    
+        pyodbc.Connection.set_attr() is the direct Python exposure of the
+        native ODBC SQLSetConnectAttr API documented by Informix 14.10+.
+        SQLAlchemy calls this method only before a transaction begins.
+        """
+    
+        normalized_level = self._normalize_isolation_level(level)
+    
+        if normalized_level == "AUTOCOMMIT":
+            dbapi_connection.autocommit = True
+            return
+    
+        if normalized_level not in self._isolation_level_to_odbc_name:
+            raise ArgumentError(
+                "Invalid value %r for isolation_level. "
+                "Valid isolation levels for %r are %s"
+                % (
+                    normalized_level,
+                    self.name,
+                    ", ".join(self._advertised_isolation_levels),
+                )
+            )
+    
+        # Leaving AUTOCOMMIT must happen before changing the ODBC transaction
+        # attribute.  SQLAlchemy ensures there is no active transaction here.
+        dbapi_connection.autocommit = False
+        attr = self._dbapi_constant(
+            "SQL_ATTR_TXN_ISOLATION",
+            self._odbc_sql_attr_txn_isolation,
+        )
+        value = self._odbc_isolation_value(normalized_level)
+>       dbapi_connection.set_attr(attr, value)
+E       pyodbc.Error: ('HY011', '[HY011] [Informix][Informix ODBC Driver]Attribute cannot be set now. (-11119) (SQLSetConnectAttr)')
+
+IfxAlchemy\pyodbc.py:494: Error
+_________ test_engine_execution_option_is_reapplied_after_pool_reset __________
+
+engine = Engine(informix+pyodbc://informix:***@127.0.0.1/prueba4db?DELIMIDENT=Y&driver=IBM+INFORMIX+ODBC+DRIVER+%2864-bit%29&protocol=onsoctcp&server=informix&service=9088)
+
+    def test_engine_execution_option_is_reapplied_after_pool_reset(engine):
+        isolated_engine = engine.execution_options(isolation_level="RS")
+    
+>       with isolated_engine.connect() as connection:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test\test_pyodbc_isolation_integration.py:57: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+.venv\Lib\site-packages\sqlalchemy\engine\base.py:3295: in connect
+    return self._connection_cls(self)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+.venv\Lib\site-packages\sqlalchemy\engine\base.py:173: in __init__
+    self.dispatch.engine_connect(self)
+.venv\Lib\site-packages\sqlalchemy\event\attr.py:516: in __call__
+    fn(*args, **kw)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:651: in set_connection_characteristics
+    self._set_connection_characteristics(
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:690: in _set_connection_characteristics
+    characteristic.set_connection_characteristic(
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:71: in set_connection_characteristic
+    self.set_characteristic(dialect, dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\characteristics.py:108: in set_characteristic
+    dialect._assert_and_set_isolation_level(dbapi_conn, value)
+.venv\Lib\site-packages\sqlalchemy\engine\default.py:1002: in _assert_and_set_isolation_level
+    self.set_isolation_level(dbapi_conn, level)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <IfxAlchemy.pyodbc.IfxDialect_pyodbc object at 0x000001F294615F40>
+dbapi_connection = <pyodbc.Connection object at 0x000001F2959797C0>
+level = 'RS'
+
+    def set_isolation_level(self, dbapi_connection, level):
+        """Set an Informix isolation level through SQLSetConnectAttr.
+    
+        pyodbc.Connection.set_attr() is the direct Python exposure of the
+        native ODBC SQLSetConnectAttr API documented by Informix 14.10+.
+        SQLAlchemy calls this method only before a transaction begins.
+        """
+    
+        normalized_level = self._normalize_isolation_level(level)
+    
+        if normalized_level == "AUTOCOMMIT":
+            dbapi_connection.autocommit = True
+            return
+    
+        if normalized_level not in self._isolation_level_to_odbc_name:
+            raise ArgumentError(
+                "Invalid value %r for isolation_level. "
+                "Valid isolation levels for %r are %s"
+                % (
+                    normalized_level,
+                    self.name,
+                    ", ".join(self._advertised_isolation_levels),
+                )
+            )
+    
+        # Leaving AUTOCOMMIT must happen before changing the ODBC transaction
+        # attribute.  SQLAlchemy ensures there is no active transaction here.
+        dbapi_connection.autocommit = False
+        attr = self._dbapi_constant(
+            "SQL_ATTR_TXN_ISOLATION",
+            self._odbc_sql_attr_txn_isolation,
+        )
+        value = self._odbc_isolation_value(normalized_level)
+>       dbapi_connection.set_attr(attr, value)
+E       pyodbc.Error: ('HY011', '[HY011] [Informix][Informix ODBC Driver]Attribute cannot be set now. (-11119) (SQLSetConnectAttr)')
+
+IfxAlchemy\pyodbc.py:494: Error
+________________ test_create_engine_isolation_level_parameter _________________
+
+informix_url = 'informix+pyodbc://informix:in4mix@127.0.0.1/prueba4db?driver=IBM+INFORMIX+ODBC+DRIVER+(64-bit)&protocol=onsoctcp&server=informix&service=9088&DELIMIDENT=Y'
+
+    def test_create_engine_isolation_level_parameter(informix_url):
+        isolated_engine = create_engine(
+            informix_url,
+            isolation_level="CURSOR STABILITY",
+            pool_pre_ping=True,
+        )
+        try:
+            with isolated_engine.connect() as connection:
+>               assert connection.get_isolation_level() == "CURSOR STABILITY"
+E               AssertionError: assert 'READ COMMITTED' == 'CURSOR STABILITY'
+E                 
+E                 - CURSOR STABILITY
+E                 + READ COMMITTED
+
+test\test_pyodbc_isolation_integration.py:78: AssertionError
+=========================== short test summary info ===========================
+FAILED test/test_pyodbc_isolation_integration.py::test_connection_execution_option_sets_and_reports_isolation[READ UNCOMMITTED]
+FAILED test/test_pyodbc_isolation_integration.py::test_connection_execution_option_sets_and_reports_isolation[DIRTY READ]
+FAILED test/test_pyodbc_isolation_integration.py::test_connection_execution_option_sets_and_reports_isolation[READ COMMITTED]
+FAILED test/test_pyodbc_isolation_integration.py::test_connection_execution_option_sets_and_reports_isolation[COMMITTED READ]
+FAILED test/test_pyodbc_isolation_integration.py::test_connection_execution_option_sets_and_reports_isolation[REPEATABLE READ]
+FAILED test/test_pyodbc_isolation_integration.py::test_connection_execution_option_sets_and_reports_isolation[SERIALIZABLE]
+FAILED test/test_pyodbc_isolation_integration.py::test_connection_execution_option_sets_and_reports_isolation[UNCOMMITTED READ]
+FAILED test/test_pyodbc_isolation_integration.py::test_connection_execution_option_sets_and_reports_isolation[UR]
+FAILED test/test_pyodbc_isolation_integration.py::test_connection_execution_option_sets_and_reports_isolation[CURSOR STABILITY]
+FAILED test/test_pyodbc_isolation_integration.py::test_connection_execution_option_sets_and_reports_isolation[CS]
+FAILED test/test_pyodbc_isolation_integration.py::test_connection_execution_option_sets_and_reports_isolation[READ STABILITY]
+FAILED test/test_pyodbc_isolation_integration.py::test_connection_execution_option_sets_and_reports_isolation[RS]
+FAILED test/test_pyodbc_isolation_integration.py::test_connection_execution_option_sets_and_reports_isolation[RR]
+FAILED test/test_pyodbc_isolation_integration.py::test_pool_checkout_restores_default_isolation_level
+FAILED test/test_pyodbc_isolation_integration.py::test_engine_execution_option_is_reapplied_after_pool_reset
+FAILED test/test_pyodbc_isolation_integration.py::test_create_engine_isolation_level_parameter
+======================= 16 failed, 979 passed in 11.03s =======================

@@ -272,7 +272,7 @@ def test_fetch_without_order_by_maps_to_first(dialect, tables):
     assert "ORDER BY" not in sql
 
 
-def test_bound_fetch_uses_row_number_emulation(dialect, tables):
+def test_bound_fetch_uses_native_first_host_variable(dialect, tables):
     source, _ = tables
 
     sql = _normalized(
@@ -280,9 +280,8 @@ def test_bound_fetch_uses_row_number_emulation(dialect, tables):
         dialect,
     )
 
-    assert "ROW_NUMBER() OVER (ORDER BY SOME_TABLE.ID)" in sql
-    assert "IFX_RN <= :ROW_COUNT" in sql
-    assert "SELECT FIRST" not in sql
+    assert sql.startswith("SELECT FIRST :ROW_COUNT")
+    assert "ROW_NUMBER" not in sql
 
 
 def test_fetch_expression_with_offset_uses_row_number_bounds(
@@ -339,7 +338,7 @@ def test_cte_delete_with_scalar_subquery_compiles(dialect, tables):
     assert "SOME_CTE.ID = SOME_OTHER_TABLE.ID" in sql
 
 
-def test_bound_fetch_with_offset_uses_row_number_bounds(dialect, tables):
+def test_bound_fetch_with_offset_uses_native_skip_first(dialect, tables):
     source, _ = tables
     statement = (
         select(source)
@@ -350,10 +349,8 @@ def test_bound_fetch_with_offset_uses_row_number_bounds(dialect, tables):
 
     sql = _normalized(statement, dialect)
 
-    assert "ROW_NUMBER() OVER (ORDER BY SOME_TABLE.ID)" in sql
-    assert "IFX_RN > :OFFSET_COUNT" in sql
-    assert "IFX_RN <= :FETCH_COUNT + :OFFSET_COUNT" in sql
-    assert "SELECT FIRST" not in sql
+    assert sql.startswith("SELECT SKIP :OFFSET_COUNT FIRST :FETCH_COUNT")
+    assert "ROW_NUMBER" not in sql
 
 
 @pytest.mark.parametrize("operation", ["update", "delete"])
