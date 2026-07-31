@@ -20,6 +20,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import re
+
 from sqlalchemy import exc
 from sqlalchemy import types as sa_types
 from sqlalchemy import util
@@ -29,8 +31,55 @@ from sqlalchemy.engine import reflection
 from sqlalchemy.engine.reflection import ObjectKind, ObjectScope
 from .temporal import IFXDateTime
 from .temporal import IFXTime
+from .fragmentation import (
+    AttachedIndexFragmentation,
+    ExpressionFragmentation,
+    Fragment,
+    ListFragmentation,
+    RangeIntervalFragmentation,
+    RoundRobinFragmentation,
+    _ReflectedFragmentExpression,
+)
 
 from . import sqla_compat
+
+
+
+
+class _RemoteSynonymReflectionError(exc.UnreflectableTableError):
+    """A synonym exists, but its target catalog is outside this database."""
+
+
+class IfxInspector(reflection.Inspector):
+    """Inspector extension exposing Informix synonym metadata."""
+
+    def get_synonym_names(self, schema=None, **kw):
+        with self._operation_context() as connection:
+            return self.dialect.get_synonym_names(
+                connection,
+                schema=schema,
+                info_cache=self.info_cache,
+                **kw,
+            )
+
+    def get_synonyms(self, schema=None, **kw):
+        with self._operation_context() as connection:
+            return self.dialect.get_synonyms(
+                connection,
+                schema=schema,
+                info_cache=self.info_cache,
+                **kw,
+            )
+
+    def has_synonym(self, synonym_name, schema=None, **kw):
+        with self._operation_context() as connection:
+            return self.dialect.has_synonym(
+                connection,
+                synonym_name,
+                schema=schema,
+                info_cache=self.info_cache,
+                **kw,
+            )
 
 
 class _ReflectedTableLockLevel(str):
@@ -180,6 +229,8 @@ class IfxReflector(BaseReflector):
         "B": "PAGE_AND_ROW",
     }
 
+    _FRAGMENT_STRATEGIES = frozenset({"R", "E", "I", "N", "L", "T"})
+
     _PLAIN_LITERAL_DEFAULT_TYPES = {
         0,   # CHAR
         13,  # VARCHAR
@@ -224,8 +275,10 @@ class IfxReflector(BaseReflector):
         "lvarchar": "LVARCHAR",
     }
 
-    _CHAR_FALLBACK_TYPES = {"CHAR", "NCHAR"}
-    _VARCHAR_FALLBACK_TYPES = {"VARCHAR", "NVARCHAR", "LVARCHAR"}
+    _CHAR_FALLBACK_TYPES = {"CHAR"}
+    _VARCHAR_FALLBACK_TYPES = {"VARCHAR"}
+    _NCHAR_FALLBACK_TYPES = {"NCHAR"}
+    _NVARCHAR_FALLBACK_TYPES = {"NVARCHAR"}
     _INTEGER_FALLBACK_TYPES = {"INTEGER", "SERIAL"}
     _BIG_INTEGER_FALLBACK_TYPES = {"INT8", "SERIAL8", "BIGINT", "BIGSERIAL"}
     _NUMERIC_FALLBACK_TYPES = {"DECIMAL", "NUMERIC", "MONEY"}
@@ -390,6 +443,278 @@ class IfxReflector(BaseReflector):
         if row is None:
             raise exc.NoSuchTableError(table_name)
         return row
+
+    _SYNONYM_TARGET_TYPES = {
+        "T": "table",
+        "E": "external_table",
+        "V": "view",
+        "Q": "sequence",
+        "P": "synonym",
+        "S": "synonym",
+    }
+
+    def _synonym_catalog_rows(
+        self,
+        connection,
+        *,
+        schema=None,
+        synonym_name=None,
+        include_public=True,
+    ):
+        """Read visible private/public synonyms from SYSTABLES/SYSSYNTABLE."""
+        owner = self._resolved_owner(schema)
+        predicates = ["s.tabtype IN ('P', 'S')"]
+        params = []
+
+        if include_public:
+            predicates.append(
+                "(s.tabtype = 'S' OR LOWER(s.owner) = LOWER(?))"
+            )
+            params.append(owner)
+        else:
+            predicates.extend(
+                ["s.tabtype = 'P'", "LOWER(s.owner) = LOWER(?)"]
+            )
+            params.append(owner)
+
+        if synonym_name is not None:
+            cleaned_name = self._clean_str(synonym_name)
+            if not cleaned_name:
+                return []
+            if self._is_explicitly_quoted(synonym_name):
+                lookup_name = cleaned_name
+            else:
+                lookup_name = self._fold_unquoted_lookup_name(cleaned_name)
+            predicates.append("s.tabname = ?")
+            params.append(lookup_name)
+
+        sql_text = f"""
+            SELECT
+                s.tabid,
+                s.tabname,
+                s.owner,
+                s.tabtype,
+                y.servername,
+                y.dbname,
+                y.owner,
+                y.tabname,
+                y.btabid,
+                b.tabname AS base_tabname,
+                b.owner AS base_owner,
+                b.tabtype AS base_tabtype
+            FROM systables s
+            JOIN syssyntable y
+              ON y.tabid = s.tabid
+            LEFT OUTER JOIN systables b
+              ON b.tabid = y.btabid
+            WHERE {' AND '.join(predicates)}
+            ORDER BY
+                s.tabname,
+                s.tabtype,
+                s.tabid
+        """
+        return connection.exec_driver_sql(sql_text, tuple(params)).fetchall()
+
+    def _optional_normalized_catalog_name(self, value):
+        cleaned = self._clean_str(value)
+        if not cleaned:
+            return None
+        return self.normalize_name(cleaned)
+
+    def _synonym_info_from_row(self, row, requested_schema=None):
+        synonym_type = (self._clean_str(row[3]) or "").upper()
+        public = synonym_type == "S"
+        synonym_owner = self._optional_normalized_catalog_name(row[2])
+
+        btabid = self._positive_catalog_int(row[8])
+        if btabid is not None:
+            target_name = self._optional_normalized_catalog_name(row[9])
+            target_owner = self._optional_normalized_catalog_name(row[10])
+            target_tabtype = (self._clean_str(row[11]) or "").upper()
+            target_database = None
+            target_server = None
+            local = True
+        else:
+            target_name = self._optional_normalized_catalog_name(row[7])
+            target_owner = self._optional_normalized_catalog_name(row[6])
+            target_tabtype = ""
+            target_database = self._optional_normalized_catalog_name(row[5])
+            target_server = self._optional_normalized_catalog_name(row[4])
+            local = False
+
+        target_type = self._SYNONYM_TARGET_TYPES.get(target_tabtype)
+        target = {
+            "name": target_name,
+            "owner": target_owner,
+            "database": target_database,
+            "server": target_server,
+            "type": target_type,
+            "local": local,
+        }
+
+        return {
+            "name": self._optional_normalized_catalog_name(row[1]),
+            "schema": self._normalize_schema_for_output(
+                synonym_owner,
+                requested_schema=requested_schema,
+            ),
+            "owner": synonym_owner,
+            "public": public,
+            "target": target,
+            # Flat aliases keep the API convenient for migration/reporting
+            # code without discarding the structured representation.
+            "target_name": target_name,
+            "target_schema": target_owner,
+            "target_database": target_database,
+            "target_server": target_server,
+            "target_type": target_type,
+        }
+
+    @reflection.cache
+    def get_synonyms(self, connection, schema=None, **kw):
+        """Return structured metadata for visible Informix synonyms.
+
+        Private synonyms owned by ``schema`` and public synonyms are returned.
+        Set ``include_public=False`` to restrict the result to private synonyms.
+        Synonyms remain separate from :meth:`get_table_names` by design.
+        """
+        include_public = kw.pop("include_public", True)
+        if not isinstance(include_public, bool):
+            raise exc.InvalidRequestError("include_public must be a boolean")
+        rows = self._synonym_catalog_rows(
+            connection,
+            schema=schema,
+            include_public=include_public,
+        )
+        return [
+            self._synonym_info_from_row(row, requested_schema=schema)
+            for row in rows
+        ]
+
+    @reflection.cache
+    def get_synonym_names(self, connection, schema=None, **kw):
+        """Return visible synonym names without mixing them with tables."""
+        synonyms = self.get_synonyms(connection, schema=schema, **kw)
+        names = []
+        seen = set()
+        for synonym in synonyms:
+            name = synonym["name"]
+            key = str(name)
+            if key in seen:
+                continue
+            seen.add(key)
+            names.append(name)
+        return names
+
+    @reflection.cache
+    def has_synonym(
+        self,
+        connection,
+        synonym_name,
+        schema=None,
+        **kw,
+    ):
+        """Return whether a visible private or public synonym exists."""
+        include_public = kw.pop("include_public", True)
+        if not isinstance(include_public, bool):
+            raise exc.InvalidRequestError("include_public must be a boolean")
+        rows = self._synonym_catalog_rows(
+            connection,
+            schema=schema,
+            synonym_name=synonym_name,
+            include_public=include_public,
+        )
+        return bool(rows)
+
+    def _resolve_reflection_target(
+        self,
+        connection,
+        table_name,
+        schema,
+        kw,
+    ):
+        """Resolve a local synonym chain for opt-in Table autoload.
+
+        Complete SQLAlchemy reflection requires local system-catalog metadata.
+        External synonyms are therefore reported as unreflectable instead of
+        silently returning incomplete column/constraint information.
+        """
+        resolve = kw.get("informix_resolve_synonyms", False)
+        if not isinstance(resolve, bool):
+            raise exc.InvalidRequestError(
+                "informix_resolve_synonyms must be a boolean"
+            )
+        if not resolve:
+            return table_name, schema, None
+
+        original_name = table_name
+        current_name = table_name
+        current_schema = schema
+        visited = set()
+        first_synonym = None
+
+        for _depth in range(16):
+            rows = self._synonym_catalog_rows(
+                connection,
+                schema=current_schema,
+                synonym_name=current_name,
+                include_public=True,
+            )
+            if not rows:
+                return current_name, current_schema, first_synonym
+
+            info = self._synonym_info_from_row(
+                rows[0],
+                requested_schema=current_schema,
+            )
+            if first_synonym is None:
+                first_synonym = info
+
+            key = (
+                str(info.get("owner")),
+                str(info.get("name")),
+            )
+            if key in visited:
+                raise exc.UnreflectableTableError(
+                    f"Informix synonym cycle detected while resolving "
+                    f"{original_name!r}"
+                )
+            visited.add(key)
+
+            target = info["target"]
+            if not target["local"]:
+                raise _RemoteSynonymReflectionError(
+                    "Informix remote synonym reflection is not available "
+                    "through the current database catalog. The synonym "
+                    f"{original_name!r} targets "
+                    f"database={target['database']!r}, "
+                    f"server={target['server']!r}."
+                )
+
+            if target["type"] == "sequence":
+                raise exc.UnreflectableTableError(
+                    f"Informix synonym {original_name!r} targets a sequence, "
+                    "not a table or view"
+                )
+
+            if not target["name"]:
+                raise exc.UnreflectableTableError(
+                    f"Informix synonym {original_name!r} has no resolvable "
+                    "local target in SYSSYNTABLE"
+                )
+
+            current_name = target["name"]
+            current_schema = self._normalize_schema_for_output(
+                target["owner"],
+                requested_schema=current_schema,
+            )
+
+            if target["type"] != "synonym":
+                return current_name, current_schema, first_synonym
+
+        raise exc.UnreflectableTableError(
+            f"Informix synonym chain for {original_name!r} exceeds the Informix limit of 16 links"
+        )
 
     def _get_column_name_map(self, connection, tabid):
         sql_text = """
@@ -994,6 +1319,10 @@ class IfxReflector(BaseReflector):
             return sa_types.CHAR(args[0] if args else None)
         if type_name in self._VARCHAR_FALLBACK_TYPES:
             return sa_types.VARCHAR(args[0] if args else None)
+        if type_name in self._NCHAR_FALLBACK_TYPES:
+            return sa_types.NCHAR(args[0] if args else None)
+        if type_name in self._NVARCHAR_FALLBACK_TYPES:
+            return sa_types.NVARCHAR(args[0] if args else None)
         if type_name in self._INTEGER_FALLBACK_TYPES:
             return sa_types.Integer()
         if type_name in self._BIG_INTEGER_FALLBACK_TYPES:
@@ -1072,11 +1401,18 @@ class IfxReflector(BaseReflector):
             return sa_types.NullType(), autoincrement, nullable
 
         if opaque_type_name == "LVARCHAR":
-            length = extended_maxlen or encoded_len or None
+            # For a native LVARCHAR column, SYSCOLUMNS.collength stores
+            # the declared maximum or 2048 when the declaration omitted
+            # it. SYSXTDTYPES.maxlen describes the opaque type domain and
+            # must not overwrite that column-specific value.
+            if base_code == 40:
+                length = encoded_len or extended_maxlen or None
+            else:
+                length = extended_maxlen or encoded_len or None
             if length is not None:
                 length = self._int_or_default(length, None)
             return self._ifx_type_result(
-                "VARCHAR",
+                "LVARCHAR",
                 autoincrement,
                 nullable,
                 length,
@@ -1182,7 +1518,24 @@ class IfxReflector(BaseReflector):
 
     @reflection.cache
     def has_table(self, connection, table_name, schema=None, **kw):
-        _ = kw
+        original_name = table_name
+        original_schema = schema
+        try:
+            table_name, schema, _synonym = self._resolve_reflection_target(
+                connection,
+                table_name,
+                schema,
+                kw,
+            )
+        except _RemoteSynonymReflectionError:
+            # A remote synonym is still a registered object, even though the
+            # current database catalogs cannot provide complete Table
+            # autoload metadata for its target.
+            return self.has_synonym(
+                connection,
+                original_name,
+                schema=original_schema,
+            )
         row = self._get_table_row(
             connection,
             table_name,
@@ -1517,7 +1870,12 @@ class IfxReflector(BaseReflector):
         in multiple fixed-width rows of ``syschecks``. The rows must be
         concatenated in ``seqno`` order before removing final catalog padding.
         """
-        _ = kw
+        table_name, schema, _synonym = self._resolve_reflection_target(
+            connection,
+            table_name,
+            schema,
+            kw,
+        )
 
         table_row = self._require_table_row(
             connection,
@@ -1652,10 +2010,388 @@ class IfxReflector(BaseReflector):
 
         return options
 
+    def _fragment_rows(self, connection, tabid, *, index_name=None):
+        """Read ordered table/index fragmentation metadata.
+
+        ``exprtext`` is a TEXT catalog column.  The Informix ODBC driver can
+        return it as a Python string directly, avoiding a large LVARCHAR cast
+        that could itself approach the maximum row size.
+        """
+        if not hasattr(connection, "exec_driver_sql"):
+            # Some isolated reflection-unit tests use a sentinel connection
+            # while monkeypatching all catalog readers. Fragmentation is an
+            # additive metadata layer, so absence of a DBAPI facade means
+            # simply that no fragment rows are available in that test.
+            return []
+
+        if index_name is None:
+            sql_text = """
+                SELECT
+                    f.fragtype,
+                    f.indexname,
+                    f.strategy,
+                    f.evalpos,
+                    f.exprtext,
+                    f.dbspace,
+                    f.partition
+                FROM sysfragments f
+                WHERE f.tabid = ?
+                  AND f.fragtype = 'T'
+                ORDER BY f.evalpos
+            """
+            parameters = (tabid,)
+        else:
+            sql_text = """
+                SELECT
+                    f.fragtype,
+                    f.indexname,
+                    f.strategy,
+                    f.evalpos,
+                    f.exprtext,
+                    f.dbspace,
+                    f.partition
+                FROM sysfragments f
+                WHERE f.tabid = ?
+                  AND f.fragtype = 'I'
+                  AND f.indexname = ?
+                ORDER BY f.evalpos
+            """
+            parameters = (tabid, self._clean_str(index_name))
+        result = connection.exec_driver_sql(sql_text, parameters)
+        if hasattr(result, "fetchall"):
+            return result.fetchall()
+        if hasattr(result, "all"):
+            return result.all()
+        return []
+
+    def _sysfragexprudrdep_columns(self, connection):
+        """Discover optional SYSFRAGEXPRUDRDEP columns across server levels."""
+        rows = connection.exec_driver_sql(
+            """
+            SELECT c.colname
+            FROM systables t
+            JOIN syscolumns c ON c.tabid = t.tabid
+            WHERE t.tabname = 'sysfragexprudrdep'
+            ORDER BY c.colno
+            """
+        ).fetchall()
+        return {
+            (self._clean_str(row[0]) or "").strip().lower()
+            for row in rows
+            if row and self._clean_str(row[0])
+        }
+
+    def _fragment_udr_dependencies(self, connection, tabid, *, index_name=None):
+        """Return UDR names keyed by fragment evaluation position.
+
+        The catalog table is present only when the server tracks UDRs used by
+        fragmentation expressions.  Its layout has varied across Informix
+        releases, so reflection discovers the available columns and queries
+        only a conservative, documented subset.
+        """
+        columns = self._sysfragexprudrdep_columns(connection)
+        if "procid" not in columns or "tabid" not in columns:
+            return {}
+        if index_name is not None and "indexname" not in columns:
+            return {}
+
+        select_columns = []
+        if "evalpos" in columns:
+            select_columns.append("d.evalpos")
+        else:
+            select_columns.append("CAST(NULL AS INTEGER) AS evalpos")
+        select_columns.extend(("p.procname", "p.owner"))
+
+        predicates = []
+        parameters = []
+        predicates.append("d.tabid = ?")
+        parameters.append(tabid)
+        if index_name is not None and "indexname" in columns:
+            predicates.append("d.indexname = ?")
+            parameters.append(self._clean_str(index_name))
+        elif index_name is None and "fragtype" in columns:
+            predicates.append("d.fragtype = 'T'")
+
+        sql_text = (
+            "SELECT "
+            + ", ".join(select_columns)
+            + " FROM sysfragexprudrdep d "
+            + "JOIN sysprocedures p ON p.procid = d.procid"
+        )
+        if predicates:
+            sql_text += " WHERE " + " AND ".join(predicates)
+
+        try:
+            rows = connection.exec_driver_sql(
+                sql_text,
+                tuple(parameters),
+            ).fetchall()
+        except Exception as err:  # pragma: no cover - server-version fallback
+            util.warn(
+                "Could not reflect SYSFRAGEXPRUDRDEP metadata; "
+                f"fragment expressions remain available without UDR details: {err}"
+            )
+            return {}
+
+        dependencies = {}
+        for evalpos, procname, owner in rows:
+            name = self._qualified_catalog_name(procname, owner)
+            if name is None:
+                continue
+            key = int(evalpos) if evalpos is not None else None
+            dependencies.setdefault(key, []).append(name)
+        return {
+            key: tuple(dict.fromkeys(values))
+            for key, values in dependencies.items()
+        }
+
+    @staticmethod
+    def _strip_catalog_selector_prefix(value, prefixes):
+        text = (value or "").strip()
+        upper = text.upper()
+        for prefix in prefixes:
+            if upper.startswith(prefix):
+                return text[len(prefix):].strip()
+        return text
+
+    @staticmethod
+    def _catalog_dbspace_list(value):
+        """Decode the simple identifier list stored at evalpos=-1."""
+        text = (value or "").strip()
+        text = re.sub(r"^STORE\s+IN\s*", "", text, flags=re.I)
+        if text.startswith("(") and text.endswith(")"):
+            text = text[1:-1]
+        result = []
+        for item in text.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if len(item) >= 2 and item[0] == item[-1] == '"':
+                item = item[1:-1].replace('""', '"')
+            result.append(item)
+        return tuple(result)
+
+    def _reflected_fragment_expression(self, text, dependencies=()):
+        cleaned = (self._clean_str(text) or "").strip()
+        if not cleaned:
+            return None
+        return _ReflectedFragmentExpression(cleaned, tuple(dependencies))
+
+    def _fragmentation_from_rows(self, rows, dependencies=None):
+        """Build one immutable public fragmentation structure."""
+        if not rows:
+            return None, None
+
+        dependencies = dependencies or {}
+        strategy = (self._clean_str(rows[0][2]) or "").upper()
+        if strategy not in self._FRAGMENT_STRATEGIES:
+            util.warn(f"Unsupported SYSFRAGMENTS strategy {strategy!r}")
+            return None, None
+
+        normalized = []
+        for row in rows:
+            evalpos = int(row[3]) if row[3] is not None else 0
+            normalized.append(
+                {
+                    "evalpos": evalpos,
+                    "exprtext": self._clean_str(row[4]),
+                    "dbspace": self._clean_str(row[5]),
+                    "partition": self.normalize_name(row[6]) if row[6] else None,
+                }
+            )
+
+        if strategy == "I":
+            dbspace = next(
+                (item["dbspace"] for item in normalized if item["dbspace"]),
+                None,
+            )
+            return None, dbspace
+
+        if strategy == "T":
+            return AttachedIndexFragmentation(), None
+
+        fragment_rows = [item for item in normalized if item["evalpos"] >= 0]
+
+        if strategy == "R":
+            named = any(item["partition"] for item in fragment_rows)
+            if named:
+                fragments = tuple(
+                    Fragment(
+                        name=item["partition"],
+                        dbspace=item["dbspace"],
+                    )
+                    for item in fragment_rows
+                )
+                return RoundRobinFragmentation(fragments=fragments), None
+            dbspaces = tuple(item["dbspace"] for item in fragment_rows)
+            return RoundRobinFragmentation(dbspaces=dbspaces), None
+
+        if strategy == "E":
+            fragments = []
+            for item in fragment_rows:
+                text = (item["exprtext"] or "").strip()
+                normalized_selector = re.sub(r"\s+", " ", text.upper())
+                if normalized_selector == "REMAINDER":
+                    fragment = Fragment(
+                        name=item["partition"],
+                        dbspace=item["dbspace"],
+                        remainder=True,
+                    )
+                elif normalized_selector in {
+                    "NULL",
+                    "VALUES (NULL)",
+                    "VALUES IS NULL",
+                }:
+                    fragment = Fragment(
+                        name=item["partition"],
+                        dbspace=item["dbspace"],
+                        is_null=True,
+                    )
+                else:
+                    expression = self._reflected_fragment_expression(
+                        text,
+                        dependencies.get(item["evalpos"], dependencies.get(None, ())),
+                    )
+                    if expression is None:
+                        continue
+                    fragment = Fragment(
+                        name=item["partition"],
+                        dbspace=item["dbspace"],
+                        expression=expression,
+                    )
+                fragments.append(fragment)
+            return ExpressionFragmentation(tuple(fragments)), None
+
+        key_row = next(
+            (item for item in normalized if item["evalpos"] == -3),
+            None,
+        )
+        if key_row is None:
+            util.warn(
+                "SYSFRAGMENTS did not return the fragmentation key row "
+                f"for strategy {strategy!r}"
+            )
+            return None, None
+        key = self._reflected_fragment_expression(
+            key_row["exprtext"],
+            dependencies.get(-3, dependencies.get(None, ())),
+        )
+        if key is None:
+            return None, None
+
+        if strategy == "L":
+            fragments = []
+            for item in fragment_rows:
+                text = (item["exprtext"] or "").strip()
+                normalized_selector = re.sub(r"\s+", " ", text.upper())
+                common = {
+                    "name": item["partition"],
+                    "dbspace": item["dbspace"],
+                }
+                if normalized_selector == "REMAINDER":
+                    fragments.append(Fragment(remainder=True, **common))
+                    continue
+                if normalized_selector in {
+                    "NULL",
+                    "VALUES (NULL)",
+                    "VALUES IS NULL",
+                }:
+                    fragments.append(Fragment(is_null=True, **common))
+                    continue
+                selector = self._reflected_fragment_expression(
+                    text,
+                    dependencies.get(item["evalpos"], dependencies.get(None, ())),
+                )
+                if selector is None:
+                    continue
+                fragments.append(
+                    Fragment(
+                        _catalog_selector=selector,
+                        **common,
+                    )
+                )
+            return ListFragmentation(key=key, fragments=tuple(fragments)), None
+
+        if strategy == "N":
+            interval_row = next(
+                (item for item in normalized if item["evalpos"] == -2),
+                None,
+            )
+            if interval_row is None:
+                util.warn("SYSFRAGMENTS did not return the interval-size row")
+                return None, None
+            interval = self._reflected_fragment_expression(
+                interval_row["exprtext"],
+                dependencies.get(-2, dependencies.get(None, ())),
+            )
+            store_row = next(
+                (item for item in normalized if item["evalpos"] == -1),
+                None,
+            )
+            store_in = (
+                self._catalog_dbspace_list(store_row["exprtext"])
+                if store_row is not None
+                else ()
+            )
+            fragments = []
+            for item in fragment_rows:
+                text = (item["exprtext"] or "").strip()
+                normalized_selector = re.sub(r"\s+", " ", text.upper())
+                common = {
+                    "name": item["partition"],
+                    "dbspace": item["dbspace"],
+                }
+                if normalized_selector in {
+                    "NULL",
+                    "VALUES (NULL)",
+                    "VALUES IS NULL",
+                }:
+                    fragments.append(Fragment(is_null=True, **common))
+                    continue
+                selector = self._reflected_fragment_expression(
+                    text,
+                    dependencies.get(item["evalpos"], dependencies.get(None, ())),
+                )
+                if selector is None:
+                    continue
+                fragments.append(
+                    Fragment(
+                        _catalog_selector=selector,
+                        **common,
+                    )
+                )
+            return RangeIntervalFragmentation(
+                key=key,
+                interval=interval,
+                fragments=tuple(fragments),
+                store_in=store_in,
+            ), None
+
+        return None, None
+
+    def _reflect_fragmentation(self, connection, tabid, *, index_name=None):
+        rows = self._fragment_rows(connection, tabid, index_name=index_name)
+        if not rows:
+            return None, None
+        strategy = (self._clean_str(rows[0][2]) or "").upper()
+        dependencies = {}
+        if strategy in {"E", "L", "N"}:
+            dependencies = self._fragment_udr_dependencies(
+                connection,
+                tabid,
+                index_name=index_name,
+            )
+        return self._fragmentation_from_rows(rows, dependencies)
+
     @reflection.cache
     def get_table_options(self, connection, table_name, schema=None, **kw):
         """Reflect native Informix storage and lock options from SYSTABLES."""
-        _ = kw
+        table_name, schema, _synonym = self._resolve_reflection_target(
+            connection,
+            table_name,
+            schema,
+            kw,
+        )
 
         table_row = self._require_table_row(
             connection,
@@ -1664,6 +2400,15 @@ class IfxReflector(BaseReflector):
             tabtypes=("T", "V"),
         )
         tabid = int(table_row[0])
+
+        fragment_by = None
+        dbspace = None
+        tabtype = (self._clean_str(table_row[3]) or "").upper()
+        if tabtype == "T":
+            fragment_by, dbspace = self._reflect_fragmentation(
+                connection,
+                tabid,
+            )
 
         row = connection.exec_driver_sql(
             """
@@ -1682,7 +2427,12 @@ class IfxReflector(BaseReflector):
         if row is None:
             raise exc.NoSuchTableError(table_name)
 
-        return self._table_options_from_catalog_row(row)
+        options = self._table_options_from_catalog_row(row)
+        if fragment_by is not None:
+            options["informix_fragment_by"] = fragment_by
+        if dbspace is not None:
+            options["informix_dbspace"] = dbspace
+        return options
 
     def get_temp_view_names(self, connection, schema=None, **kw):
         _ = (connection, schema, kw)
@@ -1693,7 +2443,12 @@ class IfxReflector(BaseReflector):
 
     @reflection.cache
     def get_view_definition(self, connection, viewname, schema=None, **kw):
-        _ = kw
+        viewname, schema, _synonym = self._resolve_reflection_target(
+            connection,
+            viewname,
+            schema,
+            kw,
+        )
         view_row = self._get_table_row(
             connection,
             viewname,
@@ -1719,7 +2474,12 @@ class IfxReflector(BaseReflector):
 
     @reflection.cache
     def get_columns(self, connection, table_name, schema=None, **kw):
-        _ = kw
+        table_name, schema, _synonym = self._resolve_reflection_target(
+            connection,
+            table_name,
+            schema,
+            kw,
+        )
         table_row = self._require_table_row(
             connection,
             table_name,
@@ -1785,7 +2545,12 @@ class IfxReflector(BaseReflector):
 
     @reflection.cache
     def get_pk_constraint(self, connection, table_name, schema=None, **kw):
-        _ = kw
+        table_name, schema, _synonym = self._resolve_reflection_target(
+            connection,
+            table_name,
+            schema,
+            kw,
+        )
         table_row = self._require_table_row(
             connection,
             table_name,
@@ -1842,7 +2607,12 @@ class IfxReflector(BaseReflector):
 
     @reflection.cache
     def get_foreign_keys(self, connection, table_name, schema=None, **kw):
-        _ = kw
+        table_name, schema, _synonym = self._resolve_reflection_target(
+            connection,
+            table_name,
+            schema,
+            kw,
+        )
         table_row = self._require_table_row(
             connection,
             table_name,
@@ -1950,7 +2720,12 @@ class IfxReflector(BaseReflector):
 
     @reflection.cache
     def get_incoming_foreign_keys(self, connection, table_name, schema=None, **kw):
-        _ = kw
+        table_name, schema, _synonym = self._resolve_reflection_target(
+            connection,
+            table_name,
+            schema,
+            kw,
+        )
         table_row = self._require_table_row(
             connection,
             table_name,
@@ -2056,30 +2831,250 @@ class IfxReflector(BaseReflector):
                 )
         return constraint_by_index
 
+    _COLUMN_INDEX_KEY_RE = re.compile(
+        r"^\s*(?P<colno>-?\d+)\s*(?:\[\s*(?P<opclassid>\d+)\s*\])?\s*$"
+    )
+    _FUNCTION_INDEX_KEY_RE = re.compile(
+        r"^\s*<\s*(?P<procid>\d+)\s*>\s*"
+        r"\((?P<columns>[^)]*)\)\s*"
+        r"(?:\[\s*(?P<opclassid>\d+)\s*\])?\s*$"
+    )
+
+    def _split_index_key_specs(self, value):
+        """Split INDEXKEYARRAY output without splitting function arguments."""
+        text = self._clean_str(value)
+        if not text:
+            return []
+
+        parts = []
+        current = []
+        depth = 0
+
+        for character in text:
+            if character == "(":
+                depth += 1
+            elif character == ")":
+                depth = max(0, depth - 1)
+
+            if character == "," and depth == 0:
+                part = "".join(current).strip()
+                if part:
+                    parts.append(part)
+                current = []
+            else:
+                current.append(character)
+
+        part = "".join(current).strip()
+        if part:
+            parts.append(part)
+
+        return parts
+
+    def _parse_indexkeys(self, value):
+        """Decode the textual representation of SYSINDICES.indexkeys.
+
+        Informix renders ordinary keys as ``-3 [1]`` and functional keys as
+        ``<574> (-3, 2) [1]``. The sign marks descending order. The value in
+        brackets is the operator-class identifier.
+        """
+        components = []
+
+        for spec in self._split_index_key_specs(value):
+            function_match = self._FUNCTION_INDEX_KEY_RE.match(spec)
+            if function_match is not None:
+                raw_columns = [
+                    item.strip()
+                    for item in function_match.group("columns").split(",")
+                    if item.strip()
+                ]
+                if not raw_columns:
+                    raise ValueError(
+                        f"functional index key has no columns: {spec!r}"
+                    )
+
+                signed_colnos = [int(item) for item in raw_columns]
+                components.append(
+                    {
+                        "kind": "function",
+                        "procid": int(function_match.group("procid")),
+                        "colnos": [abs(value) for value in signed_colnos],
+                        "descending": signed_colnos[0] < 0,
+                        "opclassid": (
+                            int(function_match.group("opclassid"))
+                            if function_match.group("opclassid")
+                            else None
+                        ),
+                    }
+                )
+                continue
+
+            column_match = self._COLUMN_INDEX_KEY_RE.match(spec)
+            if column_match is not None:
+                signed_colno = int(column_match.group("colno"))
+                components.append(
+                    {
+                        "kind": "column",
+                        "colnos": [abs(signed_colno)],
+                        "descending": signed_colno < 0,
+                        "opclassid": (
+                            int(column_match.group("opclassid"))
+                            if column_match.group("opclassid")
+                            else None
+                        ),
+                    }
+                )
+                continue
+
+            raise ValueError(f"unrecognized index key specification: {spec!r}")
+
+        return components
+
     def _index_rows(self, connection, tabid):
-        idx_sql = f"""
+        """Read native index metadata from SYSINDICES.
+
+        INDEXKEYARRAY is a built-in opaque type. An explicit LVARCHAR cast
+        invokes its output representation while remaining usable through ODBC.
+        8 KiB covers the textual form of the maximum documented key count
+        without approaching Informix's 32 KiB row-size boundary.
+        """
+        idx_sql = """
             SELECT
                 i.idxname,
                 i.owner,
                 i.idxtype,
-                {", ".join(f"i.part{n}" for n in range(1, self._INDEX_PART_COUNT + 1))}
-            FROM sysindexes i
+                CAST(i.indexkeys AS LVARCHAR(8192)) AS indexkeys,
+                i.amid,
+                a.am_name,
+                i.collation,
+                i.tabid
+            FROM sysindices i
+            LEFT JOIN sysams a
+              ON a.am_id = i.amid
             WHERE i.tabid = ?
             ORDER BY i.idxname
         """
         return connection.exec_driver_sql(idx_sql, (tabid,)).fetchall()
 
-    def _index_info_from_row(
+    def _catalog_rows_by_ids(
         self,
         connection,
+        *,
+        table_name,
+        id_column,
+        selected_columns,
+        identifiers,
+    ):
+        identifiers = sorted({int(value) for value in identifiers if value is not None})
+        if not identifiers:
+            return []
+
+        placeholders = ", ".join("?" for _ in identifiers)
+        sql_text = f"""
+            SELECT {selected_columns}
+            FROM {table_name}
+            WHERE {id_column} IN ({placeholders})
+        """
+        return connection.exec_driver_sql(
+            sql_text,
+            tuple(identifiers),
+        ).fetchall()
+
+    def _index_procedure_map(self, connection, procids):
+        rows = self._catalog_rows_by_ids(
+            connection,
+            table_name="sysprocedures",
+            id_column="procid",
+            selected_columns="procid, procname, owner",
+            identifiers=procids,
+        )
+        return {
+            int(row[0]): {
+                "name": self._clean_str(row[1]),
+                "owner": self._clean_str(row[2]),
+            }
+            for row in rows
+        }
+
+    def _index_opclass_map(self, connection, opclassids):
+        rows = self._catalog_rows_by_ids(
+            connection,
+            table_name="sysopclasses",
+            id_column="opclassid",
+            selected_columns="opclassid, opclassname, owner, amid",
+            identifiers=opclassids,
+        )
+        return {
+            int(row[0]): {
+                "name": self._clean_str(row[1]),
+                "owner": self._clean_str(row[2]),
+                "amid": int(row[3]) if row[3] is not None else None,
+            }
+            for row in rows
+        }
+
+    def _quote_reflected_identifier(self, value):
+        value = self._clean_str(value)
+        if value is None:
+            return None
+        return self.identifier_preparer.quote(value)
+
+    def _qualified_catalog_name(self, name, owner, default_owner=None):
+        rendered_name = self._quote_reflected_identifier(name)
+        if rendered_name is None:
+            return None
+
+        cleaned_owner = self._clean_str(owner)
+        cleaned_default = self._clean_str(default_owner)
+        if cleaned_owner and (
+            cleaned_default is None
+            or cleaned_owner.casefold() != cleaned_default.casefold()
+        ):
+            return (
+                f"{self._quote_reflected_identifier(cleaned_owner)}."
+                f"{rendered_name}"
+            )
+
+        return rendered_name
+
+    @staticmethod
+    def _single_or_tuple(values):
+        ordered = []
+        for value in values:
+            if value is not None and value not in ordered:
+                ordered.append(value)
+
+        if not ordered:
+            return None
+        if len(ordered) == 1:
+            return ordered[0]
+        return tuple(ordered)
+
+    def _index_info_from_row(
+        self,
         tabid,
         row,
+        components,
         constraint_by_index,
+        procedure_map,
+        opclass_map,
+        colmap,
         schema=None,
     ):
+        _ = tabid
         idxname = self._clean_str(row[0])
         owner = self._clean_str(row[1])
         idxtype = self._clean_str(row[2])
+        amid = int(row[4]) if row[4] is not None else None
+        access_method = self._clean_str(row[5])
+        _collation = self._clean_str(row[6])
+        catalog_tabid = int(row[7]) if len(row) > 7 and row[7] is not None else tabid
+        if catalog_tabid != tabid:
+            util.warn(
+                "SYSINDICES returned an unexpected table identifier for "
+                f"idxname={idxname!r}: expected tabid={tabid}, "
+                f"received tabid={catalog_tabid}"
+            )
+            return None
 
         key = idxname.lower() if idxname else None
         duplicated = constraint_by_index.get(key) if key else None
@@ -2087,14 +3082,81 @@ class IfxReflector(BaseReflector):
         if duplicated and duplicated[0] in ("P", "U", "R"):
             return None
 
-        colnames, column_sorting = self._get_index_columns(
-            connection,
-            tabid,
-            idxname,
-            owner=owner,
-        )
+        column_names = []
+        expressions = []
+        column_sorting = {}
+        procedures = []
+        opclasses = []
+        has_function = False
 
-        if not colnames:
+        for component in components:
+            colnos = component["colnos"]
+            colnames = [colmap.get(colno) for colno in colnos]
+            if any(colname is None for colname in colnames):
+                util.warn(
+                    "Could not resolve SYSINDICES index key columns for "
+                    f"tabid={tabid}, idxname={idxname!r}, colnos={colnos!r}"
+                )
+                return None
+
+            opclass = opclass_map.get(component.get("opclassid"))
+            if opclass is not None:
+                opclass_amid = opclass.get("amid")
+                if (
+                    amid is not None
+                    and opclass_amid is not None
+                    and amid != opclass_amid
+                ):
+                    util.warn(
+                        "SYSOPCLASSES access method does not match "
+                        f"SYSINDICES for idxname={idxname!r}, "
+                        f"opclassid={component.get('opclassid')!r}"
+                    )
+                opclasses.append(
+                    self._qualified_catalog_name(
+                        opclass["name"],
+                        opclass["owner"],
+                        default_owner=owner,
+                    )
+                )
+
+            if component["kind"] == "column":
+                colname = colnames[0]
+                column_names.append(colname)
+                expression = self._quote_reflected_identifier(colname)
+                expressions.append(expression)
+                if component["descending"]:
+                    column_sorting[colname] = ("desc",)
+                continue
+
+            has_function = True
+            procedure = procedure_map.get(component.get("procid"))
+            if procedure is None:
+                util.warn(
+                    "Could not resolve functional-index procedure "
+                    f"procid={component.get('procid')!r} for index {idxname!r}"
+                )
+                return None
+
+            procedure_name = self._qualified_catalog_name(
+                procedure["name"],
+                procedure["owner"],
+                default_owner=owner,
+            )
+            procedures.append(procedure_name)
+
+            rendered_columns = ", ".join(
+                self._quote_reflected_identifier(colname)
+                for colname in colnames
+            )
+            expression = f"{procedure_name}({rendered_columns})"
+            if component["descending"]:
+                expression += " DESC"
+
+            column_names.append(None)
+            expressions.append(expression)
+
+        if not column_names:
             return None
 
         idx_info = {
@@ -2102,18 +3164,36 @@ class IfxReflector(BaseReflector):
                 idxname,
                 schema=schema,
             ),
-            "column_names": colnames,
+            "column_names": column_names,
             "unique": idxtype in ("U", "u"),
         }
 
         if column_sorting:
             idx_info["column_sorting"] = column_sorting
 
+        if has_function:
+            idx_info["expressions"] = expressions
+            dialect_options = {
+                "informix_procedure": self._single_or_tuple(procedures),
+                "informix_access_method": access_method,
+                "informix_opclass": self._single_or_tuple(opclasses),
+            }
+            idx_info["dialect_options"] = {
+                key: value
+                for key, value in dialect_options.items()
+                if value is not None
+            }
+
         return idx_info
 
     @reflection.cache
     def get_indexes(self, connection, table_name, schema=None, **kw):
-        _ = kw
+        table_name, schema, _synonym = self._resolve_reflection_target(
+            connection,
+            table_name,
+            schema,
+            kw,
+        )
         table_row = self._require_table_row(
             connection,
             table_name,
@@ -2122,24 +3202,84 @@ class IfxReflector(BaseReflector):
         )
         tabid = int(table_row[0])
         constraint_by_index = self._constraint_duplicates_by_index(connection, tabid)
+        colmap = self._get_column_name_map(connection, tabid)
+
+        parsed_rows = []
+        procids = set()
+        opclassids = set()
+
+        for row in self._index_rows(connection, tabid):
+            idxname = self._clean_str(row[0])
+            try:
+                components = self._parse_indexkeys(row[3])
+            except (TypeError, ValueError) as err:
+                util.warn(
+                    "Could not decode SYSINDICES.indexkeys for "
+                    f"tabid={tabid}, idxname={idxname!r}: {err}"
+                )
+                continue
+
+            if not components:
+                util.warn(
+                    "SYSINDICES returned no key components for "
+                    f"tabid={tabid}, idxname={idxname!r}"
+                )
+                continue
+
+            parsed_rows.append((row, components))
+            procids.update(
+                component.get("procid")
+                for component in components
+                if component.get("procid") is not None
+            )
+            opclassids.update(
+                component.get("opclassid")
+                for component in components
+                if component.get("opclassid") is not None
+            )
+
+        procedure_map = self._index_procedure_map(connection, procids)
+        opclass_map = self._index_opclass_map(connection, opclassids)
 
         indexes = []
-        for row in self._index_rows(connection, tabid):
+        for row, components in parsed_rows:
             idx_info = self._index_info_from_row(
-                connection,
                 tabid,
                 row,
+                components,
                 constraint_by_index,
+                procedure_map,
+                opclass_map,
+                colmap,
                 schema=schema,
             )
             if idx_info is not None:
+                fragment_by, dbspace = self._reflect_fragmentation(
+                    connection,
+                    tabid,
+                    index_name=self._clean_str(row[0]),
+                )
+                if fragment_by is not None or dbspace is not None:
+                    dialect_options = idx_info.setdefault(
+                        "dialect_options",
+                        {},
+                    )
+                    if fragment_by is not None:
+                        dialect_options["informix_fragment_by"] = fragment_by
+                    if dbspace is not None:
+                        dialect_options["informix_dbspace"] = dbspace
                 indexes.append(idx_info)
 
         return indexes
 
     @reflection.cache
     def get_unique_constraints(self, connection, table_name, schema=None, **kw):
-        _ = kw
+        table_name, schema, _synonym = self._resolve_reflection_target(
+            connection,
+            table_name,
+            schema,
+            kw,
+        )
         table_row = self._require_table_row(
             connection,
             table_name,

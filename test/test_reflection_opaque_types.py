@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import Boolean, LargeBinary, Text, inspect
 
-from IfxAlchemy import BOOLEAN
+from IfxAlchemy import BOOLEAN, LVARCHAR
 
 
 def test_decode_opaque_blob_clob_boolean_without_database():
@@ -41,7 +41,8 @@ def test_decode_lvarchar_opaque_uses_extended_maxlen_without_database():
         extended_maxlen=128,
     )
 
-    assert getattr(lvarchar, "length", None) == 128
+    assert type(lvarchar) is LVARCHAR
+    assert lvarchar.length == 128
 
 
 @pytest.mark.requires_informix

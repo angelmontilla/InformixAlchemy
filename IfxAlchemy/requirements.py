@@ -284,13 +284,30 @@ class Requirements(SuiteRequirements):
 
     @property
     def indexes_check_column_order(self):
-        """Informix preserves composite-index key order in SYSINDEXES.
+        """Informix preserves composite-index key order in SYSINDICES.
 
-        The ``part1`` through ``part16`` catalog columns represent index
-        components in key order.  The reflector consumes them sequentially
-        and therefore returns ``column_names`` in the order declared by the
-        original ``CREATE INDEX`` statement.
+        The native ``indexkeys`` value represents ordinary and functional
+        components in declaration order. The reflector decodes that sequence
+        and returns ``column_names`` and ``expressions`` in the same order.
         """
+
+        return exclusions.open()
+
+    @property
+    def indexes_with_expressions(self):
+        """Generic SQLAlchemy expression indexes remain intentionally closed.
+
+        Informix functional indexes require a nonvariant user-defined routine.
+        The dialect therefore supports only the explicit
+        ``informix_functional=True`` opt-in contract rather than arbitrary
+        SQLAlchemy expressions such as built-in LOWER or COALESCE calls.
+        """
+
+        return exclusions.closed()
+
+    @property
+    def reflect_indexes_with_expressions(self):
+        """Reflect functional/generalized keys from SYSINDICES."""
 
         return exclusions.open()
 
@@ -307,6 +324,18 @@ class Requirements(SuiteRequirements):
         ``SYSTABLES`` exposes the lock level, first and next extent sizes,
         and page size for base tables.  Views participate in the generic
         multi-reflection API and correctly return an empty option mapping.
+        """
+
+        return exclusions.open()
+
+    @property
+    def nvarchar_types(self):
+        """Informix exposes NCHAR and NVARCHAR as distinct native types.
+
+        This capability opens the SQLAlchemy reflection-length cases for the
+        two national character types.  It deliberately does not open the
+        broader ``unicode_data`` contract, which still depends on verified
+        CLIENT_LOCALE/DB_LOCALE and driver end-to-end behavior.
         """
 
         return exclusions.open()
