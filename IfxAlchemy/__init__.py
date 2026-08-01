@@ -52,6 +52,16 @@ from .complex import (
     parse_complex_value,
 )
 
+
+from .optimizer import (
+    AllRows,
+    AvoidIndex,
+    FirstRows,
+    JoinOrder,
+    OptimizerDirective,
+    UseIndex,
+)
+
 # Informix-specific executable DML constructs
 from .dml import InformixMerge, merge
 from .document import bson_get, bson_size, bson_update, gen_bson
@@ -175,6 +185,12 @@ __all__ = (
     "RowField",
     "RowValue",
     "SET",
+    "AllRows",
+    "AvoidIndex",
+    "FirstRows",
+    "JoinOrder",
+    "OptimizerDirective",
+    "UseIndex",
     "dialect",
     "gen_bson",
     "merge",

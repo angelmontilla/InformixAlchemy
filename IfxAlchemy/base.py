@@ -25,6 +25,7 @@
 """
 import datetime
 import re
+import threading
 from sqlalchemy import event, table
 from sqlalchemy import exc
 from sqlalchemy import schema as sa_schema
@@ -44,6 +45,16 @@ from . import reflection as ifx_reflection
 from . import sqla_compat
 from .document import BSON, JSON
 from .complex import DISTINCT, LIST, MULTISET, ROW, SET
+from .optimizer import (
+    INFORMIX_CONNECTION_CHARACTERISTICS,
+    INFORMIX_OPTIMIZER_DIRECTIVES,
+    default_session_option,
+    insert_optimizer_comment,
+    normalize_optimizer_directives,
+    normalize_session_option,
+    render_optimizer_comment,
+    session_option_sql,
+)
 
 from sqlalchemy.types import BLOB, CHAR, CLOB, DATE, DATETIME, INTEGER, \
     SMALLINT, BIGINT, DECIMAL, NUMERIC, REAL, TIME, TIMESTAMP, \
@@ -1677,18 +1688,61 @@ class IfxCompiler(compiler.SQLCompiler):
             **kw,
         )
 
+    def _ifx_apply_compiled_optimizer_directives(
+        self, statement, rendered, keyword
+    ):
+        """Render directives during explicit/non-cached compilation.
+
+        SQLAlchemy statement execution options are intentionally absent from
+        the structural cache key.  Cached engine compilation therefore leaves
+        the SQL generic and :class:`IfxExecutionContext` injects the comment
+        immediately before execution.  Explicit ``statement.compile()`` calls
+        have no cache key and are rendered here so diagnostics and tests see
+        the exact Informix SQL.
+        """
+        if statement is not self.statement:
+            return rendered
+
+        directives = statement.get_execution_options().get(
+            INFORMIX_OPTIMIZER_DIRECTIVES
+        )
+        if not directives:
+            return rendered
+
+        # Validate even for cached compilation, so invalid directives fail at
+        # compile time rather than after a connection has been checked out.
+        normalize_optimizer_directives(directives)
+        if self.cache_key is not None:
+            return rendered
+
+        comment = render_optimizer_comment(directives, self)
+        self._ifx_optimizer_directives_rendered = True
+        return insert_optimizer_comment(rendered, keyword, comment)
+
+    def visit_select(self, select_stmt, **kw):
+        rendered = super().visit_select(select_stmt, **kw)
+        return self._ifx_apply_compiled_optimizer_directives(
+            select_stmt, rendered, "SELECT"
+        )
+
     def visit_update(self, update_stmt, visiting_cte=None, **kw):
-        return super().visit_update(
+        rendered = super().visit_update(
             self._ifx_rewrite_multitable_dml_as_exists(update_stmt),
             visiting_cte=visiting_cte,
             **kw,
         )
+        return self._ifx_apply_compiled_optimizer_directives(
+            update_stmt, rendered, "UPDATE"
+        )
 
     def visit_delete(self, delete_stmt, visiting_cte=None, **kw):
-        return super().visit_delete(
+        rendered = super().visit_delete(
             self._ifx_rewrite_multitable_dml_as_exists(delete_stmt),
             visiting_cte=visiting_cte,
             **kw,
+        )
+        return self._ifx_apply_compiled_optimizer_directives(
+            delete_stmt, rendered, "DELETE"
         )
 
     def visit_select_statement_grouping(self, grouping, **kw):
@@ -3967,6 +4021,43 @@ class IfxIdentifierPreparer(compiler.IdentifierPreparer):
 
 
 class IfxExecutionContext(default.DefaultExecutionContext):
+    def _ifx_apply_runtime_optimizer_directives(self):
+        directives = self.execution_options.get(
+            INFORMIX_OPTIMIZER_DIRECTIVES
+        )
+        if not directives:
+            return
+
+        compiled = getattr(self, "compiled", None)
+        if compiled is None:
+            raise exc.ArgumentError(
+                "informix_optimizer_directives require a SQLAlchemy SELECT, "
+                "UPDATE, or DELETE construct"
+            )
+        if getattr(compiled, "_ifx_optimizer_directives_rendered", False):
+            return
+
+        clause = getattr(compiled, "statement", None)
+        if getattr(clause, "is_select", False):
+            keyword = "SELECT"
+        elif getattr(clause, "is_update", False):
+            keyword = "UPDATE"
+        elif getattr(clause, "is_delete", False):
+            keyword = "DELETE"
+        else:
+            raise exc.ArgumentError(
+                "Informix inline optimizer directives are supported only for "
+                "SELECT, UPDATE, and DELETE"
+            )
+
+        comment = render_optimizer_comment(directives, compiled)
+        self.statement = insert_optimizer_comment(
+            self.statement, keyword, comment
+        )
+
+    def pre_exec(self):
+        self._ifx_apply_runtime_optimizer_directives()
+
     def fire_sequence(self, seq, type_):
         sequence_name = self.identifier_preparer.format_sequence(seq)
         return self._execute_scalar(
@@ -4010,6 +4101,9 @@ class _SelectLastRowIDMixin(object):
         return bool(sqla_compat.get_statement_returning(statement))
 
     def pre_exec(self):
+        super_pre_exec = getattr(super(), "pre_exec", None)
+        if super_pre_exec is not None:
+            super_pre_exec()
         self._lastrowid = None
         self._select_lastrowid = False
         self._lastrowid_query = None
@@ -4061,6 +4155,12 @@ class _SelectLastRowIDMixin(object):
 
 class IfxDialect(default.DefaultDialect):
     div_is_floordiv = False
+
+    connection_characteristics = (
+        default.DefaultDialect.connection_characteristics.union(
+            INFORMIX_CONNECTION_CHARACTERISTICS
+        )
+    )
 
     name = 'informix'
     max_identifier_length = 128
@@ -4151,6 +4251,49 @@ class IfxDialect(default.DefaultDialect):
         self._bson_encoder = bson_encoder
         self._bson_decoder = bson_decoder
         self._reflector = self._reflector_cls(self)
+        self._informix_session_state = {}
+        self._informix_session_state_lock = threading.RLock()
+
+    def _remember_informix_session_option(
+        self, dbapi_connection, name, value
+    ):
+        with self._informix_session_state_lock:
+            state = self._informix_session_state.setdefault(
+                id(dbapi_connection), {}
+            )
+            state[name] = value
+
+    def _forget_informix_session_options(self, dbapi_connection):
+        with self._informix_session_state_lock:
+            self._informix_session_state.pop(id(dbapi_connection), None)
+
+    def get_informix_session_option(self, dbapi_connection, name):
+        with self._informix_session_state_lock:
+            return self._informix_session_state.get(
+                id(dbapi_connection), {}
+            ).get(name, default_session_option(name))
+
+    def set_informix_session_option(
+        self, dbapi_connection, name, value
+    ):
+        normalized = normalize_session_option(name, value)
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute(session_option_sql(name, normalized))
+        finally:
+            cursor.close()
+        self._remember_informix_session_option(
+            dbapi_connection, name, normalized
+        )
+
+    def reset_informix_session_option(self, dbapi_connection, name):
+        self.set_informix_session_option(
+            dbapi_connection, name, default_session_option(name)
+        )
+
+    def do_close(self, dbapi_connection):
+        self._forget_informix_session_options(dbapi_connection)
+        super().do_close(dbapi_connection)
 
     def _detect_database_mode(self, connection):
         """Return the current database name and its ANSI-mode flag."""
