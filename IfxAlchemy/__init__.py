@@ -22,11 +22,67 @@ __version__ = "1.1.0"
 # Imports of the modules required for the pyodbc dialect and data types
 from . import pyodbc, base
 
+# Alembic is optional.  When it is installed, importing this package must
+# register the Informix DefaultImpl before MigrationContext.configure() is
+# called.  This prevents Alembic from failing with KeyError("informix").
+try:
+    from . import alembic as _alembic  # noqa: F401
+except ModuleNotFoundError as error:
+    # Do not make Alembic a mandatory runtime dependency.  Only suppress a
+    # missing Alembic package; errors in this package's own integration must
+    # remain visible.
+    if not error.name or error.name.split(".", 1)[0] != "alembic":
+        raise
+
 # Default dialect: pyodbc
 dialect = pyodbc.IfxDialect_pyodbc
 
+from .complex import (
+    CreateDistinctType,
+    CreateRowType,
+    DISTINCT,
+    DropDistinctType,
+    DropRowType,
+    LIST,
+    MULTISET,
+    ROW,
+    RowField,
+    RowValue,
+    SET,
+    parse_complex_value,
+)
+
+# Informix-specific executable DML constructs
+from .dml import InformixMerge, merge
+from .document import bson_get, bson_size, bson_update, gen_bson
+
+# Typed Informix fragmentation models and ALTER FRAGMENT constructs
+from .fragmentation import (
+    AddFragment,
+    AttachFragment,
+    AttachedIndexFragmentation,
+    DetachFragment,
+    DropFragment,
+    ExpressionFragmentation,
+    Fragment,
+    InitFragment,
+    InitFragmentation,
+    ListFragmentation,
+    ModifyFragment,
+    RangeFragmentation,
+    RangeIntervalFragmentation,
+    RoundRobinFragmentation,
+)
+
 # Informix-specific executable DDL constructs
-from .ddl import ModifyTableExtents, SetTableLockMode
+from .ddl import (
+    CreateSynonym,
+    DropSynonym,
+    ModifyTableExtents,
+    SetTableLockMode,
+    SynonymName,
+    SynonymTarget,
+)
 
 # Data types supported by the Informix dialect
 from .base import (
@@ -34,6 +90,7 @@ from .base import (
     BIGSERIAL,
     BLOB,
     BOOLEAN,
+    BSON,
     CHAR,
     CLOB,
     DATE,
@@ -42,7 +99,9 @@ from .base import (
     DOUBLE,
     GRAPHIC,
     INTEGER,
+    JSON,
     LONGVARCHAR,
+    LVARCHAR,
     NUMERIC,
     SMALLINT,
     REAL,
@@ -60,25 +119,64 @@ __all__ = (
     "BIGSERIAL",
     "BLOB",
     "BOOLEAN",
+    "BSON",
     "CHAR",
     "CLOB",
+    "CreateSynonym",
+    "AddFragment",
+    "AttachFragment",
+    "AttachedIndexFragmentation",
     "DATE",
     "DATETIME",
     "DECIMAL",
     "DOUBLE",
+    "DropSynonym",
+    "DetachFragment",
+    "DropFragment",
+    "ExpressionFragmentation",
+    "Fragment",
     "GRAPHIC",
     "INTEGER",
+    "InformixMerge",
+    "JSON",
+    "InitFragment",
+    "InitFragmentation",
+    "ListFragmentation",
     "LONGVARCHAR",
+    "LVARCHAR",
     "NUMERIC",
     "ModifyTableExtents",
+    "ModifyFragment",
     "SMALLINT",
     "REAL",
+    "RangeFragmentation",
+    "RangeIntervalFragmentation",
+    "RoundRobinFragmentation",
     "SERIAL",
     "SERIAL8",
     "SetTableLockMode",
+    "SynonymName",
+    "SynonymTarget",
     "TIME",
     "TIMESTAMP",
     "VARCHAR",
     "VARGRAPHIC",
+    "bson_get",
+    "bson_size",
+    "bson_update",
+    "CreateDistinctType",
+    "CreateRowType",
+    "DISTINCT",
+    "DropDistinctType",
+    "DropRowType",
+    "LIST",
+    "MULTISET",
+    "ROW",
+    "RowField",
+    "RowValue",
+    "SET",
     "dialect",
+    "gen_bson",
+    "merge",
+    "parse_complex_value",
 )

@@ -34,11 +34,16 @@ from sqlalchemy import util
 from sqlalchemy.sql import compiler
 from sqlalchemy.sql import operators
 from sqlalchemy.sql import selectable
+from sqlalchemy.sql import elements as sql_elements
+from sqlalchemy.sql import functions as sql_functions
 from sqlalchemy.sql import util as sql_util
+from sqlalchemy.sql import visitors as sql_visitors
 from sqlalchemy.engine import default
 
 from . import reflection as ifx_reflection
 from . import sqla_compat
+from .document import BSON, JSON
+from .complex import DISTINCT, LIST, MULTISET, ROW, SET
 
 from sqlalchemy.types import BLOB, CHAR, CLOB, DATE, DATETIME, INTEGER, \
     SMALLINT, BIGINT, DECIMAL, NUMERIC, REAL, TIME, TIMESTAMP, \
@@ -375,6 +380,19 @@ class DOUBLE(sa_types.Numeric):
 
 class LONGVARCHAR(sa_types.VARCHAR):
     __visit_name__ = 'LONGVARCHAR'
+
+
+class LVARCHAR(sa_types.String):
+    """Native Informix LVARCHAR opaque character type.
+
+    Informix stores up to 32,739 bytes and applies a 2,048-byte maximum when
+    no length is declared.  A missing ``length`` is intentionally preserved
+    so DDL renders the native shorthand ``LVARCHAR`` and the server applies
+    that default.
+    """
+
+    __visit_name__ = "LVARCHAR"
+    cache_ok = True
 
 
 class DBCLOB(sa_types.CLOB):
@@ -913,6 +931,8 @@ ischema_names = {
     'TIME': TIME,
     'TIMESTAMP': TIMESTAMP,
     'VARCHAR': VARCHAR,
+    'NCHAR': sa_types.NCHAR,
+    'NVARCHAR': sa_types.NVARCHAR,
     'LONGVARCHAR': LONGVARCHAR,
     'XML': XML,
     'GRAPHIC': GRAPHIC,
@@ -922,7 +942,14 @@ ischema_names = {
     'BOOLEAN': BOOLEAN,
     'BYTE': sa_types.LargeBinary,
     'TEXT': sa_types.Text,
-    'LVARCHAR': VARCHAR,
+    'LVARCHAR': LVARCHAR,
+    'JSON': JSON,
+    'BSON': BSON,
+    'LIST': LIST,
+    'SET': SET,
+    'MULTISET': MULTISET,
+    'ROW': ROW,
+    'DISTINCT': DISTINCT,
 }
 
 
@@ -940,6 +967,13 @@ _IFX_TYPE_VISITOR_ALIASES = {
     "visit_FLOAT": "visit_float",
     "visit_DOUBLE": "visit_double",
     "visit_XML": "visit_xml",
+    "visit_JSON": "visit_JSON",
+    "visit_BSON": "visit_BSON",
+    "visit_LIST": "visit_LIST",
+    "visit_SET": "visit_SET",
+    "visit_MULTISET": "visit_MULTISET",
+    "visit_ROW": "visit_ROW",
+    "visit_DISTINCT": "visit_DISTINCT",
     "visit_CLOB": "visit_clob",
     "visit_BLOB": "visit_blob",
     "visit_DBCLOB": "visit_dbclob",
@@ -1026,6 +1060,54 @@ class IfxTypeCompiler(compiler.GenericTypeCompiler):
     def visit_xml(self, type_):
         return "XML"
 
+    def visit_JSON(self, type_, **kw):
+        _ = type_, kw
+        return "JSON"
+
+    def visit_BSON(self, type_, **kw):
+        _ = type_, kw
+        return "BSON"
+
+    def _visit_collection_type(self, type_, **kw):
+        element_sql = self.process(type_.element_type, **kw)
+        return f"{type_.__visit_name__}({element_sql} NOT NULL)"
+
+    def visit_LIST(self, type_, **kw):
+        return self._visit_collection_type(type_, **kw)
+
+    def visit_SET(self, type_, **kw):
+        return self._visit_collection_type(type_, **kw)
+
+    def visit_MULTISET(self, type_, **kw):
+        return self._visit_collection_type(type_, **kw)
+
+    def visit_ROW(self, type_, **kw):
+        preparer = self.dialect.identifier_preparer
+        if type_.name is not None:
+            rendered = preparer.quote(type_.name)
+            if type_.owner is not None:
+                rendered = f"{preparer.quote(type_.owner)}.{rendered}"
+            return rendered
+
+        fields = []
+        for field in type_.fields:
+            field_sql = (
+                f"{preparer.quote(field.name)} "
+                f"{self.process(field.type_, **kw)}"
+            )
+            if not field.nullable:
+                field_sql += " NOT NULL"
+            fields.append(field_sql)
+        return "ROW(" + ", ".join(fields) + ")"
+
+    def visit_DISTINCT(self, type_, **kw):
+        _ = kw
+        preparer = self.dialect.identifier_preparer
+        rendered = preparer.quote(type_.name)
+        if type_.owner is not None:
+            rendered = f"{preparer.quote(type_.owner)}.{rendered}"
+        return rendered
+
     def visit_clob(self, type_):
         return "CLOB"
 
@@ -1051,6 +1133,25 @@ class IfxTypeCompiler(compiler.GenericTypeCompiler):
     def visit_longvarchar(self, type_):
         return "LONG VARCHAR"
 
+    def visit_LVARCHAR(self, type_, **kw):
+        _ = kw
+        length = type_.length
+
+        if length is None:
+            return "LVARCHAR"
+
+        if isinstance(length, bool) or not isinstance(length, int):
+            raise exc.CompileError(
+                "Informix LVARCHAR length must be an integer number of bytes"
+            )
+
+        if not 1 <= length <= 32739:
+            raise exc.CompileError(
+                "Informix LVARCHAR length must be between 1 and 32739 bytes"
+            )
+
+        return f"LVARCHAR({length})"
+
     def visit_vargraphic(self, type_):
         length = self._require_length(type_, "VARGRAPHIC")
         return "VARGRAPHIC(%(length)s)" % {"length": length}
@@ -1061,6 +1162,63 @@ class IfxTypeCompiler(compiler.GenericTypeCompiler):
     def visit_char(self, type_):
         return "CHAR" if type_.length in (None, 0) else \
                 "CHAR(%(length)s)" % {'length': type_.length}
+
+    def _render_national_character_type(
+        self,
+        type_name,
+        type_,
+        maximum_length,
+    ):
+        """Render an Informix locale-sensitive character type.
+
+        Informix interprets NCHAR and NVARCHAR lengths as bytes in the
+        database locale.  Keep these types distinct from CHAR/VARCHAR and
+        reject lengths that the server cannot represent before emitting DDL.
+        A missing length is valid Informix syntax and uses the server default
+        of one byte.
+        """
+        length = type_.length
+
+        if length is None:
+            return type_name
+
+        if isinstance(length, bool) or not isinstance(length, int):
+            raise exc.CompileError(
+                f"Informix {type_name} length must be an integer number "
+                "of bytes"
+            )
+
+        if not 1 <= length <= maximum_length:
+            raise exc.CompileError(
+                f"Informix {type_name} length must be between 1 and "
+                f"{maximum_length} bytes"
+            )
+
+        # NCHAR/NVARCHAR collation is selected by DB_LOCALE rather than by
+        # degrading the type to CHAR/VARCHAR.  GenericTypeCompiler's helper
+        # preserves the exact native type name and an explicitly supplied
+        # SQLAlchemy collation clause.
+        return self._render_string_type(
+            type_name,
+            length,
+            type_.collation,
+        )
+
+    def visit_NCHAR(self, type_, **kw):
+        _ = kw
+        return self._render_national_character_type(
+            "NCHAR",
+            type_,
+            32767,
+        )
+
+    def visit_NVARCHAR(self, type_, **kw):
+        _ = kw
+        return self._render_national_character_type(
+            "NVARCHAR",
+            type_,
+            255,
+        )
 
     def visit_graphic(self, type_):
         return "GRAPHIC" if type_.length in (None, 0) else \
@@ -1102,6 +1260,153 @@ class IfxTypeCompiler(compiler.GenericTypeCompiler):
 
 class IfxCompiler(compiler.SQLCompiler):
     ansi_bind_rules = True
+
+    def _ifx_merge_column(self, column, **kw):
+        """Render a target MERGE column with its table or alias qualifier."""
+
+        render_kw = dict(kw)
+        render_kw["include_table"] = True
+        return self.process(column, **render_kw)
+
+    def _ifx_render_merge_values_source(self, source, **kw):
+        """Render a named SQLAlchemy ``Values`` as an Informix source query.
+
+        Informix 14.10 does not accept the generic ``VALUES (...), (...)``
+        table expression emitted by SQLAlchemy in the USING clause.  Reuse the
+        dialect's typed single-row SELECT strategy and combine rows with
+        ``UNION ALL``.  Aliases on the first branch define the derived-table
+        column names used by the ON and action clauses.
+        """
+
+        if not source.named_with_column:
+            raise exc.CompileError(
+                "Informix MERGE requires a named Values source; pass "
+                "values(..., name='source_name') or call .alias('source_name')"
+            )
+
+        if sqla_compat.values_is_lateral(source):
+            raise exc.CompileError(
+                "Informix MERGE does not support a LATERAL Values source"
+            )
+
+        rows = sqla_compat.get_values_rows(source)
+        if not rows:
+            raise exc.CompileError(
+                "Informix MERGE Values source requires at least one row"
+            )
+
+        columns = tuple(source.columns)
+        column_types = sqla_compat.get_values_column_types(source)
+        if len(columns) != len(column_types):
+            raise exc.CompileError(
+                "Informix MERGE Values source column/type metadata is "
+                "inconsistent"
+            )
+
+        render_kw = dict(kw)
+        render_kw.setdefault(
+            "literal_binds",
+            sqla_compat.get_values_literal_binds(source),
+        )
+
+        branches = []
+        for row_index, row in enumerate(rows):
+            row = tuple(row)
+            if len(row) != len(columns):
+                raise exc.CompileError(
+                    "Informix MERGE Values source row has "
+                    f"{len(row)} values for {len(columns)} columns"
+                )
+
+            typed_row = sql.elements.Tuple(*row, types=column_types)
+            rendered_expressions = []
+            for expression, column in zip(typed_row.clauses, columns):
+                rendered = self._ifx_render_values_cte_expression(
+                    expression,
+                    **render_kw,
+                )
+                if row_index == 0:
+                    rendered += " AS " + self.preparer.quote(column.name)
+                rendered_expressions.append(rendered)
+
+            branches.append(
+                "SELECT "
+                + ", ".join(rendered_expressions)
+                + self.default_from()
+            )
+
+        alias_name = self.preparer.quote(source.name)
+        return (
+            "("
+            + " UNION ALL ".join(branches)
+            + ")"
+            + self.get_render_as_alias_suffix(alias_name)
+        )
+
+    def _ifx_render_merge_source(self, source, **kw):
+        if isinstance(source, selectable.Values):
+            return self._ifx_render_merge_values_source(source, **kw)
+
+        render_kw = dict(kw)
+        render_kw["asfrom"] = True
+        return self.process(source, **render_kw)
+
+    def visit_informix_merge(self, merge, **kw):
+        """Compile the safe native Informix MERGE construct."""
+
+        if (
+            merge._matched_update is None
+            and not merge._matched_delete
+            and merge._not_matched_insert is None
+        ):
+            raise exc.CompileError(
+                "Informix MERGE requires UPDATE, DELETE, and/or INSERT action"
+            )
+
+        target_kw = dict(kw)
+        target_kw["asfrom"] = True
+        target_sql = self.process(merge.target, **target_kw)
+        source_sql = self._ifx_render_merge_source(merge.source, **kw)
+        on_sql = self.process(merge.onclause, **kw)
+
+        clauses = [
+            f"MERGE INTO {target_sql}",
+            f"USING {source_sql}",
+            f"ON {on_sql}",
+        ]
+
+        if merge._matched_update is not None:
+            assignments = ", ".join(
+                f"{self._ifx_merge_column(column, **kw)} = "
+                f"{self.process(value, **kw)}"
+                for column, value in merge._matched_update
+            )
+            clauses.append(
+                "WHEN MATCHED THEN UPDATE SET " + assignments
+            )
+        elif merge._matched_delete:
+            clauses.append("WHEN MATCHED THEN DELETE")
+
+        if merge._not_matched_insert is not None:
+            insert_kw = dict(kw)
+            insert_kw["include_table"] = False
+            columns = ", ".join(
+                self.process(column, **insert_kw)
+                for column, _ in merge._not_matched_insert
+            )
+            values = ", ".join(
+                self.process(value, **kw)
+                for _, value in merge._not_matched_insert
+            )
+            clauses.append(
+                "WHEN NOT MATCHED THEN INSERT ("
+                + columns
+                + ") VALUES ("
+                + values
+                + ")"
+            )
+
+        return " ".join(clauses)
 
     def visit_column(
         self,
@@ -1495,7 +1800,7 @@ class IfxCompiler(compiler.SQLCompiler):
             and not isinstance(adapted_type, sa_types.CHAR)
             and getattr(adapted_type, "length", None) in (None, 0)
         ):
-            return "LVARCHAR"
+            return self.dialect.type_compiler_instance.process(LVARCHAR())
 
         try:
             return self.dialect.type_compiler_instance.process(adapted_type)
@@ -2031,7 +2336,14 @@ class IfxCompiler(compiler.SQLCompiler):
                     sa_types.Text,
                     sa_types.Unicode,
                     sa_types.UnicodeText,
-                    sa_types.Boolean)):
+                    sa_types.Boolean,
+                    JSON,
+                    BSON,
+                    LIST,
+                    SET,
+                    MULTISET,
+                    ROW,
+                    DISTINCT)):
             return super(IfxCompiler, self).visit_cast(cast, **kw)
         else:
             return self.process(cast.clause, **kw)
@@ -2266,6 +2578,508 @@ class IfxDDLCompiler(compiler.DDLCompiler):
 
     _WRITABLE_TABLE_LOCK_LEVELS = frozenset({"PAGE", "ROW"})
 
+    def _format_fragment_identifier(self, value):
+        """Quote one validated Informix fragment/dbspace identifier."""
+        return self.preparer.quote(value)
+
+    def _fragment_expression_sql(
+        self,
+        value,
+        subject,
+        *,
+        role,
+        require_column=False,
+    ):
+        """Compile one structured fragmentation expression safely.
+
+        User-authored expressions must be SQLAlchemy expression objects and
+        may reference only columns of the table being fragmented.  Reflected
+        catalog expressions are trusted only because they originate in
+        SYSFRAGMENTS and are represented by an internal immutable marker.
+        """
+        from .fragmentation import _ReflectedFragmentExpression
+
+        if isinstance(value, _ReflectedFragmentExpression):
+            return value.sql
+
+        table = subject.table if isinstance(subject, sa_schema.Index) else subject
+        if any(
+            isinstance(element, selectable.SelectBase)
+            for element in sql_visitors.iterate(value)
+        ) or isinstance(value, selectable.ScalarSelect):
+            raise exc.CompileError(
+                f"{role} cannot contain a subquery"
+            )
+        columns = {
+            element
+            for element in sql_visitors.iterate(value)
+            if isinstance(element, sql_elements.ColumnClause)
+        }
+        for column in columns:
+            if getattr(column, "table", None) is not table:
+                raise exc.CompileError(
+                    f"{role} may reference only columns of the fragmented table"
+                )
+        if require_column and not columns:
+            raise exc.CompileError(
+                f"{role} must reference at least one column of the fragmented table"
+            )
+
+        return self.sql_compiler.process(
+            value,
+            literal_binds=True,
+            include_table=False,
+        )
+
+    def _range_interval_key_columns(self, value, subject):
+        """Return the single native column used by RANGE INTERVAL.
+
+        Informix RANGE INTERVAL fragmentation is intentionally narrower than
+        general expression fragmentation: its key must depend on exactly one
+        numeric, DATE, or DATETIME column.  Reflected catalog expressions are
+        already validated by the server and therefore remain round-trippable
+        without attempting to parse catalog SQL back into a SQLAlchemy tree.
+        """
+        from .fragmentation import _ReflectedFragmentExpression
+
+        if isinstance(value, _ReflectedFragmentExpression):
+            return ()
+
+        table = subject.table if isinstance(subject, sa_schema.Index) else subject
+        columns = tuple(
+            {
+                element
+                for element in sql_visitors.iterate(value)
+                if isinstance(element, sql_elements.ColumnClause)
+            }
+        )
+        if len(columns) != 1:
+            raise exc.CompileError(
+                "range-interval fragmentation key must reference exactly "
+                "one column of the fragmented table"
+            )
+
+        column = columns[0]
+        if getattr(column, "table", None) is not table:
+            raise exc.CompileError(
+                "range-interval fragmentation key may reference only a "
+                "column of the fragmented table"
+            )
+
+        if not isinstance(
+            column.type,
+            (
+                sa_types.Integer,
+                sa_types.Numeric,
+                sa_types.Date,
+                sa_types.DateTime,
+            ),
+        ):
+            raise exc.CompileError(
+                "range-interval fragmentation key must use a numeric, DATE, "
+                "or DATETIME column"
+            )
+        return columns
+
+    def _fragment_literal_sql(self, value, subject, *, role):
+        """Compile a fragment boundary/list value through SQLAlchemy."""
+        from .fragmentation import _ReflectedFragmentExpression
+
+        if isinstance(value, _ReflectedFragmentExpression):
+            return value.sql
+        expression = (
+            value
+            if isinstance(value, sql_elements.ClauseElement)
+            else sql.literal(value)
+        )
+        if isinstance(expression, sql_elements.TextClause):
+            raise exc.CompileError(
+                f"{role} must be a structured SQLAlchemy constant expression"
+            )
+        if any(
+            isinstance(element, selectable.SelectBase)
+            for element in sql_visitors.iterate(expression)
+        ) or isinstance(expression, selectable.ScalarSelect):
+            raise exc.CompileError(f"{role} cannot contain a subquery")
+        columns = {
+            element
+            for element in sql_visitors.iterate(expression)
+            if isinstance(element, sql_elements.ColumnClause)
+        }
+        if columns:
+            raise exc.CompileError(f"{role} must be a constant expression")
+        return self.sql_compiler.process(
+            expression,
+            literal_binds=True,
+            include_table=False,
+        )
+
+    def _fragment_prefix(self, fragmentation):
+        return "PARTITION BY" if fragmentation.partition_by else "FRAGMENT BY"
+
+    def _format_fragment_name(self, fragment):
+        if fragment.name is None:
+            return ""
+        return f"PARTITION {self._format_fragment_identifier(fragment.name)} "
+
+    def _compile_expression_fragment(self, fragment, subject):
+        prefix = self._format_fragment_name(fragment)
+        if fragment._catalog_selector is not None:
+            selector = fragment._catalog_selector.sql
+        elif fragment.remainder:
+            selector = "REMAINDER"
+        elif fragment.is_null:
+            selector = "VALUES (NULL)"
+        else:
+            expression = self._fragment_expression_sql(
+                fragment.expression,
+                subject,
+                role="fragment expression",
+            )
+            stripped = expression.strip()
+            selector = (
+                stripped
+                if stripped.startswith("(") and stripped.endswith(")")
+                else f"({stripped})"
+            )
+        return (
+            f"{prefix}{selector} IN "
+            f"{self._format_fragment_identifier(fragment.dbspace)}"
+        )
+
+    def _compile_list_fragment(self, fragment, subject):
+        prefix = self._format_fragment_name(fragment)
+        if fragment._catalog_selector is not None:
+            selector = fragment._catalog_selector.sql
+        elif fragment.remainder:
+            selector = "REMAINDER"
+        elif fragment.is_null:
+            selector = "VALUES (NULL)"
+        else:
+            values = ", ".join(
+                self._fragment_literal_sql(
+                    value,
+                    subject,
+                    role="list fragmentation value",
+                )
+                for value in fragment.values
+            )
+            selector = f"VALUES ({values})"
+        return (
+            f"{prefix}{selector} IN "
+            f"{self._format_fragment_identifier(fragment.dbspace)}"
+        )
+
+    def _compile_range_interval_fragment(self, fragment, subject):
+        prefix = self._format_fragment_name(fragment)
+        if fragment._catalog_selector is not None:
+            selector = fragment._catalog_selector.sql
+        elif fragment.is_null:
+            selector = "VALUES IS NULL"
+        else:
+            upper_bound = self._fragment_literal_sql(
+                fragment.upper_bound,
+                subject,
+                role="range-interval upper bound",
+            )
+            selector = f"VALUES < {upper_bound}"
+        return (
+            f"{prefix}{selector} IN "
+            f"{self._format_fragment_identifier(fragment.dbspace)}"
+        )
+
+    def _compile_fragmentation(self, fragmentation, subject):
+        """Render one typed table/index fragmentation strategy."""
+        from .fragmentation import (
+            AttachedIndexFragmentation,
+            ExpressionFragmentation,
+            ListFragmentation,
+            RangeFragmentation,
+            RangeIntervalFragmentation,
+            RoundRobinFragmentation,
+        )
+
+        if isinstance(fragmentation, AttachedIndexFragmentation):
+            if not isinstance(subject, sa_schema.Index):
+                raise exc.CompileError(
+                    "AttachedIndexFragmentation is valid only for reflected indexes"
+                )
+            return ""
+
+        prefix = self._fragment_prefix(fragmentation)
+
+        if isinstance(fragmentation, RoundRobinFragmentation):
+            if isinstance(subject, sa_schema.Index):
+                raise exc.CompileError(
+                    "Informix does not support ROUND ROBIN fragmentation for indexes"
+                )
+            if fragmentation.fragments:
+                fragments = ", ".join(
+                    self._format_fragment_name(fragment)
+                    + "IN "
+                    + self._format_fragment_identifier(fragment.dbspace)
+                    for fragment in fragmentation.fragments
+                )
+                return f"{prefix} ROUND ROBIN {fragments}"
+            else:
+                fragments = ", ".join(
+                    self._format_fragment_identifier(dbspace)
+                    for dbspace in fragmentation.dbspaces
+                )
+                return f"{prefix} ROUND ROBIN IN {fragments}"
+
+        if isinstance(fragmentation, (ExpressionFragmentation, RangeFragmentation)):
+            fragments = ", ".join(
+                self._compile_expression_fragment(fragment, subject)
+                for fragment in fragmentation.fragments
+            )
+            return f"{prefix} EXPRESSION {fragments}"
+
+        if isinstance(fragmentation, ListFragmentation):
+            key = self._fragment_expression_sql(
+                fragmentation.key,
+                subject,
+                role="list fragmentation key",
+                require_column=True,
+            )
+            fragments = ", ".join(
+                self._compile_list_fragment(fragment, subject)
+                for fragment in fragmentation.fragments
+            )
+            return f"{prefix} LIST ({key}) {fragments}"
+
+        if isinstance(fragmentation, RangeIntervalFragmentation):
+            self._range_interval_key_columns(fragmentation.key, subject)
+            key = self._fragment_expression_sql(
+                fragmentation.key,
+                subject,
+                role="range-interval key",
+                require_column=True,
+            )
+            interval = self._fragment_literal_sql(
+                fragmentation.interval,
+                subject,
+                role="range-interval interval",
+            )
+            text = f"{prefix} RANGE ({key}) INTERVAL ({interval})"
+            if fragmentation.store_in:
+                dbspaces = ", ".join(
+                    self._format_fragment_identifier(dbspace)
+                    for dbspace in fragmentation.store_in
+                )
+                text += f" STORE IN ({dbspaces})"
+            fragments = ", ".join(
+                self._compile_range_interval_fragment(fragment, subject)
+                for fragment in fragmentation.fragments
+            )
+            return f"{text} {fragments}"
+
+        raise exc.CompileError(
+            "informix_fragment_by must be a typed Informix fragmentation object"
+        )
+
+    def _fragment_storage_clauses(self, subject, options):
+        """Return mutually exclusive dbspace/fragmentation CREATE clauses."""
+        dbspace = options.get("dbspace")
+        fragment_by = options.get("fragment_by")
+        if dbspace is not None and fragment_by is not None:
+            raise exc.CompileError(
+                "informix_dbspace and informix_fragment_by are mutually exclusive"
+            )
+        if dbspace is not None:
+            from .fragmentation import _identifier
+
+            _identifier(dbspace, "dbspace")
+            return [f"IN {self._format_fragment_identifier(dbspace)}"]
+        if fragment_by is not None:
+            clause = self._compile_fragmentation(fragment_by, subject)
+            return [clause] if clause else []
+        return []
+
+    def _format_fragment_subject(self, subject):
+        if isinstance(subject, sa_schema.Table):
+            return "TABLE", self.preparer.format_table(subject)
+        if isinstance(subject, sa_schema.Index):
+            return "INDEX", self.preparer.format_index(subject)
+        raise exc.CompileError("ALTER FRAGMENT requires a Table or Index")
+
+    def _alter_fragment_prefix(self, alter):
+        kind, name = self._format_fragment_subject(alter.subject)
+        text = "ALTER FRAGMENT"
+        if alter.online:
+            if not isinstance(alter.subject, sa_schema.Table):
+                raise exc.CompileError(
+                    "ALTER FRAGMENT ONLINE requires a table"
+                )
+            from .fragmentation import RangeIntervalFragmentation
+
+            fragment_by = alter.subject.dialect_options["informix"].get(
+                "fragment_by"
+            )
+            if fragment_by is not None and not isinstance(
+                fragment_by,
+                RangeIntervalFragmentation,
+            ):
+                raise exc.CompileError(
+                    "ALTER FRAGMENT ONLINE requires a range-interval table"
+                )
+            text += " ONLINE"
+        return f"{text} ON {kind} {name}"
+
+    def _alter_fragment_position(self, before, after):
+        if before is not None:
+            return f" BEFORE {self._format_fragment_identifier(before)}"
+        if after is not None:
+            return f" AFTER {self._format_fragment_identifier(after)}"
+        return ""
+
+    def _compile_alter_fragment_selector(self, fragment, subject):
+        if fragment.expression is not None or fragment.remainder:
+            return self._compile_expression_fragment(fragment, subject)
+        if fragment.values or fragment.is_null:
+            return self._compile_list_fragment(fragment, subject)
+        if fragment.has_upper_bound:
+            return self._compile_range_interval_fragment(fragment, subject)
+        if fragment.dbspace is not None:
+            return (
+                self._format_fragment_name(fragment)
+                + "IN "
+                + self._format_fragment_identifier(fragment.dbspace)
+            )
+        raise exc.CompileError("ALTER FRAGMENT requires a complete fragment definition")
+
+    def visit_init_fragmentation(self, alter, **kw):
+        _ = kw
+        if alter.online:
+            raise exc.CompileError("ALTER FRAGMENT INIT does not support ONLINE")
+        prefix = self._alter_fragment_prefix(alter)
+        if alter.fragment_by is not None:
+            clause = self._compile_fragmentation(alter.fragment_by, alter.subject)
+        else:
+            clause = ""
+            if alter.fragment_name is not None:
+                clause += (
+                    "PARTITION "
+                    + self._format_fragment_identifier(alter.fragment_name)
+                    + " "
+                )
+            clause += "IN " + self._format_fragment_identifier(alter.dbspace)
+        return f"{prefix} INIT {clause}"
+
+    def visit_add_fragment(self, alter, **kw):
+        _ = kw
+        if alter.online:
+            raise exc.CompileError("ALTER FRAGMENT ADD does not support ONLINE")
+        prefix = self._alter_fragment_prefix(alter)
+        if alter.interval_dbspaces:
+            spaces = ", ".join(
+                self._format_fragment_identifier(value)
+                for value in alter.interval_dbspaces
+            )
+            clause = f"INTERVAL STORE IN ({spaces})"
+        else:
+            clause = self._compile_alter_fragment_selector(
+                alter.fragment, alter.subject
+            )
+            clause += self._alter_fragment_position(alter.before, alter.after)
+        return f"{prefix} ADD {clause}"
+
+    def visit_drop_fragment(self, alter, **kw):
+        _ = kw
+        if alter.online:
+            raise exc.CompileError("ALTER FRAGMENT DROP does not support ONLINE")
+        prefix = self._alter_fragment_prefix(alter)
+        if alter.interval_dbspaces:
+            spaces = ", ".join(
+                self._format_fragment_identifier(value)
+                for value in alter.interval_dbspaces
+            )
+            clause = f"INTERVAL STORE IN ({spaces})"
+        else:
+            noun = "PARTITION " if alter.partition else ""
+            clause = noun + self._format_fragment_identifier(alter.fragment_name)
+        return f"{prefix} DROP {clause}"
+
+    def visit_modify_fragment(self, alter, **kw):
+        _ = kw
+        if alter.online and not isinstance(alter.subject, sa_schema.Table):
+            raise exc.CompileError("ALTER FRAGMENT ONLINE MODIFY requires a table")
+        prefix = self._alter_fragment_prefix(alter)
+        old_noun = "PARTITION " if alter.old_partition else ""
+        old_name = old_noun + self._format_fragment_identifier(alter.old_name)
+        replacement = self._compile_alter_fragment_selector(
+            alter.fragment, alter.subject
+        )
+        return f"{prefix} MODIFY {old_name} TO {replacement}"
+
+    def _compile_attach_fragment_selector(self, fragment, subject):
+        """Compile the ATTACH ``AS`` clause without an ``IN dbspace``.
+
+        Informix stores the attached fragment where the consumed table already
+        resides.  The AS clause can name the new partition and define its
+        expression/list/range selector, but it has no storage-location clause.
+        """
+        prefix = self._format_fragment_name(fragment)
+        if fragment._catalog_selector is not None:
+            selector = fragment._catalog_selector.sql
+        elif fragment.remainder:
+            selector = "REMAINDER"
+        elif fragment.is_null:
+            selector = "VALUES (NULL)"
+        elif fragment.expression is not None:
+            expression = self._fragment_expression_sql(
+                fragment.expression,
+                subject,
+                role="ATTACH fragment expression",
+            )
+            stripped = expression.strip()
+            selector = (
+                stripped
+                if stripped.startswith("(") and stripped.endswith(")")
+                else f"({stripped})"
+            )
+        elif fragment.values:
+            values = ", ".join(
+                self._fragment_literal_sql(
+                    value,
+                    subject,
+                    role="ATTACH list value",
+                )
+                for value in fragment.values
+            )
+            selector = f"VALUES ({values})"
+        elif fragment.has_upper_bound:
+            upper_bound = self._fragment_literal_sql(
+                fragment.upper_bound,
+                subject,
+                role="ATTACH range upper bound",
+            )
+            selector = f"VALUES < {upper_bound}"
+        else:
+            selector = ""
+
+        return (prefix + selector).rstrip()
+
+    def visit_attach_fragment(self, alter, **kw):
+        _ = kw
+        prefix = self._alter_fragment_prefix(alter)
+        consumed = self.preparer.format_table(alter.consumed_table)
+        text = f"{prefix} ATTACH {consumed}"
+        if alter.fragment is not None:
+            text += " AS " + self._compile_attach_fragment_selector(
+                alter.fragment, alter.subject
+            )
+        text += self._alter_fragment_position(alter.before, alter.after)
+        return text
+
+    def visit_detach_fragment(self, alter, **kw):
+        _ = kw
+        prefix = self._alter_fragment_prefix(alter)
+        noun = "PARTITION " if alter.partition else ""
+        fragment = noun + self._format_fragment_identifier(alter.fragment_name)
+        new_table = self.preparer.format_table(alter.new_table)
+        return f"{prefix} DETACH {fragment} {new_table}"
+
     @staticmethod
     def _positive_table_storage_value(
         option_name,
@@ -2364,6 +3178,63 @@ class IfxDDLCompiler(compiler.DDLCompiler):
         table_name = self.preparer.format_table(alter.table)
         return f"ALTER TABLE {table_name} LOCK MODE ({lock_level})"
 
+    def _format_synonym_name(self, synonym_name):
+        """Render a structured synonym identifier for the current database."""
+        name = self.preparer.quote(synonym_name.name)
+        if synonym_name.owner is None:
+            return name
+        return f"{self.preparer.quote(synonym_name.owner)}.{name}"
+
+    def _format_synonym_target(self, target):
+        """Render local and remote Informix object qualification safely."""
+        object_name = self.preparer.quote(target.name)
+        if target.owner is not None:
+            object_name = (
+                f"{self.preparer.quote(target.owner)}.{object_name}"
+            )
+
+        if target.database is None:
+            return object_name
+
+        database = self.preparer.quote(target.database)
+        if target.server is not None:
+            database += f"@{self.preparer.quote(target.server)}"
+        return f"{database}:{object_name}"
+
+    def visit_create_synonym(self, create, **kw):
+        """Render native Informix CREATE SYNONYM DDL.
+
+        PUBLIC and PRIVATE are legal only in non-ANSI databases.  Every name
+        component has already been validated and is quoted independently, so
+        no caller-provided string is treated as executable SQL.
+        """
+        _ = kw
+        if self.dialect.is_ansi_database and create.public is not None:
+            raise exc.CompileError(
+                "Informix ANSI databases do not accept PUBLIC or PRIVATE "
+                "in CREATE SYNONYM"
+            )
+        text = "CREATE "
+        if create.public is True:
+            text += "PUBLIC "
+        elif create.public is False:
+            text += "PRIVATE "
+        text += "SYNONYM "
+        if create.if_not_exists:
+            text += "IF NOT EXISTS "
+        text += self._format_synonym_name(create.name)
+        text += " FOR "
+        text += self._format_synonym_target(create.target)
+        return text
+
+    def visit_drop_synonym(self, drop, **kw):
+        """Render native, idempotent Informix DROP SYNONYM DDL."""
+        _ = kw
+        text = "DROP SYNONYM "
+        if drop.if_exists:
+            text += "IF EXISTS "
+        return text + self._format_synonym_name(drop.name)
+
     def visit_modify_table_extents(self, alter, **kw):
         """Render native, validated Informix extent modifications."""
         first_extent = self._positive_table_storage_value(
@@ -2419,9 +3290,10 @@ class IfxDDLCompiler(compiler.DDLCompiler):
     def post_create_table(self, table):
         """Render native Informix physical table options.
 
-        Informix 14.10 and later accept EXTENT SIZE, NEXT SIZE, and LOCK MODE
-        after the closing parenthesis of CREATE TABLE.  Page size is not
-        emitted because it is inherited from the selected dbspace.
+        The order is intentionally stable: extents, physical location or
+        fragmentation, smart-LOB options (when introduced), compression, and
+        finally LOCK MODE.  Page size is not emitted because it is inherited
+        from the selected dbspace.
         """
         table_options = table.dialect_options["informix"]
         self._validate_table_page_size(table_options)
@@ -2440,6 +3312,15 @@ class IfxDDLCompiler(compiler.DDLCompiler):
             clauses.append(f"EXTENT SIZE {first_extent}")
         if next_extent is not None:
             clauses.append(f"NEXT SIZE {next_extent}")
+
+        clauses.extend(self._fragment_storage_clauses(table, table_options))
+
+        compressed = table_options.get("compressed")
+        if compressed is not None:
+            if not isinstance(compressed, bool):
+                raise exc.CompileError("informix_compressed must be a boolean")
+            if compressed:
+                clauses.append("COMPRESSED")
 
         lock_clause = self._table_lock_mode_clause(table_options)
         if lock_clause is not None:
@@ -2871,15 +3752,196 @@ class IfxDDLCompiler(compiler.DDLCompiler):
             self._physical_index_name(index)
         )
 
+    def _informix_index_options(self, index):
+        return index.dialect_options["informix"]
+
+    def _unwrap_functional_index_expression(self, expression):
+        """Return the function and sort direction for a safe index key.
+
+        The first functional-index implementation deliberately supports one
+        function call whose arguments are direct columns of the indexed table.
+        Arbitrary SQL expressions remain unsupported because Informix accepts
+        functional indexes only on nonvariant UDRs, not on arbitrary built-in
+        expressions.
+        """
+        descending = False
+
+        if isinstance(expression, sql_elements.UnaryExpression):
+            if expression.modifier is operators.desc_op:
+                descending = True
+            elif expression.modifier is not operators.asc_op:
+                raise exc.CompileError(
+                    "Informix functional indexes support only ASC or DESC "
+                    "ordering around the function call"
+                )
+            expression = expression.element
+
+        if not isinstance(expression, sql_functions.FunctionElement):
+            raise exc.CompileError(
+                "informix_functional=True requires a SQLAlchemy function "
+                "call over columns of the indexed table"
+            )
+
+        return expression, descending
+
+    def _validate_functional_index(self, index):
+        options = self._informix_index_options(index)
+        explicitly_functional = bool(options.get("functional"))
+        reflected_procedure = options.get("procedure")
+
+        def is_plain_column_expression(expression):
+            if isinstance(expression, sa_schema.Column):
+                return True
+            if isinstance(expression, sql_elements.UnaryExpression):
+                return (
+                    expression.modifier in (operators.asc_op, operators.desc_op)
+                    and isinstance(expression.element, sa_schema.Column)
+                )
+            return False
+
+        has_non_column_expression = any(
+            not is_plain_column_expression(expression)
+            for expression in index.expressions
+        )
+
+        if not explicitly_functional and not reflected_procedure:
+            if has_non_column_expression:
+                raise exc.CompileError(
+                    "Informix expression indexes must opt in with "
+                    "informix_functional=True. Only a nonvariant UDR call "
+                    "over columns of the indexed table is supported."
+                )
+            return
+
+        # Reflected functional indexes are represented by TextClause entries
+        # plus catalog procedure metadata. They were already validated by the
+        # server when created, so mixed and multi-key indexes can be emitted
+        # again without widening the contract for newly declared indexes.
+        if reflected_procedure:
+            has_reflected_expression = False
+            for expression in index.expressions:
+                if isinstance(expression, sql_elements.TextClause):
+                    has_reflected_expression = True
+                    continue
+                if not is_plain_column_expression(expression):
+                    raise exc.CompileError(
+                        "Reflected Informix functional indexes may contain "
+                        "only table columns and reflected SQL text"
+                    )
+            if not has_reflected_expression:
+                raise exc.CompileError(
+                    "informix_procedure metadata requires at least one "
+                    "reflected functional expression"
+                )
+            return
+
+        if len(index.expressions) != 1:
+            raise exc.CompileError(
+                "The initial Informix functional-index implementation "
+                "supports exactly one function key"
+            )
+
+        expression = index.expressions[0]
+        function, _descending = self._unwrap_functional_index_expression(
+            expression
+        )
+
+        arguments = list(function.clauses)
+        if not arguments:
+            raise exc.CompileError(
+                "Informix functional indexes require at least one column "
+                "argument"
+            )
+
+        function_name = str(getattr(function, "name", "")).casefold()
+        access_method = str(options.get("access_method") or "").casefold()
+        if function_name == "bson_get":
+            if access_method != "bson":
+                raise exc.CompileError(
+                    "Informix BSON_GET indexes require "
+                    "informix_access_method='BSON'"
+                )
+            first_argument = arguments[0]
+            if isinstance(first_argument, sql_elements.Grouping):
+                first_argument = first_argument.element
+            if not isinstance(first_argument, sa_schema.Column):
+                raise exc.CompileError(
+                    "Informix BSON_GET index first argument must be a "
+                    "direct BSON table column"
+                )
+            if first_argument.table is not index.table:
+                raise exc.CompileError(
+                    "The BSON_GET index column must belong to the indexed table"
+                )
+            if len(arguments) not in (2, 3):
+                raise exc.CompileError(
+                    "Informix BSON_GET indexes require a field and optional "
+                    "renamed field"
+                )
+            for argument in arguments[1:]:
+                if isinstance(argument, sql_elements.Grouping):
+                    argument = argument.element
+                if not (
+                    isinstance(argument, sql_elements.BindParameter)
+                    and isinstance(argument.value, str)
+                    and argument.value
+                ):
+                    raise exc.CompileError(
+                        "Informix BSON_GET index field names must be "
+                        "non-empty string literals"
+                    )
+            return
+
+        for argument in arguments:
+            if isinstance(argument, sql_elements.Grouping):
+                argument = argument.element
+
+            if not isinstance(argument, sa_schema.Column):
+                raise exc.CompileError(
+                    "Informix functional-index arguments must be direct "
+                    "table columns; literals and nested expressions are not "
+                    "supported"
+                )
+
+            if argument.table is not index.table:
+                raise exc.CompileError(
+                    "Every Informix functional-index argument must belong "
+                    "to the indexed table"
+                )
+
     def visit_create_index(
         self, create, include_schema=False, include_table_schema=True, **kw
     ):
+        self._validate_functional_index(create.element)
+
         sql = super(IfxDDLCompiler, self).visit_create_index(
             create,
             include_schema=include_schema,
             include_table_schema=include_table_schema,
             **kw
         )
+        index_options = create.element.dialect_options["informix"]
+        access_method = index_options.get("access_method")
+        # ``access_method`` is also reflection metadata for ordinary
+        # functional indexes (for example ``btree``).  Preserve the existing
+        # emitted DDL for those indexes and add ``USING BSON`` only for the
+        # native Informix BSON field-index form verified by the JSON/BSON
+        # implementation.
+        if access_method and str(access_method).casefold() == "bson":
+            if (
+                not isinstance(access_method, str)
+                or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", access_method.strip())
+            ):
+                raise exc.CompileError(
+                    "informix_access_method must be a safe non-empty identifier"
+                )
+            sql += " USING " + access_method.strip()
+        storage_clauses = self._fragment_storage_clauses(
+            create.element,
+            index_options,
+        )
+        if storage_clauses:
+            sql += " " + " ".join(storage_clauses)
         if self._is_unique_constraint_as_index(create.element):
             sql += ' EXCLUDE NULL KEYS'
         return sql
@@ -3014,9 +4076,25 @@ class IfxDialect(default.DefaultDialect):
                 "first_extent": None,
                 "next_extent": None,
                 "page_size": None,
+                "fragment_by": None,
+                "dbspace": None,
+                "compressed": None,
+                "resolve_synonyms": False,
+            },
+        ),
+        (
+            sa_schema.Index,
+            {
+                "functional": False,
+                "procedure": None,
+                "access_method": None,
+                "opclass": None,
+                "fragment_by": None,
+                "dbspace": None,
             },
         ),
     ]
+    reflection_options = ("informix_resolve_synonyms",)
     is_ansi_database = False
     supports_char_length = False
     supports_unicode_statements = False
@@ -3055,11 +4133,23 @@ class IfxDialect(default.DefaultDialect):
     preparer = IfxIdentifierPreparer
     execution_ctx_cls = IfxExecutionContext
 
+    inspector = ifx_reflection.IfxInspector
     _reflector_cls = ifx_reflection.IfxReflector
 
-    def __init__(self, **kw):
+    def __init__(
+        self,
+        json_serializer=None,
+        json_deserializer=None,
+        bson_encoder=None,
+        bson_decoder=None,
+        **kw,
+    ):
         super(IfxDialect, self).__init__(**kw)
 
+        self._json_serializer = json_serializer
+        self._json_deserializer = json_deserializer
+        self._bson_encoder = bson_encoder
+        self._bson_decoder = bson_decoder
         self._reflector = self._reflector_cls(self)
 
     def _detect_database_mode(self, connection):
@@ -3151,6 +4241,35 @@ class IfxDialect(default.DefaultDialect):
     def get_sequence_names(self, connection, schema=None, **kw):
         return self._reflector.get_sequence_names(
             connection, schema=schema, **kw
+        )
+
+    def get_synonym_names(self, connection, schema=None, **kw):
+        return self._reflector.get_synonym_names(
+            connection,
+            schema=schema,
+            **kw,
+        )
+
+    def get_synonyms(self, connection, schema=None, **kw):
+        return self._reflector.get_synonyms(
+            connection,
+            schema=schema,
+            **kw,
+        )
+
+    def has_synonym(self, connection, synonym_name, schema=None, **kw):
+        return self._reflector.has_synonym(
+            connection,
+            synonym_name,
+            schema=schema,
+            **kw,
+        )
+
+    def get_user_defined_types(self, connection, schema=None, **kw):
+        return self._reflector.get_user_defined_types(
+            connection,
+            schema=schema,
+            **kw,
         )
 
     def get_schema_names(self, connection, **kw):

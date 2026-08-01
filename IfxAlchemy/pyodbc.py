@@ -31,9 +31,14 @@ from sqlalchemy.connectors.pyodbc import PyODBCConnector
 from sqlalchemy.engine import BindTyping
 from sqlalchemy.exc import ArgumentError
 
+from .complex import DISTINCT, LIST, MULTISET, ROW, SET
+
 from .base import (
+    BSON,
     DBCLOB,
+    JSON,
     LONGVARGRAPHIC,
+    LVARCHAR,
     XML,
     _SelectLastRowIDMixin,
     IfxDialect,
@@ -201,6 +206,17 @@ class _IFXText_pyodbc(sa_types.Text):
         return dbapi.SQL_LONGVARCHAR
 
 
+class _IFXLVarchar_pyodbc(LVARCHAR):
+    """Bind native Informix LVARCHAR as ODBC SQL_VARCHAR.
+
+    IBM Informix ODBC documents LVARCHAR as SQL_VARCHAR.  SQL_LONGVARCHAR is
+    reserved for TEXT and can make the driver attempt a TEXT-to-LVARCHAR cast.
+    """
+
+    def get_dbapi_type(self, dbapi):
+        return dbapi.SQL_VARCHAR
+
+
 class IfxExecutionContext_pyodbc(
     _SelectLastRowIDMixin,
     IfxExecutionContext,
@@ -261,9 +277,9 @@ class IfxDialect_pyodbc(PyODBCConnector, IfxDialect):
         "RR",
     )
 
-    # Informix TEXT parameters must be described to the ODBC driver as
-    # SQL_LONGVARCHAR. Restrict setinputsizes() to that DBAPI type so that
-    # ordinary parameters continue to use pyodbc's normal type inference.
+    # Informix TEXT and LVARCHAR parameters need explicit, distinct ODBC
+    # descriptors: TEXT uses SQL_LONGVARCHAR, while LVARCHAR uses SQL_VARCHAR.
+    # Ordinary character parameters continue to use pyodbc inference.
     bind_typing = BindTyping.SETINPUTSIZES
     include_set_input_sizes = frozenset()
 
@@ -277,9 +293,29 @@ class IfxDialect_pyodbc(PyODBCConnector, IfxDialect):
             # adapting them accidentally to _IFXText_pyodbc.
             sa_types.CLOB: sa_types.CLOB,
             sa_types.UnicodeText: sa_types.UnicodeText,
+
+            # NCHAR and NVARCHAR are locale-sensitive native Informix
+            # datatypes, not aliases for CHAR/VARCHAR or for the dialect's
+            # GRAPHIC mapping of generic Unicode.  Exact mappings preserve
+            # their visit names and leave Python str handling to pyodbc.
+            sa_types.NCHAR: sa_types.NCHAR,
+            sa_types.NVARCHAR: sa_types.NVARCHAR,
+
+            # LVARCHAR remains a native opaque Informix type.  Its pyodbc
+            # implementation reports SQL_VARCHAR, which is the ODBC mapping
+            # documented by IBM.  SQL_LONGVARCHAR is intentionally reserved
+            # for Informix TEXT.
+            LVARCHAR: _IFXLVarchar_pyodbc,
             DBCLOB: DBCLOB,
             LONGVARGRAPHIC: LONGVARGRAPHIC,
             XML: XML,
+            JSON: JSON,
+            BSON: BSON,
+            LIST: LIST,
+            SET: SET,
+            MULTISET: MULTISET,
+            ROW: ROW,
+            DISTINCT: DISTINCT,
         }
     )
 
@@ -318,16 +354,41 @@ class IfxDialect_pyodbc(PyODBCConnector, IfxDialect):
         self._isolation_level_state_lock = threading.RLock()
 
         if self.dbapi is not None:
+            selected_input_sizes = set()
+
             sql_longvarchar = getattr(
                 self.dbapi,
                 "SQL_LONGVARCHAR",
                 None,
             )
-
             if sql_longvarchar is not None:
-                self.include_set_input_sizes = {
-                    sql_longvarchar,
-                }
+                selected_input_sizes.add(sql_longvarchar)
+
+            sql_varchar = getattr(
+                self.dbapi,
+                "SQL_VARCHAR",
+                None,
+            )
+            if sql_varchar is not None:
+                selected_input_sizes.add(sql_varchar)
+
+            sql_varbinary = getattr(
+                self.dbapi,
+                "SQL_VARBINARY",
+                None,
+            )
+            if sql_varbinary is not None:
+                selected_input_sizes.add(sql_varbinary)
+
+            sql_longvarbinary = getattr(
+                self.dbapi,
+                "SQL_LONGVARBINARY",
+                None,
+            )
+            if sql_longvarbinary is not None:
+                selected_input_sizes.add(sql_longvarbinary)
+
+            self.include_set_input_sizes = selected_input_sizes
 
     def do_set_input_sizes(
         self,
@@ -339,16 +400,74 @@ class IfxDialect_pyodbc(PyODBCConnector, IfxDialect):
         # selected by include_set_input_sizes carry dbtype=None.
         #
         # Avoid calling cursor.setinputsizes() unless the statement contains
-        # at least one Informix TEXT parameter.
-        if not any(
-            dbtype is not None
-            for _, dbtype, _ in list_of_tuples
-        ):
+        # an Informix TEXT or LVARCHAR parameter.  LVARCHAR must use
+        # SQL_VARCHAR rather than SQL_LONGVARCHAR because the latter maps to
+        # Informix TEXT.  Supply the declared byte maximum so pyodbc does not
+        # reclassify long Python strings as a long-character parameter.
+        prepared_input_sizes = []
+        has_selected_type = False
+        sql_varchar = (
+            getattr(self.dbapi, "SQL_VARCHAR", None)
+            if self.dbapi is not None
+            else None
+        )
+        sql_varbinary = (
+            getattr(self.dbapi, "SQL_VARBINARY", None)
+            if self.dbapi is not None
+            else None
+        )
+
+        for key, dbtype, sqltype in list_of_tuples:
+            if (
+                dbtype is not None
+                and sql_varchar is not None
+                and dbtype == sql_varchar
+            ):
+                if isinstance(sqltype, LVARCHAR):
+                    length = (
+                        sqltype.length if sqltype.length is not None else 2048
+                    )
+                    dbtype = (sql_varchar, length, 0)
+                elif isinstance(sqltype, (LIST, SET, MULTISET, ROW, DISTINCT)):
+                    # Complex types use their external text representation.
+                    # Keep SQL_VARCHAR so the Informix driver does not promote
+                    # long constructor strings to TEXT, which has no implicit
+                    # assignment path to collection/ROW values.
+                    dbtype = (sql_varchar, 0, 0)
+                elif isinstance(sqltype, JSON) or (
+                    isinstance(sqltype, BSON)
+                    and getattr(sqltype, "transport", "json") == "json"
+                ):
+                    # pyodbc otherwise promotes long Python strings to
+                    # SQL_LONGVARCHAR.  The IBM Informix ODBC driver maps that
+                    # descriptor to TEXT, and Informix has no TEXT -> JSON
+                    # cast.  Column-size 0 keeps SQL_VARCHAR while allowing
+                    # data-at-execution for documents larger than the normal
+                    # inline buffer.
+                    dbtype = (sql_varchar, 0, 0)
+
+            if (
+                dbtype is not None
+                and sql_varbinary is not None
+                and dbtype == sql_varbinary
+                and isinstance(sqltype, BSON)
+                and getattr(sqltype, "transport", "json") == "binary"
+            ):
+                # Preserve variable-binary binding for diagnosed native BSON
+                # codecs without forcing the value into a BLOB descriptor.
+                dbtype = (sql_varbinary, 0, 0)
+
+            if dbtype is not None:
+                has_selected_type = True
+
+            prepared_input_sizes.append((key, dbtype, sqltype))
+
+        if not has_selected_type:
             return
 
         super().do_set_input_sizes(
             cursor,
-            list_of_tuples,
+            prepared_input_sizes,
             context,
         )
 
