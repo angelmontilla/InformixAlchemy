@@ -31,6 +31,7 @@ from sqlalchemy.engine import reflection
 from sqlalchemy.engine.reflection import ObjectKind, ObjectScope
 from .temporal import IFXDateTime
 from .temporal import IFXTime
+from .complex import DISTINCT, LIST, MULTISET, ROW, SET, RowField
 from .fragmentation import (
     AttachedIndexFragmentation,
     ExpressionFragmentation,
@@ -76,6 +77,16 @@ class IfxInspector(reflection.Inspector):
             return self.dialect.has_synonym(
                 connection,
                 synonym_name,
+                schema=schema,
+                info_cache=self.info_cache,
+                **kw,
+            )
+
+    def get_user_defined_types(self, schema=None, **kw):
+        """Return structured named ROW and DISTINCT type metadata."""
+        with self._operation_context() as connection:
+            return self.dialect.get_user_defined_types(
+                connection,
                 schema=schema,
                 info_cache=self.info_cache,
                 **kw,
@@ -261,6 +272,10 @@ class IfxReflector(BaseReflector):
         16: "NVARCHAR",
         17: "INT8",
         18: "SERIAL8",
+        19: "SET",
+        20: "MULTISET",
+        21: "LIST",
+        22: "ROW",
         40: "LVARCHAR",
         41: "OPAQUE",
         45: "BOOLEAN",
@@ -273,6 +288,8 @@ class IfxReflector(BaseReflector):
         "clob": "CLOB",
         "boolean": "BOOLEAN",
         "lvarchar": "LVARCHAR",
+        "json": "JSON",
+        "bson": "BSON",
     }
 
     _CHAR_FALLBACK_TYPES = {"CHAR"}
@@ -1362,6 +1379,359 @@ class IfxReflector(BaseReflector):
             autoincrement,
             nullable,
         )
+
+    def _fetch_extended_type_metadata(self, connection, extended_id):
+        row = connection.exec_driver_sql(
+            """
+            SELECT
+                x.extended_id,
+                x.mode,
+                x.owner,
+                x.name,
+                x.type,
+                x.source,
+                x.maxlen,
+                x.length,
+                x.locator
+            FROM sysxtdtypes x
+            WHERE x.extended_id = ?
+            """,
+            (int(extended_id),),
+        ).first()
+        if row is None:
+            return None
+        return {
+            "extended_id": int(row[0]),
+            "mode": self._clean_str(row[1]),
+            "owner": self._clean_str(row[2]),
+            "name": self._clean_str(row[3]),
+            "type": int(row[4]) if row[4] is not None else 0,
+            "source": int(row[5]) if row[5] is not None else 0,
+            "maxlen": int(row[6]) if row[6] is not None else 0,
+            "length": int(row[7]) if row[7] is not None else 0,
+            "locator": int(row[8]) if row[8] is not None else 0,
+        }
+
+    def _fetch_attribute_type_rows(self, connection, extended_id):
+        rows = connection.exec_driver_sql(
+            """
+            SELECT
+                a.seqno,
+                a.levelno,
+                a.parent_no,
+                a.fieldname,
+                a.fieldno,
+                a.type,
+                a.length,
+                a.xtd_type_id
+            FROM sysattrtypes a
+            WHERE a.extended_id = ?
+            ORDER BY a.seqno
+            """,
+            (int(extended_id),),
+        ).fetchall()
+        result = []
+        for row in rows:
+            result.append(
+                {
+                    "extended_id": int(extended_id),
+                    "seqno": int(row[0]),
+                    "levelno": int(row[1]),
+                    "parent_no": int(row[2]),
+                    "fieldname": self._clean_str(row[3]),
+                    "fieldno": int(row[4]) if row[4] is not None else 0,
+                    "type": int(row[5]) if row[5] is not None else 0,
+                    "length": int(row[6]) if row[6] is not None else 0,
+                    "xtd_type_id": int(row[7]) if row[7] is not None else 0,
+                }
+            )
+        return result
+
+    def _build_complex_attribute_tree(self, rows, *, extended_id):
+        """Normalize the SYSATTRTYPES hierarchy for one complex type.
+
+        Informix documents ``parent_no`` as the ``seqno`` of the containing
+        complex node.  Current 14.10/15.x catalogs normally follow that rule,
+        but collection element rows can also be emitted with ``parent_no``
+        equal to their own ``seqno``.  The latter is not a usable tree edge,
+        although ``levelno`` and the catalog's preorder ``seqno`` still
+        identify the parent unambiguously.
+
+        Prefer a valid explicit parent.  For self-references, missing parents,
+        or level-inconsistent references, recover the edge from the nearest
+        preceding node at ``levelno - 1``.  This preserves the documented
+        representation while accepting the native collection layout observed
+        on Informix 15.0 and compatible 14.10 servers.
+        """
+        ordered = sorted(rows, key=lambda item: item["seqno"])
+        if not ordered:
+            raise exc.UnreflectableTableError(
+                "Informix complex type has no SYSATTRTYPES rows: "
+                f"extended_id={extended_id!r}"
+            )
+
+        by_seqno = {}
+        for row in ordered:
+            seqno = row["seqno"]
+            if seqno in by_seqno:
+                raise exc.UnreflectableTableError(
+                    "Informix complex type contains duplicate SYSATTRTYPES "
+                    f"seqno={seqno!r}; extended_id={extended_id!r}"
+                )
+            by_seqno[seqno] = row
+
+        minimum_level = min(item["levelno"] for item in ordered)
+        roots = [item for item in ordered if item["levelno"] == minimum_level]
+        if len(roots) != 1:
+            raise exc.UnreflectableTableError(
+                "Informix complex type catalog must contain exactly one root; "
+                f"extended_id={extended_id!r}, roots="
+                f"{[item['seqno'] for item in roots]!r}"
+            )
+        root = roots[0]
+
+        children_by_parent = {}
+        preceding_by_level = {root["levelno"]: root}
+        root_seen = False
+
+        for row in ordered:
+            if row is root:
+                root_seen = True
+                continue
+            if not root_seen:
+                raise exc.UnreflectableTableError(
+                    "Informix complex type root does not precede its members; "
+                    f"extended_id={extended_id!r}, root_seqno={root['seqno']!r}"
+                )
+
+            levelno = row["levelno"]
+            expected_parent_level = levelno - 1
+            explicit_parent = by_seqno.get(row["parent_no"])
+            explicit_parent_is_valid = (
+                explicit_parent is not None
+                and explicit_parent["seqno"] != row["seqno"]
+                and explicit_parent["seqno"] < row["seqno"]
+                and explicit_parent["levelno"] == expected_parent_level
+            )
+
+            if explicit_parent_is_valid:
+                parent = explicit_parent
+            else:
+                parent = preceding_by_level.get(expected_parent_level)
+
+            if parent is None:
+                raise exc.UnreflectableTableError(
+                    "Unable to resolve Informix complex type parent from "
+                    "SYSATTRTYPES; "
+                    f"extended_id={extended_id!r}, seqno={row['seqno']!r}, "
+                    f"levelno={levelno!r}, parent_no={row['parent_no']!r}"
+                )
+
+            children_by_parent.setdefault(parent["seqno"], []).append(row)
+
+            for stale_level in tuple(preceding_by_level):
+                if stale_level >= levelno:
+                    del preceding_by_level[stale_level]
+            preceding_by_level[levelno] = row
+
+        return root, children_by_parent
+
+    def _reflect_attr_scalar_type(
+        self,
+        connection,
+        node,
+        cache,
+        stack,
+    ):
+        xtd_type_id = node["xtd_type_id"]
+        if xtd_type_id:
+            return self._reflect_extended_type(
+                connection,
+                xtd_type_id,
+                cache=cache,
+                stack=stack,
+            )
+        reflected, _autoincrement, _nullable = self._decode_ifx_type(
+            node["type"],
+            node["length"],
+        )
+        return reflected
+
+    def _reflect_attr_node(
+        self,
+        connection,
+        node,
+        children_by_parent,
+        cache,
+        stack,
+    ):
+        # A nonzero xtd_type_id identifies a separately registered named ROW,
+        # DISTINCT, opaque, or complex type.  It takes precedence over the
+        # low-byte type code; otherwise named ROW fields would be reconstructed
+        # incorrectly as anonymous rows with no local children.
+        if node["xtd_type_id"]:
+            return self._reflect_extended_type(
+                connection,
+                node["xtd_type_id"],
+                cache=cache,
+                stack=stack,
+            )
+
+        base_code = int(node["type"]) & 0x00FF
+        children = children_by_parent.get(node["seqno"], ())
+
+        if base_code in (19, 20, 21):
+            if len(children) != 1:
+                raise exc.UnreflectableTableError(
+                    "Informix collection catalog entry must contain exactly "
+                    f"one element node; extended_id={node.get('extended_id')!r}, "
+                    f"seqno={node['seqno']!r}"
+                )
+            element_type = self._reflect_attr_node(
+                connection,
+                children[0],
+                children_by_parent,
+                cache,
+                stack,
+            )
+            collection_cls = {19: SET, 20: MULTISET, 21: LIST}[base_code]
+            return collection_cls(element_type)
+
+        if base_code == 22:
+            ordered_children = sorted(
+                children,
+                key=lambda item: (item["fieldno"], item["seqno"]),
+            )
+            fields = []
+            for index, child in enumerate(ordered_children, start=1):
+                field_name = child["fieldname"] or f"field_{index}"
+                field_type = self._reflect_attr_node(
+                    connection,
+                    child,
+                    children_by_parent,
+                    cache,
+                    stack,
+                )
+                nullable = not bool(int(child["type"]) & 0x0100)
+                fields.append(RowField(field_name, field_type, nullable))
+            return ROW(tuple(fields))
+
+        return self._reflect_attr_scalar_type(
+            connection,
+            node,
+            cache,
+            stack,
+        )
+
+    def _reflect_complex_attributes(
+        self,
+        connection,
+        metadata,
+        cache,
+        stack,
+    ):
+        rows = self._fetch_attribute_type_rows(
+            connection,
+            metadata["extended_id"],
+        )
+        if not rows:
+            raise exc.UnreflectableTableError(
+                "Informix complex type has no SYSATTRTYPES rows: "
+                f"extended_id={metadata['extended_id']!r}, "
+                f"name={metadata['name']!r}"
+            )
+        root, children_by_parent = self._build_complex_attribute_tree(
+            rows,
+            extended_id=metadata["extended_id"],
+        )
+        reflected = self._reflect_attr_node(
+            connection,
+            root,
+            children_by_parent,
+            cache,
+            stack,
+        )
+        if metadata["mode"] == "R":
+            if not isinstance(reflected, ROW):
+                raise exc.UnreflectableTableError(
+                    "Named Informix ROW type catalog root is not ROW: "
+                    f"{metadata['name']!r}"
+                )
+            reflected = ROW(
+                reflected.fields,
+                name=metadata["name"],
+                owner=metadata["owner"],
+            )
+        return reflected
+
+    def _reflect_extended_type(
+        self,
+        connection,
+        extended_id,
+        *,
+        cache=None,
+        stack=(),
+    ):
+        extended_id = int(extended_id)
+        if cache is None:
+            cache = {}
+        if extended_id in cache:
+            return cache[extended_id]
+        if extended_id in stack:
+            raise exc.UnreflectableTableError(
+                "Recursive Informix extended type dependency detected: "
+                + " -> ".join(map(str, (*stack, extended_id)))
+            )
+
+        metadata = self._fetch_extended_type_metadata(connection, extended_id)
+        if metadata is None:
+            util.warn(
+                "Informix SYSXTDTYPES entry not found for "
+                f"extended_id={extended_id!r}"
+            )
+            return sa_types.NullType()
+
+        next_stack = (*stack, extended_id)
+        mode = metadata["mode"]
+        if mode in {"C", "R"}:
+            reflected = self._reflect_complex_attributes(
+                connection,
+                metadata,
+                cache,
+                next_stack,
+            )
+        elif mode == "D":
+            source_id = metadata["source"]
+            if source_id:
+                source_type = self._reflect_extended_type(
+                    connection,
+                    source_id,
+                    cache=cache,
+                    stack=next_stack,
+                )
+            else:
+                source_code = int(metadata["type"]) - 0x0800
+                if source_code < 0:
+                    source_code = int(metadata["type"]) & 0x00FF
+                source_type, _autoincrement, _nullable = self._decode_ifx_type(
+                    source_code,
+                    metadata["length"] or metadata["maxlen"],
+                )
+            reflected = DISTINCT(
+                metadata["name"],
+                source_type,
+                owner=metadata["owner"],
+            )
+        else:
+            reflected, _autoincrement, _nullable = self._decode_ifx_type(
+                metadata["type"],
+                metadata["length"] or metadata["maxlen"],
+                extended_id=metadata["extended_id"],
+                extended_type_name=metadata["name"],
+                extended_maxlen=metadata["maxlen"],
+            )
+        cache[extended_id] = reflected
+        return reflected
 
     def _unknown_ifx_type_result(
         self,
@@ -2473,6 +2843,49 @@ class IfxReflector(BaseReflector):
         return "".join((r[0] or "") for r in rows).rstrip()
 
     @reflection.cache
+    def get_user_defined_types(self, connection, schema=None, **kw):
+        """Reflect named ROW and DISTINCT types from Informix catalogs.
+
+        The result is deliberately structured instead of returning catalog
+        text.  Each item contains ``name``, ``schema``, ``kind`` and a fully
+        reconstructed SQLAlchemy ``type`` object.
+        """
+        owner = self._resolved_owner(schema)
+        rows = connection.exec_driver_sql(
+            """
+            SELECT x.extended_id, x.mode, x.owner, x.name
+            FROM sysxtdtypes x
+            WHERE x.mode IN ('R', 'D')
+              AND LOWER(x.owner) = LOWER(?)
+            ORDER BY x.name, x.extended_id
+            """,
+            (owner,),
+        ).fetchall()
+        cache = {}
+        reflected = []
+        for row in rows:
+            extended_id = int(row[0])
+            mode = self._clean_str(row[1])
+            type_owner = self._clean_str(row[2])
+            type_name = self._clean_str(row[3])
+            reflected.append(
+                {
+                    "name": self.normalize_name(type_name),
+                    "schema": self._normalize_schema_for_output(
+                        type_owner,
+                        requested_schema=schema,
+                    ),
+                    "kind": "row" if mode == "R" else "distinct",
+                    "type": self._reflect_extended_type(
+                        connection,
+                        extended_id,
+                        cache=cache,
+                    ),
+                }
+            )
+        return reflected
+
+    @reflection.cache
     def get_columns(self, connection, table_name, schema=None, **kw):
         table_name, schema, _synonym = self._resolve_reflection_target(
             connection,
@@ -2512,6 +2925,8 @@ class IfxReflector(BaseReflector):
         rows = connection.exec_driver_sql(sql_text, (tabid,)).fetchall()
 
         sa_columns = []
+        extended_type_cache = {}
+        extended_metadata_cache = {}
         for row in rows:
             colname = self._clean_str(row[0])
             coltype = int(row[2])
@@ -2523,13 +2938,40 @@ class IfxReflector(BaseReflector):
             default_type = row[7]
             default_value = row[8]
 
-            satype, autoincrement, nullable = self._decode_ifx_type(
-                coltype=coltype,
-                collength=collength,
-                extended_id=extended_id,
-                extended_type_name=extended_type_name,
-                extended_maxlen=extended_maxlen,
+            metadata = None
+            normalized_extended_name = self._normalize_extended_type_name(
+                extended_type_name
             )
+            needs_structured_lookup = bool(extended_id) and (
+                base_code in {19, 20, 21, 22}
+                or normalized_extended_name not in self._OPAQUE_TYPE_NAMES
+            )
+            if needs_structured_lookup:
+                extended_id = int(extended_id)
+                metadata = extended_metadata_cache.get(extended_id)
+                if metadata is None:
+                    metadata = self._fetch_extended_type_metadata(
+                        connection,
+                        extended_id,
+                    )
+                    extended_metadata_cache[extended_id] = metadata
+
+            if metadata is not None and metadata["mode"] in {"C", "R", "D"}:
+                satype = self._reflect_extended_type(
+                    connection,
+                    extended_id,
+                    cache=extended_type_cache,
+                )
+                autoincrement = False
+                nullable = not bool(coltype & 0x0100)
+            else:
+                satype, autoincrement, nullable = self._decode_ifx_type(
+                    coltype=coltype,
+                    collength=collength,
+                    extended_id=extended_id,
+                    extended_type_name=extended_type_name,
+                    extended_maxlen=extended_maxlen,
+                )
 
             sa_columns.append(
                 {

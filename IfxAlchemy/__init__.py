@@ -37,8 +37,24 @@ except ModuleNotFoundError as error:
 # Default dialect: pyodbc
 dialect = pyodbc.IfxDialect_pyodbc
 
+from .complex import (
+    CreateDistinctType,
+    CreateRowType,
+    DISTINCT,
+    DropDistinctType,
+    DropRowType,
+    LIST,
+    MULTISET,
+    ROW,
+    RowField,
+    RowValue,
+    SET,
+    parse_complex_value,
+)
+
 # Informix-specific executable DML constructs
 from .dml import InformixMerge, merge
+from .document import bson_get, bson_size, bson_update, gen_bson
 
 # Typed Informix fragmentation models and ALTER FRAGMENT constructs
 from .fragmentation import (
@@ -74,6 +90,7 @@ from .base import (
     BIGSERIAL,
     BLOB,
     BOOLEAN,
+    BSON,
     CHAR,
     CLOB,
     DATE,
@@ -82,6 +99,7 @@ from .base import (
     DOUBLE,
     GRAPHIC,
     INTEGER,
+    JSON,
     LONGVARCHAR,
     LVARCHAR,
     NUMERIC,
@@ -101,6 +119,7 @@ __all__ = (
     "BIGSERIAL",
     "BLOB",
     "BOOLEAN",
+    "BSON",
     "CHAR",
     "CLOB",
     "CreateSynonym",
@@ -119,6 +138,7 @@ __all__ = (
     "GRAPHIC",
     "INTEGER",
     "InformixMerge",
+    "JSON",
     "InitFragment",
     "InitFragmentation",
     "ListFragmentation",
@@ -141,6 +161,22 @@ __all__ = (
     "TIMESTAMP",
     "VARCHAR",
     "VARGRAPHIC",
+    "bson_get",
+    "bson_size",
+    "bson_update",
+    "CreateDistinctType",
+    "CreateRowType",
+    "DISTINCT",
+    "DropDistinctType",
+    "DropRowType",
+    "LIST",
+    "MULTISET",
+    "ROW",
+    "RowField",
+    "RowValue",
+    "SET",
     "dialect",
+    "gen_bson",
     "merge",
+    "parse_complex_value",
 )

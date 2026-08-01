@@ -42,6 +42,8 @@ from sqlalchemy.engine import default
 
 from . import reflection as ifx_reflection
 from . import sqla_compat
+from .document import BSON, JSON
+from .complex import DISTINCT, LIST, MULTISET, ROW, SET
 
 from sqlalchemy.types import BLOB, CHAR, CLOB, DATE, DATETIME, INTEGER, \
     SMALLINT, BIGINT, DECIMAL, NUMERIC, REAL, TIME, TIMESTAMP, \
@@ -941,6 +943,13 @@ ischema_names = {
     'BYTE': sa_types.LargeBinary,
     'TEXT': sa_types.Text,
     'LVARCHAR': LVARCHAR,
+    'JSON': JSON,
+    'BSON': BSON,
+    'LIST': LIST,
+    'SET': SET,
+    'MULTISET': MULTISET,
+    'ROW': ROW,
+    'DISTINCT': DISTINCT,
 }
 
 
@@ -958,6 +967,13 @@ _IFX_TYPE_VISITOR_ALIASES = {
     "visit_FLOAT": "visit_float",
     "visit_DOUBLE": "visit_double",
     "visit_XML": "visit_xml",
+    "visit_JSON": "visit_JSON",
+    "visit_BSON": "visit_BSON",
+    "visit_LIST": "visit_LIST",
+    "visit_SET": "visit_SET",
+    "visit_MULTISET": "visit_MULTISET",
+    "visit_ROW": "visit_ROW",
+    "visit_DISTINCT": "visit_DISTINCT",
     "visit_CLOB": "visit_clob",
     "visit_BLOB": "visit_blob",
     "visit_DBCLOB": "visit_dbclob",
@@ -1043,6 +1059,54 @@ class IfxTypeCompiler(compiler.GenericTypeCompiler):
 
     def visit_xml(self, type_):
         return "XML"
+
+    def visit_JSON(self, type_, **kw):
+        _ = type_, kw
+        return "JSON"
+
+    def visit_BSON(self, type_, **kw):
+        _ = type_, kw
+        return "BSON"
+
+    def _visit_collection_type(self, type_, **kw):
+        element_sql = self.process(type_.element_type, **kw)
+        return f"{type_.__visit_name__}({element_sql} NOT NULL)"
+
+    def visit_LIST(self, type_, **kw):
+        return self._visit_collection_type(type_, **kw)
+
+    def visit_SET(self, type_, **kw):
+        return self._visit_collection_type(type_, **kw)
+
+    def visit_MULTISET(self, type_, **kw):
+        return self._visit_collection_type(type_, **kw)
+
+    def visit_ROW(self, type_, **kw):
+        preparer = self.dialect.identifier_preparer
+        if type_.name is not None:
+            rendered = preparer.quote(type_.name)
+            if type_.owner is not None:
+                rendered = f"{preparer.quote(type_.owner)}.{rendered}"
+            return rendered
+
+        fields = []
+        for field in type_.fields:
+            field_sql = (
+                f"{preparer.quote(field.name)} "
+                f"{self.process(field.type_, **kw)}"
+            )
+            if not field.nullable:
+                field_sql += " NOT NULL"
+            fields.append(field_sql)
+        return "ROW(" + ", ".join(fields) + ")"
+
+    def visit_DISTINCT(self, type_, **kw):
+        _ = kw
+        preparer = self.dialect.identifier_preparer
+        rendered = preparer.quote(type_.name)
+        if type_.owner is not None:
+            rendered = f"{preparer.quote(type_.owner)}.{rendered}"
+        return rendered
 
     def visit_clob(self, type_):
         return "CLOB"
@@ -2272,7 +2336,14 @@ class IfxCompiler(compiler.SQLCompiler):
                     sa_types.Text,
                     sa_types.Unicode,
                     sa_types.UnicodeText,
-                    sa_types.Boolean)):
+                    sa_types.Boolean,
+                    JSON,
+                    BSON,
+                    LIST,
+                    SET,
+                    MULTISET,
+                    ROW,
+                    DISTINCT)):
             return super(IfxCompiler, self).visit_cast(cast, **kw)
         else:
             return self.process(cast.clause, **kw)
@@ -3782,6 +3853,45 @@ class IfxDDLCompiler(compiler.DDLCompiler):
                 "argument"
             )
 
+        function_name = str(getattr(function, "name", "")).casefold()
+        access_method = str(options.get("access_method") or "").casefold()
+        if function_name == "bson_get":
+            if access_method != "bson":
+                raise exc.CompileError(
+                    "Informix BSON_GET indexes require "
+                    "informix_access_method='BSON'"
+                )
+            first_argument = arguments[0]
+            if isinstance(first_argument, sql_elements.Grouping):
+                first_argument = first_argument.element
+            if not isinstance(first_argument, sa_schema.Column):
+                raise exc.CompileError(
+                    "Informix BSON_GET index first argument must be a "
+                    "direct BSON table column"
+                )
+            if first_argument.table is not index.table:
+                raise exc.CompileError(
+                    "The BSON_GET index column must belong to the indexed table"
+                )
+            if len(arguments) not in (2, 3):
+                raise exc.CompileError(
+                    "Informix BSON_GET indexes require a field and optional "
+                    "renamed field"
+                )
+            for argument in arguments[1:]:
+                if isinstance(argument, sql_elements.Grouping):
+                    argument = argument.element
+                if not (
+                    isinstance(argument, sql_elements.BindParameter)
+                    and isinstance(argument.value, str)
+                    and argument.value
+                ):
+                    raise exc.CompileError(
+                        "Informix BSON_GET index field names must be "
+                        "non-empty string literals"
+                    )
+            return
+
         for argument in arguments:
             if isinstance(argument, sql_elements.Grouping):
                 argument = argument.element
@@ -3811,6 +3921,21 @@ class IfxDDLCompiler(compiler.DDLCompiler):
             **kw
         )
         index_options = create.element.dialect_options["informix"]
+        access_method = index_options.get("access_method")
+        # ``access_method`` is also reflection metadata for ordinary
+        # functional indexes (for example ``btree``).  Preserve the existing
+        # emitted DDL for those indexes and add ``USING BSON`` only for the
+        # native Informix BSON field-index form verified by the JSON/BSON
+        # implementation.
+        if access_method and str(access_method).casefold() == "bson":
+            if (
+                not isinstance(access_method, str)
+                or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", access_method.strip())
+            ):
+                raise exc.CompileError(
+                    "informix_access_method must be a safe non-empty identifier"
+                )
+            sql += " USING " + access_method.strip()
         storage_clauses = self._fragment_storage_clauses(
             create.element,
             index_options,
@@ -4011,9 +4136,20 @@ class IfxDialect(default.DefaultDialect):
     inspector = ifx_reflection.IfxInspector
     _reflector_cls = ifx_reflection.IfxReflector
 
-    def __init__(self, **kw):
+    def __init__(
+        self,
+        json_serializer=None,
+        json_deserializer=None,
+        bson_encoder=None,
+        bson_decoder=None,
+        **kw,
+    ):
         super(IfxDialect, self).__init__(**kw)
 
+        self._json_serializer = json_serializer
+        self._json_deserializer = json_deserializer
+        self._bson_encoder = bson_encoder
+        self._bson_decoder = bson_decoder
         self._reflector = self._reflector_cls(self)
 
     def _detect_database_mode(self, connection):
@@ -4125,6 +4261,13 @@ class IfxDialect(default.DefaultDialect):
         return self._reflector.has_synonym(
             connection,
             synonym_name,
+            schema=schema,
+            **kw,
+        )
+
+    def get_user_defined_types(self, connection, schema=None, **kw):
+        return self._reflector.get_user_defined_types(
+            connection,
             schema=schema,
             **kw,
         )
