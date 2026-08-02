@@ -24,8 +24,12 @@
 
 """
 import datetime
+import hashlib
+import math
 import re
 import threading
+from collections.abc import Mapping
+from decimal import Decimal
 from sqlalchemy import event, table
 from sqlalchemy import exc
 from sqlalchemy import schema as sa_schema
@@ -44,6 +48,12 @@ from sqlalchemy.engine import default
 from . import reflection as ifx_reflection
 from . import sqla_compat
 from .document import BSON, JSON
+from .indexes import (
+    AlterIndexCluster,
+    SetIndexMode,
+    SetIndexVisibility,
+    _ReflectedAccessMethodParameters,
+)
 from .complex import DISTINCT, LIST, MULTISET, ROW, SET
 from .optimizer import (
     INFORMIX_CONNECTION_CHARACTERISTICS,
@@ -2636,6 +2646,34 @@ class IfxDDLCompiler(compiler.DDLCompiler):
         """Quote one validated Informix fragment/dbspace identifier."""
         return self.preparer.quote(value)
 
+    def _partial_index_partition_names(self, index):
+        """Return deterministic partition names for a partial index.
+
+        Informix 14.10+ models a partial index as expression fragmentation
+        with one indexed partition and one ``INDEX OFF`` remainder partition.
+        When both partitions use the same dbspace, the native grammar requires
+        explicit partition names.  Keep the generated names deterministic so
+        reflection and Alembic round trips can recognise dialect-created
+        partial indexes, while respecting the server identifier limit.
+        """
+        base = str(self._physical_index_name(index))
+        enabled_suffix = "__ifx_on"
+        disabled_suffix = "__ifx_off"
+        max_suffix = max(len(enabled_suffix), len(disabled_suffix))
+        max_length = int(getattr(self.dialect, "max_identifier_length", 128) or 128)
+
+        if len(base) + max_suffix > max_length:
+            digest = hashlib.sha1(base.encode("utf-8")).hexdigest()[:10]
+            available = max_length - max_suffix - len(digest) - 1
+            if available < 1:
+                raise exc.CompileError(
+                    "Informix identifier length is too small for generated "
+                    "partial-index partition names"
+                )
+            base = f"{base[:available]}_{digest}"
+
+        return base + enabled_suffix, base + disabled_suffix
+
     def _fragment_expression_sql(
         self,
         value,
@@ -3839,6 +3877,12 @@ class IfxDDLCompiler(compiler.DDLCompiler):
         return expression, descending
 
     def _validate_functional_index(self, index):
+        """Validate declared functional/generalized index expressions.
+
+        Informix accepts composite indexes that mix ordinary columns and
+        nonvariant UDR calls.  Arbitrary expressions and raw SQL remain
+        intentionally unsupported for newly declared indexes.
+        """
         options = self._informix_index_options(index)
         explicitly_functional = bool(options.get("functional"))
         reflected_procedure = options.get("procedure")
@@ -3846,159 +3890,490 @@ class IfxDDLCompiler(compiler.DDLCompiler):
         def is_plain_column_expression(expression):
             if isinstance(expression, sa_schema.Column):
                 return True
-            if isinstance(expression, sql_elements.UnaryExpression):
-                return (
-                    expression.modifier in (operators.asc_op, operators.desc_op)
-                    and isinstance(expression.element, sa_schema.Column)
-                )
-            return False
+            return (
+                isinstance(expression, sql_elements.UnaryExpression)
+                and expression.modifier in (operators.asc_op, operators.desc_op)
+                and isinstance(expression.element, sa_schema.Column)
+            )
 
         has_non_column_expression = any(
             not is_plain_column_expression(expression)
             for expression in index.expressions
         )
-
         if not explicitly_functional and not reflected_procedure:
             if has_non_column_expression:
                 raise exc.CompileError(
                     "Informix expression indexes must opt in with "
-                    "informix_functional=True. Only a nonvariant UDR call "
-                    "over columns of the indexed table is supported."
+                    "informix_functional=True. Only nonvariant UDR calls "
+                    "over indexed-table columns are supported."
                 )
             return
 
-        # Reflected functional indexes are represented by TextClause entries
-        # plus catalog procedure metadata. They were already validated by the
-        # server when created, so mixed and multi-key indexes can be emitted
-        # again without widening the contract for newly declared indexes.
         if reflected_procedure:
-            has_reflected_expression = False
-            for expression in index.expressions:
-                if isinstance(expression, sql_elements.TextClause):
-                    has_reflected_expression = True
-                    continue
-                if not is_plain_column_expression(expression):
-                    raise exc.CompileError(
-                        "Reflected Informix functional indexes may contain "
-                        "only table columns and reflected SQL text"
-                    )
-            if not has_reflected_expression:
+            if not any(
+                isinstance(expression, sql_elements.TextClause)
+                for expression in index.expressions
+            ):
                 raise exc.CompileError(
-                    "informix_procedure metadata requires at least one "
-                    "reflected functional expression"
+                    "informix_procedure metadata requires reflected SQL text"
                 )
             return
 
-        if len(index.expressions) != 1:
-            raise exc.CompileError(
-                "The initial Informix functional-index implementation "
-                "supports exactly one function key"
+        found_function = False
+        for expression in index.expressions:
+            if is_plain_column_expression(expression):
+                continue
+            function, _descending = self._unwrap_functional_index_expression(
+                expression
             )
+            found_function = True
+            arguments = list(function.clauses)
+            if not arguments:
+                raise exc.CompileError(
+                    "Informix functional indexes require at least one column argument"
+                )
 
-        expression = index.expressions[0]
-        function, _descending = self._unwrap_functional_index_expression(
-            expression
-        )
+            function_name = str(getattr(function, "name", "")).casefold()
+            access_method = str(
+                options.get("using") or options.get("access_method") or ""
+            ).casefold()
+            if function_name == "bson_get":
+                if access_method != "bson":
+                    raise exc.CompileError(
+                        "Informix BSON_GET indexes require informix_using='BSON' or informix_access_method='BSON'"
+                    )
+                if len(arguments) not in (2, 3):
+                    raise exc.CompileError(
+                        "Informix BSON_GET indexes require a field and optional renamed field"
+                    )
+                first_argument = arguments[0]
+                if isinstance(first_argument, sql_elements.Grouping):
+                    first_argument = first_argument.element
+                if not isinstance(first_argument, sa_schema.Column) or first_argument.table is not index.table:
+                    raise exc.CompileError(
+                        "Informix BSON_GET index first argument must be an indexed-table column"
+                    )
+                for argument in arguments[1:]:
+                    if isinstance(argument, sql_elements.Grouping):
+                        argument = argument.element
+                    if not (
+                        isinstance(argument, sql_elements.BindParameter)
+                        and isinstance(argument.value, str)
+                        and argument.value
+                    ):
+                        raise exc.CompileError(
+                            "Informix BSON_GET field names must be non-empty string literals"
+                        )
+                continue
 
-        arguments = list(function.clauses)
-        if not arguments:
-            raise exc.CompileError(
-                "Informix functional indexes require at least one column "
-                "argument"
-            )
-
-        function_name = str(getattr(function, "name", "")).casefold()
-        access_method = str(options.get("access_method") or "").casefold()
-        if function_name == "bson_get":
-            if access_method != "bson":
-                raise exc.CompileError(
-                    "Informix BSON_GET indexes require "
-                    "informix_access_method='BSON'"
-                )
-            first_argument = arguments[0]
-            if isinstance(first_argument, sql_elements.Grouping):
-                first_argument = first_argument.element
-            if not isinstance(first_argument, sa_schema.Column):
-                raise exc.CompileError(
-                    "Informix BSON_GET index first argument must be a "
-                    "direct BSON table column"
-                )
-            if first_argument.table is not index.table:
-                raise exc.CompileError(
-                    "The BSON_GET index column must belong to the indexed table"
-                )
-            if len(arguments) not in (2, 3):
-                raise exc.CompileError(
-                    "Informix BSON_GET indexes require a field and optional "
-                    "renamed field"
-                )
-            for argument in arguments[1:]:
+            for argument in arguments:
                 if isinstance(argument, sql_elements.Grouping):
                     argument = argument.element
-                if not (
-                    isinstance(argument, sql_elements.BindParameter)
-                    and isinstance(argument.value, str)
-                    and argument.value
-                ):
+                if not isinstance(argument, sa_schema.Column):
                     raise exc.CompileError(
-                        "Informix BSON_GET index field names must be "
-                        "non-empty string literals"
+                        "Informix functional-index arguments must be direct table columns"
                     )
-            return
+                if argument.table is not index.table:
+                    raise exc.CompileError(
+                        "Every functional-index argument must belong to the indexed table"
+                    )
 
-        for argument in arguments:
-            if isinstance(argument, sql_elements.Grouping):
-                argument = argument.element
+        if not found_function:
+            raise exc.CompileError(
+                "informix_functional=True requires a SQLAlchemy function call"
+            )
 
-            if not isinstance(argument, sa_schema.Column):
+    @staticmethod
+    def _index_option_identifier(value, option_name):
+        if not isinstance(value, str) or not value.strip():
+            raise exc.CompileError(f"informix_{option_name} must be a non-empty identifier")
+        parts = value.strip().split(".")
+        if len(parts) > 2 or any(
+            re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", part) is None
+            for part in parts
+        ):
+            raise exc.CompileError(f"informix_{option_name} must be a safe identifier")
+        return ".".join(parts)
+
+    def _index_access_method(self, options):
+        using = options.get("using")
+        legacy = options.get("access_method")
+        if using is not None and legacy is not None and str(using).casefold() != str(legacy).casefold():
+            raise exc.CompileError(
+                "informix_using and informix_access_method cannot disagree"
+            )
+        # ``access_method`` predates the public advanced-index API and is also
+        # populated by reflection.  Preserve its historic non-emitting role,
+        # except for the verified BSON access method.  New declarations use
+        # ``informix_using``.
+        value = using
+        reflected_parameters = isinstance(
+            options.get("amparam"),
+            _ReflectedAccessMethodParameters,
+        )
+        if value is None and legacy is not None and (
+            str(legacy).casefold() == "bson" or reflected_parameters
+        ):
+            value = legacy
+        if value is None:
+            return None
+        return self._index_option_identifier(value, "using")
+
+    @staticmethod
+    def _index_access_method_literal(value):
+        if isinstance(value, bool) or value is None:
+            raise exc.CompileError(
+                "informix_amparam values must be strings or finite numbers"
+            )
+        if isinstance(value, str):
+            return "'" + value.replace("'", "''") + "'"
+        if isinstance(value, int):
+            return str(value)
+        if isinstance(value, Decimal):
+            if not value.is_finite():
                 raise exc.CompileError(
-                    "Informix functional-index arguments must be direct "
-                    "table columns; literals and nested expressions are not "
-                    "supported"
+                    "informix_amparam numeric values must be finite"
                 )
-
-            if argument.table is not index.table:
+            return str(value)
+        if isinstance(value, float):
+            if not math.isfinite(value):
                 raise exc.CompileError(
-                    "Every Informix functional-index argument must belong "
-                    "to the indexed table"
+                    "informix_amparam numeric values must be finite"
                 )
+            return repr(value)
+        raise exc.CompileError(
+            "informix_amparam values must be strings or finite numbers"
+        )
+
+    def _index_access_method_parameters(self, options, access_method):
+        value = options.get("amparam")
+        if value is None:
+            return None
+        if access_method is None:
+            raise exc.CompileError(
+                "informix_amparam requires informix_using"
+            )
+
+        if isinstance(value, _ReflectedAccessMethodParameters):
+            rendered = value.strip()
+            if rendered.startswith("(") and rendered.endswith(")"):
+                rendered = rendered[1:-1].strip()
+            if not rendered:
+                raise exc.CompileError(
+                    "reflected Informix access-method parameters are empty"
+                )
+            return rendered
+
+        if not isinstance(value, Mapping) or not value:
+            raise exc.CompileError(
+                "informix_amparam must be a non-empty mapping; arbitrary SQL text is not accepted"
+            )
+
+        rendered = []
+        for key, item in value.items():
+            name = self._index_option_identifier(key, "amparam")
+            if "." in name:
+                raise exc.CompileError(
+                    "informix_amparam names must be unqualified identifiers"
+                )
+            rendered.append(
+                f"{name}={self._index_access_method_literal(item)}"
+            )
+        return ", ".join(rendered)
+
+    def _index_opclasses(self, index, options):
+        value = options.get("opclass")
+        if (
+            options.get("procedure")
+            and options.get("using") is None
+            and not isinstance(
+                options.get("amparam"),
+                _ReflectedAccessMethodParameters,
+            )
+        ):
+            # Reflected metadata is descriptive.  Do not broaden legacy
+            # round-trip DDL unless the new public ``informix_using`` API was
+            # selected explicitly or catalog-backed access-method parameters
+            # require an exact round trip.
+            value = None
+        if value is None:
+            return (None,) * len(index.expressions)
+        values = value if isinstance(value, (tuple, list)) else (value,) * len(index.expressions)
+        if len(values) != len(index.expressions):
+            raise exc.CompileError(
+                "informix_opclass sequence must match the number of index keys"
+            )
+        return tuple(
+            self._index_option_identifier(item, "opclass") if item is not None else None
+            for item in values
+        )
+
+    def _render_index_key(self, expression, opclass):
+        rendered = self.sql_compiler.process(
+            expression,
+            include_table=False,
+            literal_binds=True,
+        )
+        if opclass is None:
+            return rendered
+        suffix = ""
+        upper = rendered.upper()
+        for candidate in (" DESC", " ASC"):
+            if upper.endswith(candidate):
+                rendered, suffix = rendered[:-len(candidate)], rendered[-len(candidate):]
+                break
+        rendered_opclass = ".".join(opclass.split("."))
+        return f"{rendered} {rendered_opclass}{suffix}"
+
+    def _validate_index_predicate(self, index, predicate):
+        if predicate is None:
+            return None
+        from .fragmentation import _ReflectedFragmentExpression
+        if isinstance(predicate, _ReflectedFragmentExpression):
+            return predicate.sql
+        if not isinstance(predicate, sql_elements.ClauseElement) or isinstance(predicate, sql_elements.TextClause):
+            raise exc.CompileError(
+                "informix_where must be a structured SQLAlchemy expression"
+            )
+        for element in sql_visitors.iterate(predicate):
+            if isinstance(element, sa_schema.Column) and element.table is not index.table:
+                raise exc.CompileError(
+                    "informix_where columns must belong to the indexed table"
+                )
+        return self.sql_compiler.process(
+            predicate,
+            include_table=False,
+            literal_binds=True,
+        )
+
+    def _hash_on_clause(self, index, options):
+        raw = options.get("hash_on")
+        buckets = options.get("buckets")
+        if raw is None:
+            if buckets is not None:
+                raise exc.CompileError("informix_buckets requires informix_hash_on")
+            return None
+        if not isinstance(raw, (tuple, list)) or not raw:
+            raise exc.CompileError("informix_hash_on must be a non-empty column sequence")
+        if not isinstance(buckets, int) or isinstance(buckets, bool) or buckets < 2:
+            raise exc.CompileError("informix_buckets must be an integer greater than one")
+
+        index_columns = []
+        for expression in index.expressions:
+            element = expression.element if isinstance(expression, sql_elements.UnaryExpression) else expression
+            if not isinstance(element, sa_schema.Column):
+                raise exc.CompileError(
+                    "forest-of-trees indexes require ordinary column keys"
+                )
+            index_columns.append(element)
+
+        columns = []
+        for item in raw:
+            if isinstance(item, str):
+                if item not in index.table.c:
+                    raise exc.CompileError(f"informix_hash_on column {item!r} is not in the indexed table")
+                column = index.table.c[item]
+            elif isinstance(item, sa_schema.Column) and item.table is index.table:
+                column = item
+            else:
+                raise exc.CompileError(
+                    "informix_hash_on accepts indexed-table Column objects or names"
+                )
+            columns.append(column)
+        if index_columns[: len(columns)] != columns:
+            raise exc.CompileError(
+                "informix_hash_on must be a prefix of the index key columns"
+            )
+        names = ", ".join(self.preparer.quote(column.name) for column in columns)
+        return f"HASH ON ({names}) WITH {buckets} BUCKETS"
+
+    def _validate_advanced_index_options(self, index, options):
+        for name in ("online", "compressed"):
+            value = options.get(name)
+            if value not in (None, True, False):
+                raise exc.CompileError(f"informix_{name} must be a boolean")
+
+        fillfactor = options.get("fillfactor")
+        if fillfactor is not None and (
+            not isinstance(fillfactor, int)
+            or isinstance(fillfactor, bool)
+            or not 1 <= fillfactor <= 100
+        ):
+            raise exc.CompileError("informix_fillfactor must be between 1 and 100")
+
+        mode = options.get("mode")
+        if mode is not None:
+            if not isinstance(mode, str):
+                raise exc.CompileError("informix_mode must be a string")
+            mode = " ".join(mode.strip().upper().split())
+            valid = {"ENABLED", "DISABLED", "FILTERING", "FILTERING WITH ERROR", "FILTERING WITHOUT ERROR"}
+            if mode not in valid:
+                raise exc.CompileError("invalid informix_mode")
+            if mode.startswith("FILTERING") and not index.unique:
+                raise exc.CompileError("FILTERING is valid only for unique indexes")
+
+        visible = options.get("visible")
+        if visible not in (None, True, False):
+            raise exc.CompileError("informix_visible must be a boolean or None")
+
+        access_method = self._index_access_method(options)
+        hash_clause = self._hash_on_clause(index, options)
+        if hash_clause:
+            if fillfactor is not None:
+                raise exc.CompileError("FILLFACTOR is not valid for forest-of-trees indexes")
+            if options.get("fragment_by") is not None or options.get("dbspace") is not None:
+                raise exc.CompileError("forest-of-trees indexes cannot specify detached storage")
+            if options.get("where") is not None:
+                raise exc.CompileError("forest-of-trees indexes cannot be partial")
+            if options.get("compressed"):
+                raise exc.CompileError("forest-of-trees indexes cannot be COMPRESSED")
+        if options.get("compressed") and access_method and access_method.casefold() != "btree":
+            raise exc.CompileError("COMPRESSED is valid only for B-tree indexes")
+
+        # Although the published CREATE INDEX syntax diagrams list ONLINE and
+        # COMPRESSED as adjacent optional clauses, Informix 15.0.1 rejects the
+        # combination with SQLCODE -201 in either textual order.  Treat them
+        # as mutually exclusive so the dialect never emits SQL that the native
+        # parser cannot execute.  Applications that need both properties must
+        # create the index ONLINE first and run an explicit administrative
+        # index-compression operation afterwards.
+        if options.get("online") and options.get("compressed"):
+            raise exc.CompileError(
+                "Informix does not support ONLINE and COMPRESSED in the same "
+                "CREATE INDEX statement; create the index ONLINE and compress "
+                "it in a separate administrative operation"
+            )
+
+        if options.get("online"):
+            if options.get("functional") or options.get("procedure"):
+                raise exc.CompileError(
+                    "Informix CREATE INDEX ONLINE does not support functional indexes"
+                )
+            if access_method and access_method.casefold() in {"rtree", "r-tree"}:
+                raise exc.CompileError(
+                    "Informix CREATE INDEX ONLINE does not support R-tree indexes"
+                )
+            from .fragmentation import RangeIntervalFragmentation
+
+            if isinstance(options.get("fragment_by"), RangeIntervalFragmentation):
+                raise exc.CompileError(
+                    "Informix CREATE INDEX ONLINE does not support interval-fragmented indexes"
+                )
+            table_options = index.table.dialect_options["informix"]
+            if isinstance(
+                table_options.get("fragment_by"),
+                RangeIntervalFragmentation,
+            ):
+                raise exc.CompileError(
+                    "Informix CREATE INDEX ONLINE does not support indexes on interval-fragmented tables"
+                )
+        return access_method, hash_clause
 
     def visit_create_index(
         self, create, include_schema=False, include_table_schema=True, **kw
     ):
-        self._validate_functional_index(create.element)
+        index = create.element
+        self._validate_functional_index(index)
+        self._verify_index_table(index)
+        options = self._informix_index_options(index)
+        access_method, hash_clause = self._validate_advanced_index_options(index, options)
+        access_method_parameters = self._index_access_method_parameters(
+            options, access_method
+        )
+        opclasses = self._index_opclasses(index, options)
 
-        sql = super(IfxDDLCompiler, self).visit_create_index(
-            create,
-            include_schema=include_schema,
-            include_table_schema=include_table_schema,
-            **kw
+        text = "CREATE "
+        if index.unique:
+            text += "UNIQUE "
+        text += "INDEX "
+        if create.if_not_exists:
+            text += "IF NOT EXISTS "
+        text += self._prepared_index_name(index, include_schema=include_schema)
+        text += " ON " + self.preparer.format_table(index.table, use_schema=include_table_schema)
+        keys = ", ".join(
+            self._render_index_key(expression, opclass)
+            for expression, opclass in zip(index.expressions, opclasses)
         )
-        index_options = create.element.dialect_options["informix"]
-        access_method = index_options.get("access_method")
-        # ``access_method`` is also reflection metadata for ordinary
-        # functional indexes (for example ``btree``).  Preserve the existing
-        # emitted DDL for those indexes and add ``USING BSON`` only for the
-        # native Informix BSON field-index form verified by the JSON/BSON
-        # implementation.
-        if access_method and str(access_method).casefold() == "bson":
-            if (
-                not isinstance(access_method, str)
-                or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", access_method.strip())
-            ):
+        text += f" ({keys})"
+
+        if access_method:
+            text += " USING " + access_method
+            if access_method_parameters:
+                text += " (" + access_method_parameters + ")"
+        fillfactor = options.get("fillfactor")
+        if fillfactor is not None:
+            text += f" FILLFACTOR {fillfactor}"
+
+        predicate = self._validate_index_predicate(index, options.get("where"))
+        if predicate is not None:
+            if options.get("fragment_by") is not None:
                 raise exc.CompileError(
-                    "informix_access_method must be a safe non-empty identifier"
+                    "informix_where and informix_fragment_by are mutually exclusive"
                 )
-            sql += " USING " + access_method.strip()
-        storage_clauses = self._fragment_storage_clauses(
-            create.element,
-            index_options,
-        )
-        if storage_clauses:
-            sql += " " + " ".join(storage_clauses)
-        if self._is_unique_constraint_as_index(create.element):
-            sql += ' EXCLUDE NULL KEYS'
-        return sql
+            dbspace = options.get("dbspace")
+            if dbspace is None:
+                raise exc.CompileError(
+                    "informix_where requires informix_dbspace for the indexed fragment"
+                )
+            from .fragmentation import _identifier
+            _identifier(dbspace, "dbspace")
+            indexed_partition, excluded_partition = (
+                self._partial_index_partition_names(index)
+            )
+            text += (
+                " FRAGMENT BY EXPRESSION "
+                f"PARTITION {self._format_fragment_identifier(indexed_partition)} "
+                f"({predicate}) IN {self._format_fragment_identifier(dbspace)}, "
+                f"PARTITION {self._format_fragment_identifier(excluded_partition)} "
+                f"REMAINDER IN {self._format_fragment_identifier(dbspace)} INDEX OFF"
+            )
+        else:
+            storage = self._fragment_storage_clauses(index, options)
+            if storage:
+                text += " " + " ".join(storage)
+
+        mode = options.get("mode")
+        if mode:
+            text += " " + " ".join(mode.strip().upper().split())
+        if hash_clause:
+            text += " " + hash_clause
+        if self._is_unique_constraint_as_index(index):
+            text += " EXCLUDE NULL KEYS"
+
+        # ONLINE and COMPRESSED are validated as mutually exclusive above.
+        # Keep each clause in its documented position for statements that use
+        # only one of them.
+        if options.get("online"):
+            text += " ONLINE"
+        if options.get("compressed"):
+            text += " COMPRESSED"
+        if options.get("visible") is False:
+            text += " INVISIBLE"
+        elif options.get("visible") is True:
+            text += " VISIBLE"
+        return text
+
+    def _format_index_ddl_target(self, index_or_name):
+        if isinstance(index_or_name, sa_schema.Index):
+            return self._prepared_index_name(index_or_name, include_schema=True)
+        return self.preparer.quote(index_or_name)
+
+    def visit_set_index_mode(self, ddl, **kw):
+        _ = kw
+        return f"SET INDEXES {self._format_index_ddl_target(ddl.index)} {ddl.mode}"
+
+    def visit_set_index_visibility(self, ddl, **kw):
+        _ = kw
+        mode = "VISIBLE" if ddl.visible else "INVISIBLE"
+        return f"SET INDEXES {self._format_index_ddl_target(ddl.index)} {mode}"
+
+    def visit_alter_index_cluster(self, ddl, **kw):
+        _ = kw
+        if not ddl.clustered:
+            raise exc.CompileError(
+                "Informix ALTER INDEX only exposes TO CLUSTER; clearing clustering requires rebuilding the index"
+            )
+        return f"ALTER INDEX {self._format_index_ddl_target(ddl.index)} TO CLUSTER"
 
     def visit_add_constraint(self, create, **kw):
         if self._should_use_nullable_unique_index(create.element):
@@ -4187,10 +4562,20 @@ class IfxDialect(default.DefaultDialect):
             {
                 "functional": False,
                 "procedure": None,
+                "where": None,
+                "online": False,
+                "fillfactor": None,
+                "dbspace": None,
+                "using": None,
                 "access_method": None,
                 "opclass": None,
                 "fragment_by": None,
-                "dbspace": None,
+                "hash_on": None,
+                "buckets": None,
+                "compressed": None,
+                "mode": None,
+                "visible": None,
+                "amparam": None,
             },
         ),
     ]

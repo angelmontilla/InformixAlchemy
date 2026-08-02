@@ -32,6 +32,7 @@ from sqlalchemy.engine.reflection import ObjectKind, ObjectScope
 from .temporal import IFXDateTime
 from .temporal import IFXTime
 from .complex import DISTINCT, LIST, MULTISET, ROW, SET, RowField
+from .indexes import _ReflectedAccessMethodParameters
 from .fragmentation import (
     AttachedIndexFragmentation,
     ExpressionFragmentation,
@@ -2403,7 +2404,8 @@ class IfxReflector(BaseReflector):
                     f.evalpos,
                     f.exprtext,
                     f.dbspace,
-                    f.partition
+                    f.partition,
+                    f.flags
                 FROM sysfragments f
                 WHERE f.tabid = ?
                   AND f.fragtype = 'T'
@@ -2419,7 +2421,8 @@ class IfxReflector(BaseReflector):
                     f.evalpos,
                     f.exprtext,
                     f.dbspace,
-                    f.partition
+                    f.partition,
+                    f.flags
                 FROM sysfragments f
                 WHERE f.tabid = ?
                   AND f.fragtype = 'I'
@@ -2567,6 +2570,7 @@ class IfxReflector(BaseReflector):
                     "exprtext": self._clean_str(row[4]),
                     "dbspace": self._clean_str(row[5]),
                     "partition": self.normalize_name(row[6]) if row[6] else None,
+                    "flags": int(row[7]) if len(row) > 7 and row[7] is not None else 0,
                 }
             )
 
@@ -2738,6 +2742,66 @@ class IfxReflector(BaseReflector):
             ), None
 
         return None, None
+
+    def _reflect_partial_index(self, connection, tabid, *, index_name):
+        """Return a trusted predicate and dbspace for a native partial index.
+
+        Informix implements partial indexes as ``FRAGMENT BY EXPRESSION``
+        with one indexed fragment and one ``INDEX OFF`` fragment.  The dialect
+        emits the grammar-complete form ``REMAINDER IN <dbspace> INDEX OFF``
+        with deterministic partition names.  Older server/catalog variants can
+        instead expose ``INDEX OFF`` in the dbspace field, so reflection accepts
+        both shapes.
+        """
+        rows = self._fragment_rows(connection, tabid, index_name=index_name)
+        if not rows:
+            return None, None
+        strategy = (self._clean_str(rows[0][2]) or "").upper()
+        if strategy != "E":
+            return None, None
+
+        active = None
+        index_off = False
+        for row in rows:
+            evalpos = int(row[3]) if row[3] is not None else 0
+            if evalpos < 0:
+                continue
+            exprtext = (self._clean_str(row[4]) or "").strip()
+            dbspace = (self._clean_str(row[5]) or "").strip()
+            partition = (self._clean_str(row[6]) or "").strip()
+            normalized_expr = re.sub(r"\s+", " ", exprtext.upper())
+            normalized_space = re.sub(r"\s+", " ", dbspace.upper())
+            normalized_partition = partition.casefold()
+            dialect_generated_off_partition = normalized_partition.endswith(
+                "__ifx_off"
+            )
+            legacy_index_off = normalized_space == "INDEX OFF"
+            inline_index_off = normalized_expr.endswith(" INDEX OFF")
+            if normalized_expr.startswith("REMAINDER") and (
+                legacy_index_off
+                or inline_index_off
+                or dialect_generated_off_partition
+            ):
+                index_off = True
+                continue
+            if (
+                normalized_space != "INDEX OFF"
+                and not normalized_expr.startswith("REMAINDER")
+            ):
+                active = (exprtext, dbspace)
+
+        if not index_off or active is None or not active[0] or not active[1]:
+            return None, None
+        dependencies = self._fragment_udr_dependencies(
+            connection,
+            tabid,
+            index_name=index_name,
+        )
+        predicate = self._reflected_fragment_expression(
+            active[0],
+            dependencies.get(None, ()),
+        )
+        return predicate, active[1]
 
     def _reflect_fragmentation(self, connection, tabid, *, index_name=None):
         rows = self._fragment_rows(connection, tabid, index_name=index_name)
@@ -3388,10 +3452,20 @@ class IfxReflector(BaseReflector):
                 i.amid,
                 a.am_name,
                 i.collation,
-                i.tabid
+                i.tabid,
+                i.amparam,
+                i.nhashcols,
+                i.nbuckets,
+                i.indexattr,
+                o.state
             FROM sysindices i
             LEFT JOIN sysams a
               ON a.am_id = i.amid
+            LEFT JOIN sysobjstate o
+              ON o.objtype = 'I'
+             AND o.tabid = i.tabid
+             AND o.name = i.idxname
+             AND o.owner = i.owner
             WHERE i.tabid = ?
             ORDER BY i.idxname
         """
@@ -3510,6 +3584,11 @@ class IfxReflector(BaseReflector):
         access_method = self._clean_str(row[5])
         _collation = self._clean_str(row[6])
         catalog_tabid = int(row[7]) if len(row) > 7 and row[7] is not None else tabid
+        amparam = self._clean_str(row[8]) if len(row) > 8 else None
+        nhashcols = int(row[9]) if len(row) > 9 and row[9] is not None else 0
+        nbuckets = int(row[10]) if len(row) > 10 and row[10] is not None else 0
+        indexattr = int(row[11]) if len(row) > 11 and row[11] is not None else 0
+        state_code = self._clean_str(row[12]) if len(row) > 12 else None
         if catalog_tabid != tabid:
             util.warn(
                 "SYSINDICES returned an unexpected table identifier for "
@@ -3566,9 +3645,16 @@ class IfxReflector(BaseReflector):
                 colname = colnames[0]
                 column_names.append(colname)
                 expression = self._quote_reflected_identifier(colname)
-                expressions.append(expression)
                 if component["descending"]:
                     column_sorting[colname] = ("desc",)
+                    # For a mixed functional/ordinary index SQLAlchemy must
+                    # consume ``expressions`` rather than only
+                    # ``column_names``.  Preserve the native descending key
+                    # directly in that expression as well as in the standard
+                    # ``column_sorting`` mapping, otherwise metadata
+                    # round-trips silently rebuild the key in ascending order.
+                    expression += " DESC"
+                expressions.append(expression)
                 continue
 
             has_function = True
@@ -3613,13 +3699,48 @@ class IfxReflector(BaseReflector):
         if column_sorting:
             idx_info["column_sorting"] = column_sorting
 
+        dialect_options = {}
         if has_function:
             idx_info["expressions"] = expressions
-            dialect_options = {
-                "informix_procedure": self._single_or_tuple(procedures),
-                "informix_access_method": access_method,
-                "informix_opclass": self._single_or_tuple(opclasses),
-            }
+            dialect_options.update(
+                {
+                    "informix_procedure": self._single_or_tuple(procedures),
+                    "informix_access_method": access_method,
+                    "informix_opclass": self._single_or_tuple(opclasses),
+                }
+            )
+        elif access_method and access_method.casefold() not in {"btree", "b-tree"}:
+            dialect_options["informix_using"] = access_method
+            reflected_opclasses = self._single_or_tuple(opclasses)
+            if reflected_opclasses is not None:
+                dialect_options["informix_opclass"] = reflected_opclasses
+
+        if nhashcols > 0:
+            hash_columns = [
+                name for name in column_names[:nhashcols] if name is not None
+            ]
+            if len(hash_columns) == nhashcols:
+                dialect_options["informix_hash_on"] = tuple(hash_columns)
+                if nbuckets > 0:
+                    dialect_options["informix_buckets"] = nbuckets
+
+        if indexattr & 0x00000002:
+            dialect_options["informix_compressed"] = True
+        if indexattr & 0x00000010:
+            dialect_options["informix_visible"] = False
+        if amparam and access_method and access_method.casefold() not in {"btree", "b-tree"}:
+            dialect_options["informix_amparam"] = _ReflectedAccessMethodParameters(amparam)
+
+        state_modes = {
+            "E": "ENABLED",
+            "D": "DISABLED",
+            "F": "FILTERING WITHOUT ERROR",
+            "G": "FILTERING WITH ERROR",
+        }
+        if state_code in state_modes:
+            dialect_options["informix_mode"] = state_modes[state_code]
+
+        if dialect_options:
             idx_info["dialect_options"] = {
                 key: value
                 for key, value in dialect_options.items()
@@ -3696,20 +3817,31 @@ class IfxReflector(BaseReflector):
                 schema=schema,
             )
             if idx_info is not None:
-                fragment_by, dbspace = self._reflect_fragmentation(
+                index_name = self._clean_str(row[0])
+                predicate, partial_dbspace = self._reflect_partial_index(
                     connection,
                     tabid,
-                    index_name=self._clean_str(row[0]),
+                    index_name=index_name,
                 )
-                if fragment_by is not None or dbspace is not None:
-                    dialect_options = idx_info.setdefault(
-                        "dialect_options",
-                        {},
+                if predicate is not None:
+                    dialect_options = idx_info.setdefault("dialect_options", {})
+                    dialect_options["informix_where"] = predicate
+                    dialect_options["informix_dbspace"] = partial_dbspace
+                else:
+                    fragment_by, dbspace = self._reflect_fragmentation(
+                        connection,
+                        tabid,
+                        index_name=index_name,
                     )
-                    if fragment_by is not None:
-                        dialect_options["informix_fragment_by"] = fragment_by
-                    if dbspace is not None:
-                        dialect_options["informix_dbspace"] = dbspace
+                    if fragment_by is not None or dbspace is not None:
+                        dialect_options = idx_info.setdefault(
+                            "dialect_options",
+                            {},
+                        )
+                        if fragment_by is not None:
+                            dialect_options["informix_fragment_by"] = fragment_by
+                        if dbspace is not None:
+                            dialect_options["informix_dbspace"] = dbspace
                 indexes.append(idx_info)
 
         return indexes

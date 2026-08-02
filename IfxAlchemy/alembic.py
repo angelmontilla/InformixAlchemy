@@ -20,6 +20,9 @@ from typing import Any
 
 from alembic.ddl.impl import ComparisonResult, DefaultImpl
 from sqlalchemy import exc as sa_exc
+from sqlalchemy.sql import elements as sql_elements
+
+from .fragmentation import _ReflectedFragmentExpression
 
 
 class InformixImpl(DefaultImpl):
@@ -129,7 +132,64 @@ class InformixImpl(DefaultImpl):
             normalized.append(character.casefold())
             index += 1
 
-        return "".join(normalized).strip()
+        normalized_sql = "".join(normalized).strip()
+        return InformixImpl._strip_redundant_outer_parentheses(normalized_sql)
+
+    @staticmethod
+    def _strip_redundant_outer_parentheses(value: str) -> str:
+        """Remove parentheses that wrap the complete SQL expression.
+
+        ``SYSFRAGMENTS`` may persist an expression predicate either as
+        ``status = 'OPEN'`` or ``(status = 'OPEN')`` depending on the server
+        release and the DDL form used to create the fragment.  Those forms are
+        semantically identical and must not trigger an Alembic drop/create
+        cycle.
+
+        Parentheses are removed only when the first opening parenthesis is
+        matched by the final character.  Quoted identifiers and string
+        literals are tracked so parentheses inside them are ignored.
+        """
+        text = str(value).strip()
+
+        while len(text) >= 2 and text[0] == "(" and text[-1] == ")":
+            depth = 0
+            quote: str | None = None
+            wraps_complete_expression = True
+            index = 0
+
+            while index < len(text):
+                character = text[index]
+
+                if quote is not None:
+                    if character == quote:
+                        if index + 1 < len(text) and text[index + 1] == quote:
+                            index += 2
+                            continue
+                        quote = None
+                    index += 1
+                    continue
+
+                if character in {'"', "'"}:
+                    quote = character
+                elif character == "(":
+                    depth += 1
+                elif character == ")":
+                    depth -= 1
+                    if depth < 0:
+                        wraps_complete_expression = False
+                        break
+                    if depth == 0 and index != len(text) - 1:
+                        wraps_complete_expression = False
+                        break
+
+                index += 1
+
+            if quote is not None or depth != 0 or not wraps_complete_expression:
+                break
+
+            text = text[1:-1].strip()
+
+        return text
 
     def _render_index_expressions(self, index: Any) -> tuple[str, ...] | None:
         """Render index expressions using Informix's compiler.
@@ -168,6 +228,240 @@ class InformixImpl(DefaultImpl):
         normalized = tuple(str(item).strip().casefold() for item in values)
         return normalized or None
 
+    @staticmethod
+    def _first_option(options: dict[str, Any], *names: str) -> Any:
+        for name in names:
+            value = options.get(name)
+            if value is not None:
+                return value
+        return None
+
+    def _render_index_predicate(
+        self,
+        value: Any,
+    ) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, _ReflectedFragmentExpression):
+            return self._normalize_expression_sql(value.sql)
+        if isinstance(value, sql_elements.TextClause):
+            return None
+        try:
+            compiled = value.compile(
+                dialect=self.dialect,
+                compile_kwargs={
+                    "include_table": False,
+                    "literal_binds": True,
+                },
+            )
+        except (AttributeError, TypeError, ValueError, sa_exc.CompileError):
+            return None
+        return self._normalize_expression_sql(str(compiled))
+
+    @staticmethod
+    def _normalized_index_columns(value: Any) -> tuple[str, ...] | None:
+        if value is None:
+            return None
+        values = value if isinstance(value, (tuple, list)) else (value,)
+        normalized = []
+        for item in values:
+            name = getattr(item, "name", item)
+            normalized.append(str(name).strip().casefold())
+        return tuple(normalized) or None
+
+    def _render_access_method_parameters(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        try:
+            ddl_compiler = self.dialect.ddl_compiler(self.dialect, None)
+            rendered = ddl_compiler._index_access_method_parameters(
+                {"amparam": value},
+                "reflected_access_method",
+            )
+        except (AttributeError, TypeError, ValueError, sa_exc.CompileError):
+            return None
+        return self._normalize_expression_sql(rendered)
+
+    def _render_fragmentation_option(
+        self,
+        index: Any,
+        value: Any,
+    ) -> str | None:
+        if value is None:
+            return None
+        try:
+            ddl_compiler = self.dialect.ddl_compiler(self.dialect, None)
+            clauses = ddl_compiler._fragment_storage_clauses(
+                index,
+                {"dbspace": None, "fragment_by": value},
+            )
+        except (AttributeError, TypeError, ValueError, sa_exc.CompileError):
+            return None
+        return self._normalize_expression_sql(" ".join(clauses))
+
+    def _advanced_index_differences(
+        self,
+        metadata_index: Any,
+        reflected_index: Any,
+    ) -> list[str] | None:
+        """Compare persistent Informix index attributes.
+
+        ``ONLINE`` is a creation-time locking strategy, and ``FILLFACTOR`` is
+        not exposed as a durable, round-trippable SYSINDICES attribute.  They
+        are intentionally excluded so Alembic does not emit perpetual
+        drop/create operations for metadata the server cannot reflect.
+        """
+        metadata = self._informix_index_options(metadata_index)
+        reflected = self._informix_index_options(reflected_index)
+        differences: list[str] = []
+
+        metadata_access = self._first_option(
+            metadata, "using", "access_method"
+        ) or "btree"
+        reflected_access = self._first_option(
+            reflected, "using", "access_method"
+        ) or "btree"
+        if self._normalized_option(metadata_access) != self._normalized_option(
+            reflected_access
+        ):
+            differences.append(
+                "Informix access method "
+                f"{reflected_access!r} to {metadata_access!r}"
+            )
+
+        metadata_opclass = metadata.get("opclass")
+        if metadata_opclass is not None:
+            reflected_opclass = reflected.get("opclass")
+            if self._normalized_option(metadata_opclass) != self._normalized_option(
+                reflected_opclass
+            ):
+                differences.append(
+                    "Informix opclass "
+                    f"{reflected_opclass!r} to {metadata_opclass!r}"
+                )
+
+        metadata_where = metadata.get("where")
+        reflected_where = reflected.get("where")
+        if metadata_where is not None or reflected_where is not None:
+            rendered_metadata = self._render_index_predicate(metadata_where)
+            rendered_reflected = self._render_index_predicate(reflected_where)
+            if rendered_metadata is None or rendered_reflected is None:
+                return None
+            if rendered_metadata != rendered_reflected:
+                differences.append(
+                    "Informix partial predicate "
+                    f"{rendered_reflected!r} to {rendered_metadata!r}"
+                )
+
+        metadata_fragmentation = metadata.get("fragment_by")
+        reflected_fragmentation = reflected.get("fragment_by")
+        if metadata_fragmentation is not None or reflected_fragmentation is not None:
+            rendered_metadata = self._render_fragmentation_option(
+                metadata_index, metadata_fragmentation
+            )
+            rendered_reflected = self._render_fragmentation_option(
+                reflected_index, reflected_fragmentation
+            )
+            if rendered_metadata is None or rendered_reflected is None:
+                return None
+            if rendered_metadata != rendered_reflected:
+                differences.append(
+                    "Informix fragmentation "
+                    f"{rendered_reflected!r} to {rendered_metadata!r}"
+                )
+
+        metadata_dbspace = metadata.get("dbspace")
+        reflected_dbspace = reflected.get("dbspace")
+        # Informix records the effective physical dbspace for ordinary indexes
+        # even when metadata left storage placement unspecified.  An omitted
+        # ``informix_dbspace`` means "use the server default", not "the index
+        # must reflect without a dbspace".  Compare placement only when target
+        # metadata explicitly requests one.
+        if metadata_dbspace is not None:
+            if self._normalized_option(metadata_dbspace) != self._normalized_option(
+                reflected_dbspace
+            ):
+                differences.append(
+                    "Informix dbspace "
+                    f"{reflected_dbspace!r} to {metadata_dbspace!r}"
+                )
+
+        metadata_hash = metadata.get("hash_on")
+        reflected_hash = reflected.get("hash_on")
+        if metadata_hash is not None or reflected_hash is not None:
+            if self._normalized_index_columns(
+                metadata_hash
+            ) != self._normalized_index_columns(reflected_hash):
+                differences.append(
+                    "Informix HASH ON columns "
+                    f"{reflected_hash!r} to {metadata_hash!r}"
+                )
+
+        metadata_buckets = metadata.get("buckets")
+        reflected_buckets = reflected.get("buckets")
+        if (
+            metadata_buckets is not None or reflected_buckets is not None
+        ) and metadata_buckets != reflected_buckets:
+            differences.append(
+                "Informix FOT buckets "
+                f"{reflected_buckets!r} to {metadata_buckets!r}"
+            )
+
+        metadata_compressed = bool(metadata.get("compressed"))
+        reflected_compressed = bool(reflected.get("compressed"))
+        if metadata_compressed != reflected_compressed:
+            differences.append(
+                "Informix compression "
+                f"{reflected_compressed!r} to {metadata_compressed!r}"
+            )
+
+        metadata_visible = metadata.get("visible")
+        reflected_visible = reflected.get("visible")
+        metadata_visible = True if metadata_visible is None else bool(metadata_visible)
+        reflected_visible = True if reflected_visible is None else bool(reflected_visible)
+        if metadata_visible != reflected_visible:
+            differences.append(
+                "Informix visibility "
+                f"{reflected_visible!r} to {metadata_visible!r}"
+            )
+
+        metadata_mode = metadata.get("mode") or "ENABLED"
+        reflected_mode = reflected.get("mode") or "ENABLED"
+        normalized_metadata_mode = " ".join(
+            str(metadata_mode).strip().upper().split()
+        )
+        normalized_reflected_mode = " ".join(
+            str(reflected_mode).strip().upper().split()
+        )
+        if normalized_metadata_mode != normalized_reflected_mode:
+            differences.append(
+                "Informix index mode "
+                f"{normalized_reflected_mode!r} to "
+                f"{normalized_metadata_mode!r}"
+            )
+
+        metadata_amparam = metadata.get("amparam")
+        reflected_amparam = reflected.get("amparam")
+        if metadata_amparam is not None or reflected_amparam is not None:
+            rendered_metadata_amparam = self._render_access_method_parameters(
+                metadata_amparam
+            )
+            rendered_reflected_amparam = self._render_access_method_parameters(
+                reflected_amparam
+            )
+            if (
+                rendered_metadata_amparam is None
+                or rendered_reflected_amparam is None
+            ):
+                return None
+            if rendered_metadata_amparam != rendered_reflected_amparam:
+                differences.append(
+                    "Informix access-method parameters "
+                    f"{reflected_amparam!r} to {metadata_amparam!r}"
+                )
+
+        return differences
+
     def compare_indexes(
         self,
         metadata_index: Any,
@@ -185,7 +479,21 @@ class InformixImpl(DefaultImpl):
         reflected_functional = self._is_functional_index(reflected_index)
 
         if not metadata_functional and not reflected_functional:
-            return super().compare_indexes(metadata_index, reflected_index)
+            generic_result = super().compare_indexes(
+                metadata_index, reflected_index
+            )
+            if not generic_result.is_equal:
+                return generic_result
+            advanced = self._advanced_index_differences(
+                metadata_index, reflected_index
+            )
+            if advanced is None:
+                return ComparisonResult.Skip(
+                    "Informix advanced-index options could not be rendered"
+                )
+            if advanced:
+                return ComparisonResult.Different(advanced)
+            return ComparisonResult.Equal()
 
         if metadata_functional != reflected_functional:
             return ComparisonResult.Different(
@@ -214,25 +522,14 @@ class InformixImpl(DefaultImpl):
                 f"{reflected_expressions!r} to {metadata_expressions!r}"
             )
 
-        metadata_options = self._informix_index_options(metadata_index)
-        reflected_options = self._informix_index_options(reflected_index)
-        for option_name in ("access_method", "opclass"):
-            metadata_value = self._normalized_option(
-                metadata_options.get(option_name)
+        advanced = self._advanced_index_differences(
+            metadata_index, reflected_index
+        )
+        if advanced is None:
+            return ComparisonResult.Skip(
+                "Informix advanced-index options could not be rendered"
             )
-            if metadata_value is None:
-                # Informix supplies defaults such as btree during reflection;
-                # an unspecified target option must not cause false diffs.
-                continue
-
-            reflected_value = self._normalized_option(
-                reflected_options.get(option_name)
-            )
-            if metadata_value != reflected_value:
-                differences.append(
-                    f"Informix {option_name} "
-                    f"{reflected_value!r} to {metadata_value!r}"
-                )
+        differences.extend(advanced)
 
         if differences:
             return ComparisonResult.Different(differences)

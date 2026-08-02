@@ -53,6 +53,15 @@ from .complex import (
 )
 
 
+
+from .indexes import (
+    AlterIndexCluster,
+    DisableIndex,
+    EnableIndex,
+    SetIndexMode,
+    SetIndexVisibility,
+)
+
 from .optimizer import (
     AllRows,
     AvoidIndex,
@@ -191,6 +200,11 @@ __all__ = (
     "JoinOrder",
     "OptimizerDirective",
     "UseIndex",
+    "AlterIndexCluster",
+    "DisableIndex",
+    "EnableIndex",
+    "SetIndexMode",
+    "SetIndexVisibility",
     "dialect",
     "gen_bson",
     "merge",

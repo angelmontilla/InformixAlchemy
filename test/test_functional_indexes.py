@@ -100,15 +100,6 @@ def test_functional_index_compiles_unique_descending_and_quoted(dialect):
             ),
             "must be direct table columns",
         ),
-        (
-            lambda table: Index(
-                "ix_multiple_keys",
-                func.normalized_name(table.c.name),
-                table.c.surname,
-                informix_functional=True,
-            ),
-            "supports exactly one function key",
-        ),
     ],
 )
 def test_functional_index_rejects_unsafe_shapes(dialect, factory, message):
@@ -117,6 +108,21 @@ def test_functional_index_rejects_unsafe_shapes(dialect, factory, message):
 
     with pytest.raises(exc.CompileError, match=message):
         CreateIndex(index).compile(dialect=dialect)
+
+
+def test_composite_functional_index_compiles_mixed_keys(dialect):
+    table = _table()
+    index = Index(
+        "ix_multiple_keys",
+        func.normalized_name(table.c.name),
+        table.c.surname.desc(),
+        informix_functional=True,
+    )
+
+    assert str(CreateIndex(index).compile(dialect=dialect)) == (
+        "CREATE INDEX ix_multiple_keys ON functional_people "
+        "(normalized_name(name), surname DESC)"
+    )
 
 
 def test_functional_index_rejects_columns_from_another_table(dialect):
@@ -332,6 +338,63 @@ def test_reflect_mixed_functional_index_keeps_component_positions(dialect, monke
     assert index["column_names"] == ["id", None]
     assert index["expressions"] == ["id", "normalized_name(name, surname)"]
     assert index["unique"] is False
+
+
+def test_reflect_mixed_functional_index_preserves_descending_column_expression(
+    dialect, monkeypatch
+):
+    reflector = IfxReflector(dialect)
+    connection = object()
+
+    monkeypatch.setattr(
+        reflector,
+        "_require_table_row",
+        lambda *args, **kwargs: (42, "people", "informix", "T"),
+    )
+    monkeypatch.setattr(
+        reflector, "_constraint_duplicates_by_index", lambda *args: {}
+    )
+    monkeypatch.setattr(
+        reflector,
+        "_get_column_name_map",
+        lambda *args: {1: "id", 2: "name"},
+    )
+    monkeypatch.setattr(
+        reflector,
+        "_index_rows",
+        lambda *args: [
+            (
+                "ix_mixed_desc",
+                "informix",
+                "D",
+                "<574> (2) [1], -1 [1]",
+                1,
+                "btree",
+                "en_US.819",
+                42,
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        reflector,
+        "_index_procedure_map",
+        lambda *args: {
+            574: {"name": "normalized_name", "owner": "informix"}
+        },
+    )
+    monkeypatch.setattr(
+        reflector,
+        "_index_opclass_map",
+        lambda *args: {
+            1: {"name": "btree_ops", "owner": "informix", "amid": 1}
+        },
+    )
+
+    [index] = reflector.get_indexes(connection, "people")
+
+    assert index["column_names"] == [None, "id"]
+    assert index["expressions"] == ["normalized_name(name)", "id DESC"]
+    assert index["column_sorting"] == {"id": ("desc",)}
 
 
 def test_reflected_functional_text_can_be_recompiled(dialect):
@@ -622,3 +685,42 @@ def test_functional_index_alembic_autogenerate_is_stable(engine, functional_inde
         and difference[0] in {"add_index", "remove_index"}
     ]
     assert index_differences == []
+
+
+@pytest.mark.requires_informix
+def test_composite_functional_index_native_round_trip(
+    engine,
+    functional_index_objects,
+    name_factory,
+):
+    """Verify mixed UDR and ordinary keys through SYSINDICES reflection."""
+    objects = functional_index_objects
+    table = objects["table"]
+    index_name = name_factory("ix_func_mix_")
+    function_call = getattr(func, objects["function_name"])(table.c.name)
+    index = Index(
+        index_name,
+        function_call,
+        table.c.id.desc(),
+        informix_functional=True,
+    )
+
+    try:
+        with engine.begin() as connection:
+            index.create(connection)
+
+        with engine.connect() as connection:
+            reflected = _functional_index_by_name(
+                inspect(connection).get_indexes(objects["table_name"]),
+                index_name,
+            )
+
+        assert reflected["column_names"] == [None, "id"]
+        assert len(reflected["expressions"]) == 2
+        assert objects["function_name"].casefold() in reflected["expressions"][0].casefold()
+        assert reflected["expressions"][1].upper().endswith(" DESC")
+    finally:
+        with engine.connect() as connection:
+            with suppress(Exception):
+                index.drop(connection, checkfirst=True)
+                connection.commit()
