@@ -3,37 +3,58 @@ from __future__ import annotations
 import pytest
 
 from tools.official_suite_support import (
-    ensure_official_suite_ansi_database,
+    ansi_database_name,
+    ansi_test_dburi,
+    ensure_required_test_databases,
+    load_non_ansi_test_environment,
     load_official_suite_environment,
-    official_suite_dburi,
-    verify_official_suite_database,
+    non_ansi_database_name,
+    non_ansi_test_dburi,
+    verify_test_database,
 )
 
 
 @pytest.mark.requires_informix
 @pytest.mark.sqlalchemy_suite
-def test_official_suite_database_exists_and_is_ansi():
-    """Provision the disposable Docker database and certify ANSI mode.
+def test_required_test_databases_exist_with_expected_modes():
+    """Provision and certify the two isolated Docker test databases.
 
-    The operation is idempotent: it creates the configured database only when
-    it is absent. If a database with the same name already exists in non-ANSI
-    mode, the test fails without dropping or converting it.
+    * ``ifxalchemy_test`` is transactional and non-ANSI. It is used by the
+      package's normal integration tests.
+    * ``ifxalchemy_test_ansi`` is transactional and ANSI. It is used by the
+      official SQLAlchemy and Alembic suites so schema/owner tests are enabled.
+
+    Missing databases are created. Existing databases are never dropped or
+    converted; a mode mismatch fails explicitly.
     """
-    load_official_suite_environment()
-    dburi = official_suite_dburi()
+    load_non_ansi_test_environment(required=False)
+    load_official_suite_environment(required=False)
 
-    provisioned = ensure_official_suite_ansi_database(
-        dburi
+    provisioned = ensure_required_test_databases()
+
+    non_ansi = provisioned["non_ansi"]
+    ansi = provisioned["ansi"]
+
+    assert non_ansi["database"].casefold() == (
+        non_ansi_database_name().casefold()
+    )
+    assert non_ansi["is_ansi_database"] is False
+    assert non_ansi["is_logging"] is True
+
+    assert ansi["database"].casefold() == ansi_database_name().casefold()
+    assert ansi["is_ansi_database"] is True
+    assert ansi["is_logging"] is True
+
+    non_ansi_verified = verify_test_database(
+        non_ansi_test_dburi(),
+        expected_database=non_ansi_database_name(),
+        expected_ansi=False,
+    )
+    ansi_verified = verify_test_database(
+        ansi_test_dburi(),
+        expected_database=ansi_database_name(),
+        expected_ansi=True,
     )
 
-    assert provisioned["is_ansi_database"] is True
-
-    verified = verify_official_suite_database(
-        dburi,
-        require_empty=False,
-    )
-
-    assert verified["database"].casefold() == (
-        provisioned["database"].casefold()
-    )
-    assert verified["is_ansi_database"] is True
+    assert non_ansi_verified["is_ansi_database"] is False
+    assert ansi_verified["is_ansi_database"] is True

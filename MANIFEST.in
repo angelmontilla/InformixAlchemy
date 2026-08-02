@@ -1,3 +1,7 @@
 recursive-include test *.py
+recursive-include tools *.py
 
-include README* LICENSE run_tests.py
+include README* LICENSE
+include run_tests.py run_alembic_tests.py run_sql_expression_certification.py
+include requirements-dev.txt pytest.ini
+include .env.informix.example .env.official-suites.example

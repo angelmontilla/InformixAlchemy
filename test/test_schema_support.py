@@ -40,7 +40,7 @@ def test_schema_qualified_table_compilation():
     )
 
     assert "CREATE TABLE reporting.orders" in create_sql
-    assert "FROM reporting.orders" in select_sql
+    assert "FROM reporting.orders AS orders" in select_sql
 
 
 def test_cross_schema_foreign_key_compilation():
@@ -116,9 +116,7 @@ def test_schema_qualified_sequence_compilation():
     assert drop_sql == (
         "DROP SEQUENCE reporting.orders_id_seq"
     )
-    assert nextval_sql == (
-        "reporting.orders_id_seq.NEXTVAL"
-    )
+    assert nextval_sql == "'REPORTING'.orders_id_seq.NEXTVAL"
 
 
 def test_schema_translate_map_compilation():
@@ -161,6 +159,95 @@ def test_schema_translate_map_compilation():
     )
 
     assert "CREATE TABLE physical_owner.orders" in table_sql
-    assert sequence_sql == (
-        "physical_owner.orders_id_seq.NEXTVAL"
+    assert sequence_sql == "'PHYSICAL_OWNER'.orders_id_seq.NEXTVAL"
+
+
+def test_same_named_default_and_schema_tables_receive_distinct_aliases():
+    dialect = IfxDialect_pyodbc()
+    metadata = MetaData()
+    local_table = Table(
+        "some_table", metadata, Column("id", Integer), Column("some_table_id", Integer)
     )
+    owned_table = Table(
+        "some_table", metadata, Column("id", Integer), schema="test_schema"
+    )
+    statement = select(local_table, owned_table.c.id).select_from(
+        local_table.join(
+            owned_table, local_table.c.some_table_id == owned_table.c.id
+        )
+    )
+    compiled = str(statement.compile(dialect=dialect))
+    assert "FROM some_table AS some_table_1" in compiled
+    assert "JOIN test_schema.some_table AS some_table" in compiled
+
+
+def test_sequence_runtime_schema_translate_uses_authorization_owner():
+    from types import SimpleNamespace
+    from IfxAlchemy.base import IfxExecutionContext
+
+    dialect = IfxDialect_pyodbc()
+    captured = {}
+    context = SimpleNamespace(
+        identifier_preparer=dialect.identifier_preparer,
+        execution_options={
+            "schema_translate_map": {"alt_schema": "test_schema"}
+        },
+    )
+
+    def execute_scalar(statement, type_):
+        captured["statement"] = statement
+        captured["type"] = type_
+        return 1
+
+    context._execute_scalar = execute_scalar
+    sequence = Sequence("noret_sch_id_seq", schema="alt_schema")
+    result = IfxExecutionContext.fire_sequence(context, sequence, Integer())
+    assert result == 1
+    assert captured["statement"] == (
+        "SELECT FIRST 1 'TEST_SCHEMA'.noret_sch_id_seq.NEXTVAL FROM systables"
+    )
+
+
+def test_same_named_schema_table_inside_subquery_keeps_local_alias():
+    """Owner-qualified homonyms remain addressable inside a subquery."""
+    dialect = IfxDialect_pyodbc()
+    metadata = MetaData()
+
+    local_table = Table(
+        "some_table",
+        metadata,
+        Column("id", Integer),
+        Column("some_table_id", Integer),
+    )
+    owned_table = Table(
+        "some_table",
+        metadata,
+        Column("id", Integer),
+        schema="test_schema",
+    )
+
+    subquery = (
+        select(local_table)
+        .join_from(
+            local_table,
+            owned_table,
+            local_table.c.some_table_id == owned_table.c.id,
+        )
+        .where(local_table.c.id == 1)
+        .subquery()
+    )
+    statement = (
+        select(local_table, subquery.c.id)
+        .join_from(
+            local_table,
+            subquery,
+            local_table.c.some_table_id == subquery.c.id,
+        )
+        .where(local_table.c.id == 1)
+    )
+
+    compiled = str(statement.compile(dialect=dialect))
+
+    assert "FROM some_table AS some_table_1" in compiled
+    assert "JOIN test_schema.some_table AS some_table" in compiled
+    assert "some_table_1.some_table_id = some_table.id" in compiled

@@ -147,7 +147,7 @@ def test_self_referential_fk_is_deferred_until_after_create(
 
 
 @pytest.mark.ddl_compiler
-def test_schema_constraint_names_are_physically_namespaced(dialect):
+def test_schema_constraint_names_use_physical_namespace(dialect):
     table = Table(
         "ifx_ns_users",
         MetaData(),
@@ -175,7 +175,7 @@ def test_schema_constraint_names_are_physically_namespaced(dialect):
 
 
 @pytest.mark.ddl_compiler
-def test_schema_foreign_key_name_is_physically_namespaced(dialect):
+def test_schema_foreign_key_name_uses_physical_namespace(dialect):
     metadata = MetaData()
     parent = Table(
         "ifx_ns_parent",
@@ -1429,3 +1429,51 @@ def test_drop_named_foreign_key_uses_drop_constraint(dialect):
         "DROP CONSTRAINT FK_IFX_DROP_PARENT"
     )
     assert "DROP FOREIGN KEY" not in compiled
+
+
+@pytest.mark.ddl_compiler
+def test_ansi_owner_constraints_avoid_cross_owner_catalog_collisions(dialect):
+    """Equal logical names remain safe when one table has an ANSI owner.
+
+    The official SQLAlchemy ComponentReflectionTest creates the same named
+    CHECK constraints for the default owner and ``test_schema``.  Informix can
+    record both constraints under the executing authorization identifier, so
+    their physical catalog names must differ even though SQLAlchemy must keep
+    the logical name unchanged.
+    """
+    logical_name = "zz_test2_gt_zero"
+
+    default_table = Table(
+        "users",
+        MetaData(),
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("test2", Integer),
+        CheckConstraint("test2 > 0", name=logical_name),
+    )
+    schema_table = Table(
+        "users",
+        MetaData(),
+        Column("id", Integer, primary_key=True, autoincrement=False),
+        Column("test2", Integer),
+        CheckConstraint("test2 > 0", name=logical_name),
+        schema="test_schema",
+    )
+
+    default_sql = _upper_sql(
+        str(CreateTable(default_table).compile(dialect=dialect))
+    )
+    schema_sql = _upper_sql(
+        str(CreateTable(schema_table).compile(dialect=dialect))
+    )
+
+    assert "CONSTRAINT ZZ_TEST2_GT_ZERO" in default_sql
+    assert "CONSTRAINT TEST_SCHEMA__ZZ_TEST2_GT_ZERO" in schema_sql
+
+    default_check = next(
+        c for c in default_table.constraints if isinstance(c, CheckConstraint)
+    )
+    schema_check = next(
+        c for c in schema_table.constraints if isinstance(c, CheckConstraint)
+    )
+    assert default_check.name == logical_name
+    assert schema_check.name == logical_name

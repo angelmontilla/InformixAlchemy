@@ -275,7 +275,7 @@ def test_dml_capability_flags_are_explicit():
     assert dialect.update_returning is False
     assert dialect.delete_returning is False
     assert dialect.use_insertmanyvalues is False
-    assert dialect.supports_identity_columns is False
+    assert dialect.supports_identity_columns is True
 
 
 @pytest.mark.sqlalchemy_suite

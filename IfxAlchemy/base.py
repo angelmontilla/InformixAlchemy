@@ -48,6 +48,24 @@ from sqlalchemy.engine import default
 from . import reflection as ifx_reflection
 from . import sqla_compat
 from .document import BSON, JSON
+from .comments import (
+    COLUMN_COMMENT_CATALOG,
+    TABLE_COMMENT_CATALOG,
+    encode_comment,
+    ensure_comment_catalog,
+    is_comment_ddl,
+)
+from .identity import (
+    _drop_ifx_identity_sequences,
+    _prepare_ifx_identity_sequences,
+    _materialize_ifx_identity_sequence,
+    _materialize_ifx_identity_sequences_for_table,
+    identity_sequence_for_column,
+    install_identity_event_listeners,
+    iter_ifx_identity_sequences,
+    register_ifx_identity_sequence,
+    register_ifx_identity_sequences_for_table,
+)
 from .indexes import (
     AlterIndexCluster,
     SetIndexMode,
@@ -131,6 +149,8 @@ event.listen(
     _create_ifx_deferred_self_referential_fks,
     propagate=True,
 )
+
+install_identity_event_listeners()
 
 # as documented from:
 RESERVED_WORDS = {
@@ -466,6 +486,12 @@ def _get_ifx_autoincrement_type_name(column):
     if type_name in {"SERIAL", "SERIAL8", "BIGSERIAL"}:
         return type_name
 
+    # An explicit SQLAlchemy Identity contract is emulated by a private
+    # sequence.  It must remain an ordinary INTEGER/BIGINT column; converting
+    # it to SERIAL would discard start/increment/bounds/cache/cycle options.
+    if getattr(column, "identity", None) is not None:
+        return type_name
+
     table = getattr(column, "table", None)
     autoincrement_column = sqla_compat.get_table_autoincrement_column(table)
     if autoincrement_column is not column:
@@ -477,6 +503,44 @@ def _get_ifx_autoincrement_type_name(column):
         return "SERIAL"
 
     return type_name
+
+
+def _ifx_sequence_owner_literal(owner):
+    """Render an Informix authorization identifier for NEXTVAL/CURRVAL.
+
+    Informix DDL accepts ``owner.sequence`` while sequence value expressions
+    use the authorization-owner form expected by the dialect's ANSI schema
+    contract: ``'OWNER'.sequence.NEXTVAL``.  Unquoted SQLAlchemy schemas are
+    folded to uppercase; explicitly quoted names preserve their spelling.
+    """
+    if owner in (None, ""):
+        return None
+
+    quote_flag = getattr(owner, "quote", None)
+    rendered = str(owner)
+    if quote_flag is not True:
+        rendered = rendered.upper()
+    return "'" + rendered.replace("'", "''") + "'"
+
+
+_IFX_NO_SCHEMA_OVERRIDE = object()
+
+
+def _ifx_sequence_nextval_name(
+    preparer,
+    sequence,
+    schema_override=_IFX_NO_SCHEMA_OVERRIDE,
+):
+    schema = (
+        preparer.schema_for_object(sequence)
+        if schema_override is _IFX_NO_SCHEMA_OVERRIDE
+        else schema_override
+    )
+    sequence_name = preparer.quote(sequence.name)
+    owner = _ifx_sequence_owner_literal(schema)
+    if owner is None:
+        return sequence_name
+    return f"{owner}.{sequence_name}"
 
 
 def _get_ifx_lastrowid_query(column):
@@ -1429,6 +1493,66 @@ class IfxCompiler(compiler.SQLCompiler):
 
         return " ".join(clauses)
 
+    def visit_table(
+        self,
+        table,
+        asfrom=False,
+        iscrud=False,
+        ashint=False,
+        fromhints=None,
+        use_schema=True,
+        from_linter=None,
+        ambiguous_table_name_map=None,
+        enclosing_alias=None,
+        **kwargs,
+    ):
+        """Alias owner-qualified tables to their local table name.
+
+        Informix accepts ``owner.table`` in FROM, but column references are
+        rendered as ``table.column``.  An explicit alias keeps those two forms
+        consistent and also disambiguates a default-owner table from a table
+        with the same name in another owner namespace.
+        """
+        rendered = super().visit_table(
+            table,
+            asfrom=asfrom,
+            iscrud=iscrud,
+            ashint=ashint,
+            fromhints=fromhints,
+            use_schema=use_schema,
+            from_linter=from_linter,
+            ambiguous_table_name_map=ambiguous_table_name_map,
+            enclosing_alias=enclosing_alias,
+            **kwargs,
+        )
+
+        if not (asfrom or ashint) or iscrud:
+            return rendered
+
+        # ``enclosing_alias`` is also propagated while compiling nested
+        # SELECTs/subqueries.  Suppress the implicit local-name alias only
+        # when this exact table is already the element of an explicit
+        # SQLAlchemy Alias.  Treating every non-None enclosing alias as a
+        # reason to skip it leaves owner-qualified same-named tables rendered
+        # as ``owner.table`` while their columns are rendered as
+        # ``table.column``, which Informix resolves against the wrong FROM
+        # element (or reports -217).
+        if (
+            enclosing_alias is not None
+            and getattr(enclosing_alias, "element", None) is table
+        ):
+            return rendered
+
+        effective_schema = self.preparer.schema_for_object(table)
+        if not (use_schema and effective_schema):
+            return rendered
+
+        alias_name = self.preparer.quote(table.name)
+        suffix = self.get_render_as_alias_suffix(alias_name)
+        if not rendered.endswith(suffix):
+            rendered += suffix
+        return rendered
+
     def visit_column(
         self,
         column,
@@ -1491,6 +1615,11 @@ class IfxCompiler(compiler.SQLCompiler):
         parameter sets and to tables that expose an autoincrement column.
         Other empty INSERT shapes keep SQLAlchemy's normal CompileError.
         """
+        # Materialize explicit Identity sequences before SQLAlchemy builds the
+        # CRUD parameter list.  Their Sequence defaults are then pre-executed
+        # and included in INSERT even when the user supplied no values.
+        _materialize_ifx_identity_sequences_for_table(insert_stmt.table)
+
         is_empty_parameter_set = (
             self.column_keys == []
             and not insert_stmt._values
@@ -1501,7 +1630,13 @@ class IfxCompiler(compiler.SQLCompiler):
         if is_empty_parameter_set:
             autoincrement_column = insert_stmt.table._autoincrement_column
 
-            if autoincrement_column is not None:
+            # Legacy implicit autoincrement remains SERIAL and uses zero to
+            # request the next value.  Explicit Identity columns have a
+            # pre-executed private Sequence default and must not be rewritten.
+            if (
+                autoincrement_column is not None
+                and getattr(autoincrement_column, "identity", None) is None
+            ):
                 insert_stmt = insert_stmt.values(
                     {autoincrement_column: 0}
                 )
@@ -2365,7 +2500,18 @@ class IfxCompiler(compiler.SQLCompiler):
         return self.process(paged, asfrom=asfrom, **kwargs)
 
     def visit_sequence(self, sequence, **kw):
-        return "%s.NEXTVAL" % self.preparer.format_sequence(sequence)
+        schema = self.preparer.schema_for_object(sequence)
+        if str(schema or "").startswith("__[SCHEMA_"):
+            # Preserve SQLAlchemy's schema-translation token verbatim.  The
+            # Informix preparer wraps the translated owner after replacement.
+            return "%s.%s.NEXTVAL" % (
+                schema,
+                self.preparer.quote(sequence.name),
+            )
+        return "%s.NEXTVAL" % _ifx_sequence_nextval_name(
+            self.preparer,
+            sequence,
+        )
 
     def visit_function(self, func, add_to_result_map=None, **kwargs):
         if add_to_result_map is not None:
@@ -2641,6 +2787,142 @@ class IfxCompiler(compiler.SQLCompiler):
 class IfxDDLCompiler(compiler.DDLCompiler):
 
     _WRITABLE_TABLE_LOCK_LEVELS = frozenset({"PAGE", "ROW"})
+
+    def _comment_catalog_name(self, identifier):
+        value = str(identifier)
+        quote = getattr(identifier, "quote", None)
+        if quote is True:
+            return value
+        if quote is False:
+            return value.lower()
+        if sqla_compat.identifier_requires_quotes(self.preparer, value):
+            return value
+        return value.lower()
+
+    def _comment_literal(self, value):
+        return self.sql_compiler.render_literal_value(
+            value,
+            sa_types.String(),
+        )
+
+    def _comment_owner_predicate(self, table, alias="t"):
+        schema = table.schema
+        if schema is None:
+            return f"LOWER({alias}.owner) = LOWER(USER)"
+
+        schema_value = str(schema)
+        schema_literal = self._comment_literal(schema_value)
+        quote = getattr(schema, "quote", None)
+        if quote is True:
+            return f"{alias}.owner = {schema_literal}"
+        if quote is False:
+            return f"LOWER({alias}.owner) = LOWER({schema_literal})"
+        if sqla_compat.identifier_requires_quotes(
+            self.preparer, schema_value
+        ):
+            return f"{alias}.owner = {schema_literal}"
+
+        return f"LOWER({alias}.owner) = LOWER({schema_literal})"
+
+    def _comment_table_predicates(self, table, alias="t"):
+        table_name = self._comment_catalog_name(table.name)
+        table_literal = self._comment_literal(table_name)
+        return (
+            f"{alias}.tabname = {table_literal} "
+            f"AND {self._comment_owner_predicate(table, alias)} "
+            f"AND {alias}.tabtype IN ('T', 'V')"
+        )
+
+    def _table_comment_source(self, table, encoded_comment):
+        encoded_literal = self._comment_literal(encoded_comment)
+        predicates = self._comment_table_predicates(table)
+        return (
+            "SELECT t.tabid, t.owner AS object_owner, "
+            "t.tabname AS object_name, "
+            f"{encoded_literal} AS comment_value "
+            "FROM systables t "
+            f"WHERE {predicates}"
+        )
+
+    def _column_comment_source(self, column, encoded_comment):
+        table = column.table
+        encoded_literal = self._comment_literal(encoded_comment)
+        column_name = self._comment_catalog_name(column.name)
+        column_literal = self._comment_literal(column_name)
+        predicates = self._comment_table_predicates(table)
+        return (
+            "SELECT c.tabid, c.colno, t.owner AS object_owner, "
+            "t.tabname AS object_name, c.colname AS column_name, "
+            f"{encoded_literal} AS comment_value "
+            "FROM systables t JOIN syscolumns c ON c.tabid = t.tabid "
+            f"WHERE {predicates} AND c.colname = {column_literal}"
+        )
+
+    def visit_set_table_comment(self, create, **kw):
+        _ = kw
+        encoded = encode_comment(create.element.comment)
+        source = self._table_comment_source(create.element, encoded)
+        return (
+            f"MERGE INTO {TABLE_COMMENT_CATALOG} AS target "
+            f"USING ({source}) AS source "
+            "ON target.tabid = source.tabid "
+            "WHEN MATCHED THEN UPDATE SET "
+            "target.object_owner = source.object_owner, "
+            "target.object_name = source.object_name, "
+            "target.comment_value = source.comment_value "
+            "WHEN NOT MATCHED THEN INSERT "
+            "(tabid, object_owner, object_name, comment_value) "
+            "VALUES (source.tabid, source.object_owner, "
+            "source.object_name, source.comment_value)"
+        )
+
+    def visit_drop_table_comment(self, drop, **kw):
+        _ = kw
+        predicates = self._comment_table_predicates(drop.element)
+        return (
+            f"DELETE FROM {TABLE_COMMENT_CATALOG} "
+            "WHERE tabid IN ("
+            "SELECT t.tabid FROM systables t "
+            f"WHERE {predicates})"
+        )
+
+    def visit_set_column_comment(self, create, **kw):
+        _ = kw
+        encoded = encode_comment(create.element.comment)
+        source = self._column_comment_source(create.element, encoded)
+        return (
+            f"MERGE INTO {COLUMN_COMMENT_CATALOG} AS target "
+            f"USING ({source}) AS source "
+            "ON target.tabid = source.tabid "
+            "AND target.colno = source.colno "
+            "WHEN MATCHED THEN UPDATE SET "
+            "target.object_owner = source.object_owner, "
+            "target.object_name = source.object_name, "
+            "target.column_name = source.column_name, "
+            "target.comment_value = source.comment_value "
+            "WHEN NOT MATCHED THEN INSERT "
+            "(tabid, colno, object_owner, object_name, "
+            "column_name, comment_value) "
+            "VALUES (source.tabid, source.colno, source.object_owner, "
+            "source.object_name, source.column_name, "
+            "source.comment_value)"
+        )
+
+    def visit_drop_column_comment(self, drop, **kw):
+        _ = kw
+        column = drop.element
+        predicates = self._comment_table_predicates(column.table)
+        column_name = self._comment_catalog_name(column.name)
+        column_literal = self._comment_literal(column_name)
+        return (
+            f"DELETE FROM {COLUMN_COMMENT_CATALOG} "
+            "WHERE EXISTS ("
+            "SELECT 1 FROM systables t "
+            "JOIN syscolumns c ON c.tabid = t.tabid "
+            f"WHERE {predicates} AND c.colname = {column_literal} "
+            f"AND {COLUMN_COMMENT_CATALOG}.tabid = c.tabid "
+            f"AND {COLUMN_COMMENT_CATALOG}.colno = c.colno)"
+        )
 
     def _format_fragment_identifier(self, value):
         """Quote one validated Informix fragment/dbspace identifier."""
@@ -3538,6 +3820,11 @@ class IfxDDLCompiler(compiler.DDLCompiler):
         return default_sql
 
     def get_column_specification(self, column, **kw):
+        # Explicit SQLAlchemy Identity is emulated with a private Sequence.
+        # Materialize it during DDL compilation so later INSERT compilation
+        # sees the pre-executed default even when no MetaData event has fired.
+        _materialize_ifx_identity_sequence(column)
+
         col_spec = [self.preparer.format_column(column)]
 
         rendered_type = self.dialect.type_compiler.process(
@@ -4394,8 +4681,45 @@ class IfxIdentifierPreparer(compiler.IdentifierPreparer):
     reserved_words = RESERVED_WORDS
     illegal_initial_characters = set("0123456789_$")
 
+    _ifx_translated_sequence_re = re.compile(
+        r'(?P<owner>"(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*)'
+        r'\.(?P<sequence>"(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*)'
+        r'\.NEXTVAL'
+    )
+
+    def _render_schema_translates(self, statement, schema_translate_map):
+        rendered = super()._render_schema_translates(
+            statement,
+            schema_translate_map,
+        )
+
+        def owner_qualified_sequence(match):
+            owner = match.group("owner")
+            if owner.startswith('"') and owner.endswith('"'):
+                owner_text = owner[1:-1].replace('""', '"')
+            else:
+                owner_text = owner.upper()
+            owner_literal = "'" + owner_text.replace("'", "''") + "'"
+            return (
+                owner_literal
+                + "."
+                + match.group("sequence")
+                + ".NEXTVAL"
+            )
+
+        return self._ifx_translated_sequence_re.sub(
+            owner_qualified_sequence,
+            rendered,
+        )
+
 
 class IfxExecutionContext(default.DefaultExecutionContext):
+    def _ifx_prepare_comment_catalog(self):
+        compiled = getattr(self, "compiled", None)
+        statement = getattr(compiled, "statement", None)
+        if is_comment_ddl(statement):
+            ensure_comment_catalog(self.cursor)
+
     def _ifx_apply_runtime_optimizer_directives(self):
         directives = self.execution_options.get(
             INFORMIX_OPTIMIZER_DIRECTIVES
@@ -4431,10 +4755,20 @@ class IfxExecutionContext(default.DefaultExecutionContext):
         )
 
     def pre_exec(self):
+        self._ifx_prepare_comment_catalog()
         self._ifx_apply_runtime_optimizer_directives()
 
     def fire_sequence(self, seq, type_):
-        sequence_name = self.identifier_preparer.format_sequence(seq)
+        schema = seq.schema
+        translate_map = self.execution_options.get("schema_translate_map") or {}
+        if schema in translate_map:
+            schema = translate_map[schema]
+
+        sequence_name = _ifx_sequence_nextval_name(
+            self.identifier_preparer,
+            seq,
+            schema_override=schema,
+        )
         return self._execute_scalar(
             "SELECT FIRST 1 "
             + sequence_name
@@ -4585,6 +4919,9 @@ class IfxDialect(default.DefaultDialect):
     supports_unicode_statements = False
     supports_unicode_binds = False
     returns_unicode_strings = False
+    supports_comments = True
+    inline_comments = False
+    supports_constraint_comments = False
     postfetch_lastrowid = True
     supports_sane_rowcount = True
     supports_sane_multi_rowcount = True
@@ -4596,9 +4933,9 @@ class IfxDialect(default.DefaultDialect):
     supports_multivalues_insert = False
     use_insertmanyvalues = False
     use_insertmanyvalues_wo_returning = False
-    supports_identity_columns = False
+    supports_identity_columns = True
     supports_schemas = False
-    preexecute_sequences = False
+    preexecute_sequences = True
     supports_alter = True
     supports_sequences = True
     sequences_optional = True

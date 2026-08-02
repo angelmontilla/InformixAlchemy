@@ -9,6 +9,7 @@ from sqlalchemy.dialects import registry
 
 from tools.official_suite_support import (
     PROJECT_ROOT,
+    ensure_required_test_databases,
     load_official_suite_environment,
     official_suite_dburi,
     resolve_junit_file,
@@ -87,6 +88,8 @@ def main(
 
         dburi = official_suite_dburi()
 
+        provisioned = ensure_required_test_databases()
+
         target = (
             verify_official_suite_database(
                 dburi
@@ -118,6 +121,15 @@ def main(
 
     print(
         f"Target: {target['safe_url']}",
+        file=sys.stderr,
+    )
+
+    print(
+        "Test databases: "
+        f"non-ANSI={provisioned['non_ansi']['database']} "
+        f"({'created' if provisioned['non_ansi']['created'] else 'present'}), "
+        f"ANSI={provisioned['ansi']['database']} "
+        f"({'created' if provisioned['ansi']['created'] else 'present'})",
         file=sys.stderr,
     )
 

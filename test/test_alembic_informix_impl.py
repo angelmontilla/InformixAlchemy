@@ -456,3 +456,41 @@ def test_alembic_native_advanced_index_set_has_no_false_differences() -> None:
     assert all(result.is_equal for result in results), [
         result.message for result in results if not result.is_equal
     ]
+
+
+def test_alembic_offline_comments_render_catalog_once() -> None:
+    pytest.importorskip("alembic")
+    from io import StringIO
+
+    from alembic.migration import MigrationContext
+    from sqlalchemy import Column, Integer, MetaData, Table
+
+    from IfxAlchemy.comments import (
+        COLUMN_COMMENT_CATALOG,
+        TABLE_COMMENT_CATALOG,
+    )
+
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect=IfxDialect(),
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    table = Table(
+        "commented",
+        MetaData(),
+        Column("id", Integer, comment="columna 試✨"),
+        comment="tabla 🐍",
+    )
+
+    context.impl.create_table_comment(table)
+    context.impl.create_column_comment(table.c.id)
+    context.impl.alter_column("commented", "id", comment=None)
+
+    sql = output.getvalue()
+    assert sql.count(f"CREATE TABLE IF NOT EXISTS {TABLE_COMMENT_CATALOG}") == 1
+    assert sql.count(f"CREATE TABLE IF NOT EXISTS {COLUMN_COMMENT_CATALOG}") == 1
+    assert f"MERGE INTO {TABLE_COMMENT_CATALOG}" in sql
+    assert f"MERGE INTO {COLUMN_COMMENT_CATALOG}" in sql
+    assert f"DELETE FROM {COLUMN_COMMENT_CATALOG}" in sql
+    assert "試✨" not in sql
+    assert "🐍" not in sql

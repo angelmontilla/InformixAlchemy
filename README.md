@@ -397,9 +397,27 @@ Then run:
 python -m pytest -m requires_informix -W error
 ```
 
-### Official SQLAlchemy suite
+### Docker test databases
 
-The suite is destructive and must target a dedicated database. Copy the local template:
+The test infrastructure uses two isolated databases on the same Informix
+server:
+
+| Database | Mode | Used by |
+|---|---|---|
+| `ifxalchemy_test` | Transactional non-ANSI (`WITH LOG`) | Package and normal integration tests |
+| `ifxalchemy_test_ansi` | ANSI (`WITH LOG MODE ANSI`) | Official SQLAlchemy and Alembic suites, including owner/schema tests |
+
+Both databases are provisioned idempotently. The helper first queries
+`sysmaster:sysdatabases` through ODBC and closes that connection. If a database
+is absent, it executes the validated `CREATE DATABASE` statement through
+`dbaccess - -` inside the Informix Docker container, without a current database.
+This server-only execution is required for `CREATE DATABASE`; running the DDL on
+an ODBC connection already logged into `sysmaster` is rejected by Informix.
+Existing databases are never dropped or converted automatically. A database
+that exists with the wrong mode or without transaction logging causes an
+explicit failure.
+
+Copy the local template:
 
 ```bash
 cp .env.official-suites.example .env.official-suites
@@ -411,26 +429,41 @@ On Windows:
 copy .env.official-suites.example .env.official-suites
 ```
 
-Review the values and run:
+Provision and verify both databases:
+
+```bash
+python -m pytest test/test_official_ansi_database.py -v
+```
+
+A normal project test run uses `ifxalchemy_test` automatically:
+
+```bash
+python -m pytest
+```
+
+The official SQLAlchemy suite uses only `ifxalchemy_test_ansi`, enabling the
+requirements that depend on isolated owner namespaces:
 
 ```bash
 python run_tests.py
 ```
 
-The runner:
-
-- loads exclusively `.env.official-suites`;
-- requires explicit destructive authorization;
-- blocks forbidden databases;
-- verifies database identity via `DBINFO('dbname')`;
-- inventories residual objects before running the suite;
-- generates a JUnit report in `artifacts/`.
-
-### External Alembic suite
+The Alembic external suite uses the same ANSI database:
 
 ```bash
 python run_alembic_tests.py
 ```
+
+Legacy variables such as `INFORMIX_SQLALCHEMY_URL` and
+`INFORMIX_SQLALCHEMY_SUITE_URL` are accepted as connection seeds, but their
+database component is replaced with the correct profile database. This prevents
+an old `.env.official-suites` from routing ANSI tests to `ifxalchemy_test`.
+
+The normal pytest configuration loads `.env.informix`; the official runners
+load `.env.official-suites`. Dotenv files never overwrite variables already
+supplied by the shell or CI. The SQLAlchemy provisioning hook creates the
+`test_schema` and `test_schema_2` authorization identifiers only after the
+connected dialect has confirmed that the target database is ANSI.
 
 ### SQL expression certification
 
@@ -442,19 +475,80 @@ python run_sql_expression_certification.py
 
 | Variable | Use |
 |---|---|
-| `INFORMIX_SQLALCHEMY_URL` | Project integration tests |
-| `INFORMIX_SQLALCHEMY_SUITE_URL` | Dedicated database for the official suite |
-| `INFORMIX_SQLALCHEMY_SUITE_EXPECTED_DATABASE` | Exact name expected by the safety guard |
-| `INFORMIX_SQLALCHEMY_SUITE_ALLOW_DESTRUCTIVE` | Explicit authorization for destructive cleanup |
-| `INFORMIX_SQLALCHEMY_SUITE_JUNIT_XML` | Optional path for the JUnit report |
+| `IFXALCHEMY_NON_ANSI_DATABASE` | Non-ANSI database name; default `ifxalchemy_test` |
+| `IFXALCHEMY_ANSI_DATABASE` | ANSI database name; default `ifxalchemy_test_ansi` |
+| `INFORMIX_SQLALCHEMY_NON_ANSI_URL` | Explicit URL for normal/integration tests |
+| `INFORMIX_SQLALCHEMY_ANSI_URL` | Explicit URL for official SQLAlchemy/Alembic suites |
+| `IFXALCHEMY_CREATE_TEST_DATABASES_IF_MISSING` | Create either database when absent; default `true` |
+| `IFXALCHEMY_ADMIN_DATABASE` | Administrative database used for creation; default `sysmaster` |
+| `IFXALCHEMY_DOCKER_EXECUTABLE` | Docker CLI executable; default `docker` |
+| `IFXALCHEMY_DOCKER_CONTAINER` | Informix container name; default `ifx` |
+| `IFXALCHEMY_DOCKER_USER` | Container user that runs DB-Access; default `informix` |
+| `IFXALCHEMY_DOCKER_DBACCESS` | DB-Access executable inside the container; default `dbaccess` |
+| `IFXALCHEMY_DOCKER_TIMEOUT` | Maximum database-creation time in seconds; default `120` |
+| `IFXALCHEMY_NON_ANSI_DATABASE_DBSPACE` | Optional dbspace for the non-ANSI database |
+| `IFXALCHEMY_ANSI_DATABASE_DBSPACE` | Optional dbspace for the ANSI database |
+| `ALLOW_OFFICIAL_SUITE_DESTRUCTIVE_TESTS` | Authorizes destructive object cleanup in the ANSI suite database |
+| `OFFICIAL_SUITE_REQUIRE_EMPTY` | Require an empty ANSI target before running |
+| `SQLALCHEMY_SUITE_JUNIT` | Optional SQLAlchemy JUnit report path |
+| `ALEMBIC_SUITE_JUNIT` | Optional Alembic JUnit report path |
 
-Do not version `.env.informix` or `.env.official-suites`. Use only their `.example` templates as documentation.
+Do not version `.env.informix` or `.env.official-suites`. Use their `.example`
+templates as documentation.
+
+## Table and column comments
+
+Informix 14.10/15.0 does not expose persistent table or column remarks in
+`SYSTABLES` or `SYSCOLUMNS`, and it has no native `COMMENT ON TABLE` /
+`COMMENT ON COLUMN` metadata DDL compatible with SQLAlchemy. The dialect
+therefore implements the standard SQLAlchemy comment API through two internal
+sidecar tables:
+
+```text
+ifx_sqla_table_comments
+ifx_sqla_column_comments
+```
+
+The tables are created lazily before the first `SetTableComment`,
+`SetColumnComment`, `DropTableComment`, or `DropColumnComment` operation. They
+are excluded from normal `Inspector.get_table_names()` results. Table rows are
+linked to `SYSTABLES.tabid`; column rows use `(tabid, colno)` and also retain
+the physical owner and object names to reject stale metadata.
+
+Comment text is encoded as UTF-8 hexadecimal ASCII before storage in
+`LVARCHAR(28672)`. This allows non-Latin text and emoji to round-trip even when
+the test database uses `DB_LOCALE=en_US.819`. The effective limit is 14,334
+UTF-8 bytes per comment; the reduced LVARCHAR size leaves safe space below
+Informix's 32,767-byte row limit for the catalog keys and row overhead.
+
+Supported SQLAlchemy APIs include:
+
+- comments declared on `Table` and `Column`;
+- `SetTableComment` and `DropTableComment`;
+- `SetColumnComment` and `DropColumnComment`;
+- `Inspector.get_table_comment()`;
+- column comments returned by `Inspector.get_columns()`;
+- batched `Inspector.get_multi_table_comment()`;
+- Alembic online operations and offline `--sql` rendering.
+
+Nonexistent objects are omitted by multi-reflection and raise
+`NoSuchTableError` in individual reflection. Views are reported with
+`{"text": None}` unless a sidecar row has explicitly been created for them.
+Temporary-table comments and constraint comments remain unsupported.
+
+Run the focused tests with:
+
+```bash
+python -m pytest test/test_comments.py -v
+python -m pytest test/test_comments_integration.py -v
+```
 
 ## Main structure
 
 ```text
 IfxAlchemy/
 ├── base.py          # dialect, SQL/DDL compilers and execution context
+├── comments.py      # locale-independent table/column comment sidecar
 ├── pyodbc.py        # DBAPI, ODBC URL, connection and driver conversions
 ├── reflection.py    # Informix catalog reflection
 ├── temporal.py      # temporal types and fractional precision
@@ -474,3 +568,21 @@ IfxAlchemy/
 ## License
 
 Apache License 2.0. See `LICENSE`.
+
+
+### DB-Access dentro del contenedor
+
+`docker exec` no abre un shell de inicio de sesión y puede no incluir
+`$INFORMIXDIR/bin` en `PATH`. El aprovisionador resuelve DB-Access dentro del
+contenedor en este orden:
+
+1. `IFXALCHEMY_DOCKER_DBACCESS`, si se configuró.
+2. `$INFORMIXDIR/bin/dbaccess`.
+3. `/opt/ibm/informix/bin/dbaccess`.
+4. `command -v dbaccess`.
+
+La configuración recomendada para la imagen oficial es:
+
+```dotenv
+IFXALCHEMY_DOCKER_DBACCESS=/opt/ibm/informix/bin/dbaccess
+```

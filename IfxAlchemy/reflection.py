@@ -33,6 +33,12 @@ from .temporal import IFXDateTime
 from .temporal import IFXTime
 from .complex import DISTINCT, LIST, MULTISET, ROW, SET, RowField
 from .indexes import _ReflectedAccessMethodParameters
+from .identity import identity_sequence_name
+from .comments import (
+    COLUMN_COMMENT_CATALOG,
+    TABLE_COMMENT_CATALOG,
+    decode_comment,
+)
 from .fragmentation import (
     AttachedIndexFragmentation,
     ExpressionFragmentation,
@@ -333,6 +339,87 @@ class IfxReflector(BaseReflector):
         if isinstance(value, str):
             return value.strip()
         return str(value).strip()
+
+    def _comment_catalog_exists(self, connection, catalog_name):
+        owner = self._resolved_owner(None)
+        row = connection.exec_driver_sql(
+            """
+            SELECT FIRST 1 t.tabid
+            FROM systables t
+            WHERE LOWER(t.tabname) = LOWER(?)
+              AND LOWER(t.owner) = LOWER(?)
+              AND t.tabtype = 'T'
+            """,
+            (catalog_name, owner),
+        ).first()
+        return row is not None
+
+    def _decode_comment_value(self, value):
+        try:
+            return decode_comment(value)
+        except ValueError as error:
+            util.warn(str(error))
+            return None
+
+    def _table_comment_for_tabid(
+        self,
+        connection,
+        tabid,
+        owner,
+        table_name,
+    ):
+        if not self._comment_catalog_exists(
+            connection,
+            TABLE_COMMENT_CATALOG,
+        ):
+            return None
+
+        row = connection.exec_driver_sql(
+            f"""
+            SELECT FIRST 1 c.comment_value
+            FROM {TABLE_COMMENT_CATALOG} c
+            WHERE c.tabid = ?
+              AND c.object_owner = ?
+              AND c.object_name = ?
+            """,
+            (int(tabid), owner, table_name),
+        ).first()
+        if row is None:
+            return None
+        return self._decode_comment_value(row[0])
+
+    def _column_comments_for_tabid(
+        self,
+        connection,
+        tabid,
+        owner,
+        table_name,
+    ):
+        if not self._comment_catalog_exists(
+            connection,
+            COLUMN_COMMENT_CATALOG,
+        ):
+            return {}
+
+        rows = connection.exec_driver_sql(
+            f"""
+            SELECT c.colno, c.column_name, c.comment_value
+            FROM {COLUMN_COMMENT_CATALOG} c
+            WHERE c.tabid = ?
+              AND c.object_owner = ?
+              AND c.object_name = ?
+            ORDER BY c.colno
+            """,
+            (int(tabid), owner, table_name),
+        ).fetchall()
+
+        comments = {}
+        for colno, column_name, comment_value in rows:
+            comments[int(colno)] = (
+                self._clean_str(column_name),
+                self._decode_comment_value(comment_value),
+            )
+        return comments
 
     def _clean_default_catalog_value(self, value):
         """Normalize a textual value read from sysdefaults.
@@ -2012,6 +2099,10 @@ class IfxReflector(BaseReflector):
             WHERE LOWER(t.owner) = LOWER(?)
               AND t.tabtype = 'T'
               AND t.tabid >= 100
+              AND LOWER(t.tabname) NOT IN (
+                  'ifx_sqla_table_comments',
+                  'ifx_sqla_column_comments'
+              )
             ORDER BY t.tabname
         """
         rows = connection.exec_driver_sql(sql_text, (owner,)).fetchall()
@@ -2330,11 +2421,31 @@ class IfxReflector(BaseReflector):
 
         return constraints
 
+    @reflection.cache
     def get_table_comment(self, connection, table_name, schema=None, **kw):
-        _ = (connection, table_name, schema, kw)
-        # Informix table comments are not currently reflected by this
-        # dialect; return the stable SQLAlchemy structure explicitly.
-        return {"text": None}
+        table_name, schema, _synonym = self._resolve_reflection_target(
+            connection,
+            table_name,
+            schema,
+            kw,
+        )
+        table_row = self._require_table_row(
+            connection,
+            table_name,
+            schema=schema,
+            tabtypes=("T", "V"),
+        )
+        tabid = int(table_row[0])
+        physical_table_name = self._clean_str(table_row[1])
+        physical_owner = self._clean_str(table_row[2])
+        return {
+            "text": self._table_comment_for_tabid(
+                connection,
+                tabid,
+                physical_owner,
+                physical_table_name,
+            )
+        }
 
     @staticmethod
     def _positive_catalog_int(value):
@@ -2949,6 +3060,55 @@ class IfxReflector(BaseReflector):
             )
         return reflected
 
+    def _identity_sequence_metadata(
+        self,
+        connection,
+        table_name,
+        column_name,
+        schema=None,
+    ):
+        """Reflect a private Identity sequence into SQLAlchemy metadata."""
+        owner = self.denormalize_name(self._resolved_owner(schema))
+        sequence_name = identity_sequence_name(
+            table_name,
+            column_name,
+            schema,
+        )
+        row = connection.exec_driver_sql(
+            """
+            SELECT FIRST 1
+                s.start_val,
+                s.inc_val,
+                s.min_val,
+                s.max_val,
+                s.cycle,
+                s.cache,
+                s.order
+            FROM syssequences s
+            JOIN systables t
+              ON t.tabid = s.tabid
+            WHERE LOWER(t.tabname) = LOWER(?)
+              AND LOWER(t.owner) = LOWER(?)
+            """,
+            (sequence_name, owner),
+        ).first()
+
+        if row is None:
+            return None
+
+        cycle = self._clean_str(row[4])
+        order = self._clean_str(row[6]) if len(row) > 6 else None
+        return {
+            "always": False,
+            "start": int(row[0]),
+            "increment": int(row[1]),
+            "minvalue": int(row[2]),
+            "maxvalue": int(row[3]),
+            "cycle": str(cycle).strip().upper() in {"1", "T", "Y", "TRUE"},
+            "cache": int(row[5]) if row[5] is not None else None,
+            "order": str(order).strip().upper() in {"1", "T", "Y", "TRUE"},
+        }
+
     @reflection.cache
     def get_columns(self, connection, table_name, schema=None, **kw):
         table_name, schema, _synonym = self._resolve_reflection_target(
@@ -2964,6 +3124,14 @@ class IfxReflector(BaseReflector):
             tabtypes=("T", "V"),
         )
         tabid = int(table_row[0])
+        physical_table_name = self._clean_str(table_row[1])
+        physical_owner = self._clean_str(table_row[2])
+        column_comments = self._column_comments_for_tabid(
+            connection,
+            tabid,
+            physical_owner,
+            physical_table_name,
+        )
 
         sql_text = """
             SELECT
@@ -2993,6 +3161,7 @@ class IfxReflector(BaseReflector):
         extended_metadata_cache = {}
         for row in rows:
             colname = self._clean_str(row[0])
+            colno = int(row[1])
             coltype = int(row[2])
             base_code = coltype & 0x00FF
             collength = int(row[3]) if row[3] is not None else 0
@@ -3037,15 +3206,33 @@ class IfxReflector(BaseReflector):
                     extended_maxlen=extended_maxlen,
                 )
 
-            sa_columns.append(
-                {
-                    "name": self.normalize_name(colname),
-                    "type": satype,
-                    "nullable": nullable,
-                    "default": self._decode_default(default_type, default_value, base_code),
-                    "autoincrement": autoincrement,
-                }
+            identity = self._identity_sequence_metadata(
+                connection,
+                physical_table_name,
+                colname,
+                schema=physical_owner,
             )
+            column_info = {
+                "name": self.normalize_name(colname),
+                "type": satype,
+                "nullable": nullable,
+                "default": self._decode_default(
+                    default_type,
+                    default_value,
+                    base_code,
+                ),
+                "autoincrement": bool(identity) or autoincrement,
+                "comment": (
+                    column_comments.get(colno, (None, None))[1]
+                    if column_comments.get(colno, (None, None))[0]
+                    in (None, colname)
+                    else None
+                ),
+            }
+            if identity is not None:
+                column_info["identity"] = identity
+
+            sa_columns.append(column_info)
 
         return sa_columns
 
@@ -3098,7 +3285,11 @@ class IfxReflector(BaseReflector):
             )
 
         return {
-            "name": self.normalize_name(constrname) if constrname else None,
+            "name": (
+                self._logical_reflected_name(constrname, schema=schema)
+                if constrname
+                else None
+            ),
             "constrained_columns": colnames,
         }
 
@@ -3897,7 +4088,11 @@ class IfxReflector(BaseReflector):
 
             unique_constraints.append(
                 {
-                    "name": self.normalize_name(constrname) if constrname else None,
+                    "name": (
+                        self._logical_reflected_name(constrname, schema=schema)
+                        if constrname
+                        else None
+                    ),
                     "column_names": colnames,
                 }
             )
@@ -4049,15 +4244,69 @@ class IfxReflector(BaseReflector):
         scope=ObjectScope.DEFAULT,
         **kw,
     ):
-        yield from self._multi_reflect(
+        names = self._table_names_for_multi(
             connection,
-            self.get_table_comment,
             schema=schema,
             filter_names=filter_names,
             kind=kind,
             scope=scope,
             **kw,
         )
+        if not names:
+            return
+
+        owner = self._resolved_owner(schema)
+        catalog_exists = self._comment_catalog_exists(
+            connection,
+            TABLE_COMMENT_CATALOG,
+        )
+        if catalog_exists:
+            rows = connection.exec_driver_sql(
+                f"""
+                SELECT t.tabname, c.comment_value
+                FROM systables t
+                LEFT OUTER JOIN {TABLE_COMMENT_CATALOG} c
+                  ON c.tabid = t.tabid
+                 AND c.object_owner = t.owner
+                 AND c.object_name = t.tabname
+                WHERE LOWER(t.owner) = LOWER(?)
+                  AND t.tabid >= 100
+                  AND t.tabtype IN ('T', 'V')
+                ORDER BY t.tabname
+                """,
+                (owner,),
+            ).fetchall()
+        else:
+            rows = connection.exec_driver_sql(
+                """
+                SELECT t.tabname
+                FROM systables t
+                WHERE LOWER(t.owner) = LOWER(?)
+                  AND t.tabid >= 100
+                  AND t.tabtype IN ('T', 'V')
+                ORDER BY t.tabname
+                """,
+                (owner,),
+            ).fetchall()
+
+        existing_comments = {}
+        for row in rows:
+            cleaned_name = self._clean_str(row[0])
+            reflected_name = self.normalize_name(cleaned_name)
+            stored_value = row[1] if catalog_exists else None
+            comment = self._decode_comment_value(stored_value)
+            existing_comments[str(cleaned_name)] = comment
+            existing_comments[str(reflected_name)] = comment
+
+        # SQLAlchemy requires non-existent names in filter_names to be omitted.
+        # _table_names_for_multi() deliberately avoids an extra catalog scan
+        # for the broad ANY/ANY filtered case, so this batch query is also the
+        # authoritative existence check for that combination.
+        for name in names:
+            key = str(name)
+            if key not in existing_comments:
+                continue
+            yield (schema, name), {"text": existing_comments[key]}
 
     def get_multi_table_options(
         self,

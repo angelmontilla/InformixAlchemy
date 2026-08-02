@@ -265,6 +265,34 @@ class Requirements(SuiteRequirements):
         return exclusions.open()
 
     @property
+    def comment_reflection(self):
+        """Reflect table and column comments through the dialect catalog.
+
+        Informix has no native persistent COMMENT ON metadata in SYSTABLES or
+        SYSCOLUMNS. The dialect installs two ordinary sidecar tables lazily
+        when comment DDL is first used and exposes them through SQLAlchemy's
+        standard inspection APIs.
+        """
+
+        return exclusions.open()
+
+    @property
+    def comment_reflection_full_unicode(self):
+        """Comments preserve the full Unicode range independently of locale.
+
+        Values are stored as UTF-8 hexadecimal ASCII in the sidecar catalog,
+        so emoji and non-Latin text do not depend on DB_LOCALE.
+        """
+
+        return exclusions.open()
+
+    @property
+    def temp_table_comment_reflection(self):
+        """Connection-local temporary table comments remain unsupported."""
+
+        return exclusions.closed()
+
+    @property
     def foreign_key_constraint_reflection(self):
         """Foreign-key reflection is part of the supported contract."""
 

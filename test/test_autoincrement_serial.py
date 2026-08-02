@@ -178,8 +178,8 @@ def test_compile_serial_types(dialect):
 
 
 @pytest.mark.serial_identity
-def test_integer_identity_does_not_enable_sqlalchemy_identity_flag(dialect):
-    assert dialect.supports_identity_columns is False
+def test_integer_identity_enables_sqlalchemy_identity_flag(dialect):
+    assert dialect.supports_identity_columns is True
 
 
 @pytest.mark.serial_identity
@@ -439,7 +439,7 @@ def test_integer_pk_contract_uses_serial(dialect, name_factory):
 
 
 @pytest.mark.serial_identity
-def test_identity_contract_is_normalized_to_serial(dialect, name_factory):
+def test_identity_contract_is_normalized_to_private_sequence(dialect, name_factory):
     metadata = MetaData()
     table = Table(
         name_factory("sa_auto_"),
@@ -450,5 +450,8 @@ def test_identity_contract_is_normalized_to_serial(dialect, name_factory):
 
     compiled = str(CreateTable(table).compile(dialect=dialect)).upper()
 
-    assert "ID SERIAL NOT NULL" in compiled
+    assert "ID INTEGER NOT NULL" in compiled
+    assert "SERIAL" not in compiled
     assert "IDENTITY" not in compiled
+    assert table.c.id.default is not None
+    assert table.c.id.default.is_sequence

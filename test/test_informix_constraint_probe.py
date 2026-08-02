@@ -165,14 +165,8 @@ def test_schema_namespaced_constraints_match_database_mode(official_engine):
 
         assert (check_name, default_owner.casefold()) in found
         assert (fk_name, default_owner.casefold()) in found
-        assert (
-            f"{alternate_owner}__{check_name}",
-            alternate_owner.casefold(),
-        ) in found
-        assert (
-            f"{alternate_owner}__{fk_name}",
-            alternate_owner.casefold(),
-        ) in found
+        assert (check_name, alternate_owner.casefold()) in found
+        assert (fk_name, alternate_owner.casefold()) in found
         assert local_table.schema is None
         assert schema_table.schema == alternate_owner
     finally:
