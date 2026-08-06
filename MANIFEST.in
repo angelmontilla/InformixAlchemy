@@ -1,15 +1,7 @@
-include README.md
-include README.rst
-include CHANGELOG.md
-include LICENSE
-include pyproject.toml
-include pytest.ini
-include setup.cfg
-include tox.ini
-include requirements-dev.txt
-include certification-matrix.json
+recursive-include test *.py
+recursive-include tools *.py
 
-recursive-include IfxAlchemy *.py
-recursive-include constraints *.txt
-
-prune test
+include README* LICENSE
+include run_tests.py run_alembic_tests.py run_sql_expression_certification.py
+include requirements-dev.txt pytest.ini
+include .env.informix.example .env.official-suites.example

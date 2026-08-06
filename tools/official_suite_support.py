@@ -28,7 +28,7 @@ DEFAULT_DOCKER_CLIENT_LOCALE = "en_US.819"
 DEFAULT_DOCKER_DB_LOCALE = "en_US.819"
 DEFAULT_DOCKER_SERVER_LOCALE = "en_US.819"
 DEFAULT_DOCKER_URL = (
-    "informix+pyodbc://informix:change-me@127.0.0.1/ifxalchemy_test"
+    "informix+pyodbc://informix:in4mix@127.0.0.1/ifxalchemy_test"
     "?DELIMIDENT=Y"
     "&driver=IBM+INFORMIX+ODBC+DRIVER+%2864-bit%29"
     "&protocol=onsoctcp"

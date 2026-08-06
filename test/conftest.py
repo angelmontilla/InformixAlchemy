@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import uuid
 from pathlib import Path
 
@@ -56,6 +55,8 @@ def _smoke_check_informix_url(url: str) -> None:
             "Informix smoke check failed before running tests.\n"
             f"URL: {rendered_url}\n"
             "Check the configured user, password, host, service, server, "
+            "Expected Docker defaults: user=informix, password=in4mix, "
+            "host=127.0.0.1, service=9088, server=informix, "
             f"database={expected_database}.\n"
             f"Original error: {type(exc).__name__}: {exc}"
         ) from exc
@@ -91,15 +92,6 @@ _OFFICIAL_SUITE_FILES = {
     "test_suite.py",
     "test_suite_alembic.py",
 }
-
-
-def pytest_addoption(parser):
-    parser.addoption(
-        "--run-informix",
-        action="store_true",
-        default=False,
-        help="run tests that require a live Informix server",
-    )
 
 
 def _is_official_suite_run(config) -> bool:

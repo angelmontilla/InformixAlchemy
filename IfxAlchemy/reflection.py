@@ -3221,11 +3221,6 @@ class IfxReflector(BaseReflector):
             physical_owner,
             physical_table_name,
         )
-        odbc_column_metadata = self._odbc_column_metadata(
-            connection,
-            physical_table_name,
-            physical_owner,
-        )
 
         sql_text = """
             SELECT

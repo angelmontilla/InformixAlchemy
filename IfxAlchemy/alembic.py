@@ -23,34 +23,10 @@ from sqlalchemy import Column, MetaData, Table
 from sqlalchemy import exc as sa_exc
 from sqlalchemy import schema as sa_schema
 from sqlalchemy import types as sa_types
-from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.sql import elements as sql_elements
 
-from .base import (
-    BIGSERIAL,
-    SERIAL,
-    SERIAL8,
-    _get_ifx_autoincrement_type_name,
-    _ifx_type_visit_name,
-)
 from .fragmentation import _ReflectedFragmentExpression
 from .comments import COMMENT_CATALOG_DDL
-from .temporal import INTERVAL
-
-
-class _InformixRawDDL(sa_schema.DDLElement):
-    """A pre-rendered DDL statement without ``DDL`` percent interpolation."""
-
-    inherit_cache = False
-
-    def __init__(self, statement: str) -> None:
-        self.statement = statement
-
-
-@compiles(_InformixRawDDL)
-def _compile_informix_raw_ddl(element, compiler, **kw):
-    del compiler, kw
-    return element.statement
 
 
 class InformixImpl(DefaultImpl):
@@ -70,6 +46,76 @@ class InformixImpl(DefaultImpl):
 
     __dialect__ = "informix"
     transactional_ddl = False
+
+    def _ensure_comment_catalog(self) -> None:
+        """Emit sidecar DDL once when rendering an offline migration.
+
+        Online executions are handled by :class:`IfxExecutionContext` just
+        before the comment DDL runs.  Offline ``--sql`` mode has no execution
+        context, so Alembic must render the prerequisite tables explicitly.
+        """
+
+        if not self.as_sql or getattr(
+            self, "_ifx_comment_catalog_rendered", False
+        ):
+            return
+
+        for statement in COMMENT_CATALOG_DDL:
+            self._exec(sa_schema.DDL(statement))
+        self._ifx_comment_catalog_rendered = True
+
+    def create_table_comment(self, table: Table) -> None:
+        self._ensure_comment_catalog()
+        super().create_table_comment(table)
+
+    def drop_table_comment(self, table: Table) -> None:
+        self._ensure_comment_catalog()
+        super().drop_table_comment(table)
+
+    def create_column_comment(self, column: Column[Any]) -> None:
+        self._ensure_comment_catalog()
+        super().create_column_comment(column)
+
+    def alter_column(
+        self,
+        table_name: str,
+        column_name: str,
+        *,
+        comment: Any = False,
+        schema: str | None = None,
+        **kw: Any,
+    ) -> None:
+        """Route Alembic column comments through SQLAlchemy comment DDL.
+
+        Alembic's generic ``ColumnComment`` element has no compiler for
+        third-party dialects. Building a lightweight SQLAlchemy column lets
+        the dialect's normal SetColumnComment/DropColumnComment implementation
+        handle online migrations and comment reflection consistently.
+        """
+
+        if comment is not False:
+            self._ensure_comment_catalog()
+            metadata = MetaData()
+            table = Table(
+                table_name,
+                metadata,
+                Column(column_name, sa_types.NullType()),
+                schema=schema,
+            )
+            column = table.c[column_name]
+            if comment is None:
+                self._exec(sa_schema.DropColumnComment(column))
+            else:
+                column.comment = comment
+                self._exec(sa_schema.SetColumnComment(column))
+
+        super().alter_column(
+            table_name,
+            column_name,
+            comment=False,
+            schema=schema,
+            **kw,
+        )
 
     @staticmethod
     def _interval_signature(type_: INTERVAL) -> tuple[str, str, int, int]:
