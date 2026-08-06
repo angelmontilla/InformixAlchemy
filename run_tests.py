@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy.dialects import registry
 
 from tools.official_suite_support import (
+    ensure_required_test_databases,
     load_official_suite_environment,
     official_suite_dburi,
     resolve_junit_file,
@@ -31,6 +32,8 @@ def main(
     try:
         env_file = load_official_suite_environment()
         dburi = official_suite_dburi()
+
+        provisioned = ensure_required_test_databases()
 
         # Se autoriza primero la base exacta. La limpieza de objetos pertenece
         # al mecanismo oficial --dropfirst y a IfxAlchemy.provision.
@@ -57,6 +60,14 @@ def main(
     )
     print(
         f"Target: {target['safe_url']}",
+        file=sys.stderr,
+    )
+    print(
+        "Test databases: "
+        f"non-ANSI={provisioned['non_ansi']['database']} "
+        f"({'created' if provisioned['non_ansi']['created'] else 'present'}), "
+        f"ANSI={provisioned['ansi']['database']} "
+        f"({'created' if provisioned['ansi']['created'] else 'present'})",
         file=sys.stderr,
     )
 

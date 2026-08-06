@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "policy": "A release may claim Informix 14.10+ certification only when every required axis value appears in at least one passing provenance report and the exact server/driver/package versions are retained.",
+  "required_axes": {
+    "server": ["14.10-latest-fixpack", "15.x-current"],
+    "database": ["non-ansi", "ansi"],
+    "odbc": ["minimum-supported", "current"],
+    "python": ["3.10", "3.12", "3.14"],
+    "sqlalchemy": ["2.0.45-minimum", "2.0-current", "2.1-preview"],
+    "identifiers": ["DELIMIDENT-N", "DELIMIDENT-Y"],
+    "locale": ["utf8", "legacy"],
+    "json_bson": ["without-sbspace", "with-sbspace"]
+  },
+  "required_report_fields": [
+    "informix.server_version_full",
+    "informix.name",
+    "informix.ansi",
+    "odbc.driver_name",
+    "odbc.driver_version",
+    "packages.pyodbc",
+    "packages.SQLAlchemy",
+    "runtime.python",
+    "runtime.platform",
+    "runtime.architecture",
+    "environment.DB_LOCALE",
+    "environment.CLIENT_LOCALE",
+    "environment.DELIMIDENT",
+    "environment.GL_USEGLU"
+  ]
+}

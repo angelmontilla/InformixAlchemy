@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import datetime as dt
+from decimal import Decimal
 
-from sqlalchemy import text
+from sqlalchemy import Numeric, bindparam, text
 
 
 def test_basic_crud_round_trip(engine, name_factory):
@@ -13,7 +14,7 @@ def test_basic_crud_round_trip(engine, name_factory):
         id INTEGER NOT NULL,
         fname VARCHAR(20),
         lname VARCHAR(20),
-        salary MONEY,
+        salary MONEY(16, 2),
         purchase DATE
     )
     """
@@ -23,6 +24,11 @@ def test_basic_crud_round_trip(engine, name_factory):
         INSERT INTO {table_name} (id, fname, lname, salary, purchase)
         VALUES (:id, :fname, :lname, :salary, :purchase)
         """
+    ).bindparams(
+        bindparam(
+            "salary",
+            type_=Numeric(16, 2, asdecimal=True),
+        )
     )
 
     update_sql = text(f"UPDATE {table_name} SET id = :new_id WHERE id = :old_id")
@@ -46,14 +52,14 @@ def test_basic_crud_round_trip(engine, name_factory):
                         "id": 1,
                         "fname": "Sheetal",
                         "lname": "J",
-                        "salary": 20100.19,
+                        "salary": Decimal("20100.19"),
                         "purchase": dt.date(2019, 2, 2),
                     },
                     {
                         "id": 2,
                         "fname": "Joe",
                         "lname": "T",
-                        "salary": 20111.19,
+                        "salary": Decimal("20111.19"),
                         "purchase": dt.date(2019, 11, 23),
                     },
                 ],
@@ -75,11 +81,11 @@ def test_basic_crud_round_trip(engine, name_factory):
     assert rows[0].id == 1
     assert rows[0].fname.strip() == "Sheetal"
     assert rows[0].lname.strip() == "J"
-    assert float(rows[0].salary) == 20100.19
+    assert rows[0].salary == Decimal("20100.19")
     assert rows[0].purchase == dt.date(2019, 2, 2)
 
     assert rows[1].id == 200
     assert rows[1].fname.strip() == "Joe"
     assert rows[1].lname.strip() == "T"
-    assert float(rows[1].salary) == 20111.19
+    assert rows[1].salary == Decimal("20111.19")
     assert rows[1].purchase == dt.date(2019, 11, 23)

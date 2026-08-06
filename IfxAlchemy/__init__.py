@@ -17,7 +17,39 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-__version__ = "1.1.0"
+from importlib.metadata import PackageNotFoundError, version as distribution_version
+from pathlib import Path
+import tomllib
+
+
+def _source_tree_version() -> str | None:
+    """Return the adjacent project version when imported from a source checkout.
+
+    A developer can have an older IfxAlchemy distribution installed while importing
+    the package directly from a newer checkout.  In that situation distribution
+    metadata belongs to the installed copy, not to the source code being executed.
+    """
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    try:
+        with pyproject.open("rb") as file:
+            return str(tomllib.load(file)["project"]["version"])
+    except (FileNotFoundError, KeyError, OSError, tomllib.TOMLDecodeError):
+        return None
+
+
+def _runtime_version() -> str:
+    """Resolve the version from the active source tree or installed metadata."""
+    source_version = _source_tree_version()
+    if source_version is not None:
+        return source_version
+
+    try:
+        return distribution_version("IfxAlchemy")
+    except PackageNotFoundError:
+        return "0+unknown"
+
+
+__version__ = _runtime_version()
 
 # Imports of the modules required for the pyodbc dialect and data types
 from . import pyodbc, base
@@ -52,9 +84,29 @@ from .complex import (
     parse_complex_value,
 )
 
+
+
+from .indexes import (
+    AlterIndexCluster,
+    DisableIndex,
+    EnableIndex,
+    SetIndexMode,
+    SetIndexVisibility,
+)
+
+from .optimizer import (
+    AllRows,
+    AvoidIndex,
+    FirstRows,
+    JoinOrder,
+    OptimizerDirective,
+    UseIndex,
+)
+
 # Informix-specific executable DML constructs
 from .dml import InformixMerge, merge
 from .document import bson_get, bson_size, bson_update, gen_bson
+from .temporal import YearMonthInterval
 
 # Typed Informix fragmentation models and ALTER FRAGMENT constructs
 from .fragmentation import (
@@ -99,6 +151,7 @@ from .base import (
     DOUBLE,
     GRAPHIC,
     INTEGER,
+    INTERVAL,
     JSON,
     LONGVARCHAR,
     LVARCHAR,
@@ -137,6 +190,7 @@ __all__ = (
     "Fragment",
     "GRAPHIC",
     "INTEGER",
+    "INTERVAL",
     "InformixMerge",
     "JSON",
     "InitFragment",
@@ -175,6 +229,18 @@ __all__ = (
     "RowField",
     "RowValue",
     "SET",
+    "AllRows",
+    "AvoidIndex",
+    "FirstRows",
+    "JoinOrder",
+    "OptimizerDirective",
+    "UseIndex",
+    "YearMonthInterval",
+    "AlterIndexCluster",
+    "DisableIndex",
+    "EnableIndex",
+    "SetIndexMode",
+    "SetIndexVisibility",
     "dialect",
     "gen_bson",
     "merge",

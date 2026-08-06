@@ -26,10 +26,10 @@ def test_pyproject_uses_readme_md_as_package_description():
 def test_pyproject_sqlalchemy_range_supports_20_and_21():
     contents = _pyproject_text()
 
-    assert '"SQLAlchemy>=2.0.45,<2.2"' in contents
-    assert '"SQLAlchemy>=2.0.20,<2.2"' not in contents
-    assert '"SQLAlchemy>=2.0,<2.2"' not in contents
-    assert '"SQLAlchemy>=2.0.45,<2.1"' not in contents
+    assert '"SQLAlchemy>=2.0.45,<2.1"' in contents
+    assert '"SQLAlchemy>=2.0.20,<2.1"' not in contents
+    assert '"SQLAlchemy>=2.0,<2.1"' not in contents
+    assert '"SQLAlchemy>=2.0.45,<2.1"' in contents
     assert '"SQLAlchemy>=2.0,<2.3"' not in contents
 
 

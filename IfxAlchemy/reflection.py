@@ -20,6 +20,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
 import re
 
 from sqlalchemy import exc
@@ -31,7 +32,15 @@ from sqlalchemy.engine import reflection
 from sqlalchemy.engine.reflection import ObjectKind, ObjectScope
 from .temporal import IFXDateTime
 from .temporal import IFXTime
+from .temporal import INTERVAL
 from .complex import DISTINCT, LIST, MULTISET, ROW, SET, RowField
+from .indexes import _ReflectedAccessMethodParameters
+from .identity import identity_sequence_name
+from .comments import (
+    COLUMN_COMMENT_CATALOG,
+    TABLE_COMMENT_CATALOG,
+    decode_comment,
+)
 from .fragmentation import (
     AttachedIndexFragmentation,
     ExpressionFragmentation,
@@ -43,8 +52,14 @@ from .fragmentation import (
 )
 
 from . import sqla_compat
+from ._reflection_helpers import (
+    int_or_default as _helper_int_or_default,
+    row_value as _helper_row_value,
+    single_or_tuple as _helper_single_or_tuple,
+)
 
 
+logger = logging.getLogger(__name__)
 
 
 class _RemoteSynonymReflectionError(exc.UnreflectableTableError):
@@ -305,7 +320,7 @@ class IfxReflector(BaseReflector):
         "SMALLFLOAT": sa_types.Float,
         "DATE": sa_types.Date,
         "DATETIME": sa_types.DateTime,
-        "INTERVAL": sa_types.Interval,
+        "INTERVAL": INTERVAL,
         "TEXT": sa_types.Text,
         "BYTE": sa_types.LargeBinary,
         "BOOLEAN": _informix_boolean_type,
@@ -332,6 +347,87 @@ class IfxReflector(BaseReflector):
         if isinstance(value, str):
             return value.strip()
         return str(value).strip()
+
+    def _comment_catalog_exists(self, connection, catalog_name):
+        owner = self._resolved_owner(None)
+        row = connection.exec_driver_sql(
+            """
+            SELECT FIRST 1 t.tabid
+            FROM systables t
+            WHERE LOWER(t.tabname) = LOWER(?)
+              AND LOWER(t.owner) = LOWER(?)
+              AND t.tabtype = 'T'
+            """,
+            (catalog_name, owner),
+        ).first()
+        return row is not None
+
+    def _decode_comment_value(self, value):
+        try:
+            return decode_comment(value)
+        except ValueError as error:
+            util.warn(str(error))
+            return None
+
+    def _table_comment_for_tabid(
+        self,
+        connection,
+        tabid,
+        owner,
+        table_name,
+    ):
+        if not self._comment_catalog_exists(
+            connection,
+            TABLE_COMMENT_CATALOG,
+        ):
+            return None
+
+        row = connection.exec_driver_sql(
+            f"""
+            SELECT FIRST 1 c.comment_value
+            FROM {TABLE_COMMENT_CATALOG} c
+            WHERE c.tabid = ?
+              AND c.object_owner = ?
+              AND c.object_name = ?
+            """,
+            (int(tabid), owner, table_name),
+        ).first()
+        if row is None:
+            return None
+        return self._decode_comment_value(row[0])
+
+    def _column_comments_for_tabid(
+        self,
+        connection,
+        tabid,
+        owner,
+        table_name,
+    ):
+        if not self._comment_catalog_exists(
+            connection,
+            COLUMN_COMMENT_CATALOG,
+        ):
+            return {}
+
+        rows = connection.exec_driver_sql(
+            f"""
+            SELECT c.colno, c.column_name, c.comment_value
+            FROM {COLUMN_COMMENT_CATALOG} c
+            WHERE c.tabid = ?
+              AND c.object_owner = ?
+              AND c.object_name = ?
+            ORDER BY c.colno
+            """,
+            (int(tabid), owner, table_name),
+        ).fetchall()
+
+        comments = {}
+        for colno, column_name, comment_value in rows:
+            comments[int(colno)] = (
+                self._clean_str(column_name),
+                self._decode_comment_value(comment_value),
+            )
+        return comments
 
     def _clean_default_catalog_value(self, value):
         """Normalize a textual value read from sysdefaults.
@@ -383,6 +479,84 @@ class IfxReflector(BaseReflector):
             "first_code": first,
             "last_code": last,
         }
+
+    def _dbapi_error_types(self):
+        """Return SQLAlchemy and driver-specific DBAPI error classes."""
+        error_types = [exc.DBAPIError]
+        dbapi = getattr(self.dialect, "dbapi", None)
+        driver_error = getattr(dbapi, "Error", None)
+        if isinstance(driver_error, type) and driver_error not in error_types:
+            error_types.append(driver_error)
+        return tuple(error_types)
+
+    def _odbc_column_metadata(self, connection, table_name, owner):
+        """Return best-effort SQLColumns metadata keyed by column name.
+
+        Informix ``SYSCOLUMNS.collength`` preserves the qualifier range and
+        physical storage length, but two adjacent leading precisions can map
+        to the same byte length. ODBC SQLColumns exposes the character size
+        and fractional scale, which allows exact precision recovery. Drivers
+        that do not expose this metadata simply fall back to the catalog.
+        """
+
+        setup_errors = (AttributeError, TypeError) + self._dbapi_error_types()
+        try:
+            proxied = connection.connection
+            dbapi_connection = getattr(
+                proxied,
+                "driver_connection",
+                proxied,
+            )
+            cursor = dbapi_connection.cursor()
+        except setup_errors:
+            logger.debug(
+                "Could not open ODBC metadata cursor; using catalog reflection",
+                exc_info=True,
+            )
+            return {}
+
+        metadata = {}
+        error_types = self._dbapi_error_types()
+        try:
+            rows = cursor.columns(
+                table=str(table_name),
+                schema=str(owner) if owner else None,
+            )
+            for row in rows:
+                def value(attribute, index):
+                    candidate = getattr(row, attribute, None)
+                    if candidate is not None:
+                        return candidate
+                    try:
+                        return row[index]
+                    except (IndexError, KeyError, TypeError):
+                        return None
+
+                column_name = self._clean_str(value("column_name", 3))
+                if not column_name:
+                    continue
+                metadata[column_name.casefold()] = {
+                    "type_name": self._clean_str(value("type_name", 5)),
+                    "column_size": value("column_size", 6),
+                    "decimal_digits": value("decimal_digits", 8),
+                    "sql_data_type": value("sql_data_type", 13),
+                    "sql_datetime_sub": value("sql_datetime_sub", 14),
+                }
+        except error_types:
+            # Metadata enrichment is optional. Catalog reflection remains the
+            # authoritative and portable fallback for older CSDK drivers.
+            logger.debug(
+                "ODBC column metadata was unavailable; using catalog reflection",
+                exc_info=True,
+            )
+            return {}
+        finally:
+            try:
+                cursor.close()
+            except error_types:
+                logger.debug("Could not close ODBC metadata cursor", exc_info=True)
+
+        return metadata
 
     def _resolved_owner(self, schema=None):
         """Convert a SQLAlchemy schema into an Informix owner."""
@@ -839,8 +1013,8 @@ class IfxReflector(BaseReflector):
 
         try:
             cursor.close()
-        except Exception:
-            pass
+        except self._dbapi_error_types():
+            logger.debug("Could not close reflection cursor", exc_info=True)
 
     def _fetch_odbc_rows(self, connection, method_name, kwargs):
         dbapi_connection = self._dbapi_connection(connection)
@@ -854,23 +1028,24 @@ class IfxReflector(BaseReflector):
             if method is None:
                 return []
             return method(**kwargs).fetchall()
-        except Exception:
+        except self._dbapi_error_types():
+            logger.debug(
+                "ODBC reflection method %s was unavailable",
+                method_name,
+                exc_info=True,
+            )
             return []
         finally:
             self._close_cursor(cursor)
 
     def _row_value(self, row, attr_names, index, default=_MISSING):
-        for attr_name in attr_names:
-            value = getattr(row, attr_name, None)
-            if value is not None:
-                return value
-
-        try:
-            return row[index]
-        except Exception:
-            if default is self._MISSING:
-                raise
-            return default
+        return _helper_row_value(
+            row,
+            attr_names,
+            index,
+            default=default,
+            missing=self._MISSING,
+        )
 
     def _normalized_clean_name(self, value):
         cleaned = self._clean_str(value)
@@ -879,10 +1054,7 @@ class IfxReflector(BaseReflector):
         return self.normalize_name(cleaned)
 
     def _int_or_default(self, value, default):
-        try:
-            return int(value)
-        except Exception:
-            return default
+        return _helper_int_or_default(value, default)
 
     def _odbc_primary_key_entry(self, row):
         column_name = self._row_value(row, ("column_name", "COLUMN_NAME"), 3)
@@ -904,7 +1076,7 @@ class IfxReflector(BaseReflector):
                 pk_entry = self._odbc_primary_key_entry(row)
                 if pk_entry is not None:
                     by_seq.append(pk_entry)
-            except Exception:
+            except (IndexError, KeyError, TypeError, ValueError):
                 continue
 
         by_seq.sort(key=lambda item: item[0])
@@ -936,7 +1108,7 @@ class IfxReflector(BaseReflector):
                     raw_ordinal,
                     raw_non_unique,
                 ) = self._odbc_index_entry(row)
-            except Exception:
+            except (IndexError, KeyError, TypeError, ValueError):
                 continue
 
             normalized_index_name = self._normalized_clean_name(raw_index_name)
@@ -1005,7 +1177,7 @@ class IfxReflector(BaseReflector):
                     raw_fk_column,
                     raw_pk_column,
                 ) = self._odbc_foreign_key_entry(row)
-            except Exception:
+            except (IndexError, KeyError, TypeError, ValueError):
                 continue
 
             normalized_fk_name = self._normalized_clean_name(raw_fk_name)
@@ -1187,13 +1359,6 @@ class IfxReflector(BaseReflector):
                 schema_candidates.append(token)
         return schema_candidates
 
-    def _is_dbapi_probe_error(self, error):
-        if isinstance(error, exc.DBAPIError):
-            return True
-
-        module_name = type(error).__module__.split(".", 1)[0].lower()
-        return module_name in {"pyodbc", "ifxpy", "ifxpydbi"}
-
     def _iter_probe_identifiers(self, table_name, schema=None):
         name_candidates = self._probe_table_candidates(table_name)
         if not name_candidates:
@@ -1229,13 +1394,17 @@ class IfxReflector(BaseReflector):
 
     def _execute_dbapi_probe(self, cursor, from_token):
         sql_text = "SELECT COUNT(*) FROM %s" % from_token
+        error_types = self._dbapi_error_types()
         try:
             cursor.execute(sql_text)
             cursor.fetchone()
             return True
-        except Exception as err:
-            if not self._is_dbapi_probe_error(err):
-                raise
+        except error_types:
+            logger.debug(
+                "DBAPI table probe failed for %s",
+                from_token,
+                exc_info=True,
+            )
             return False
 
     def _has_table_via_dbapi_probe(self, connection, table_name, schema=None):
@@ -1245,11 +1414,11 @@ class IfxReflector(BaseReflector):
         if not probe_identifiers:
             return False
 
+        error_types = self._dbapi_error_types()
         try:
             cursor = self._open_dbapi_cursor(connection)
-        except Exception as err:
-            if not self._is_dbapi_probe_error(err):
-                raise
+        except error_types:
+            logger.debug("Could not open DBAPI table-probe cursor", exc_info=True)
             return False
 
         if cursor is None:
@@ -1328,7 +1497,7 @@ class IfxReflector(BaseReflector):
 
         try:
             return entry()
-        except Exception:
+        except TypeError:
             return self._MISSING
 
     def _instantiate_fallback_type(self, type_name, args):
@@ -1796,13 +1965,24 @@ class IfxReflector(BaseReflector):
         encoded_len,
         autoincrement,
         nullable,
+        interval_metadata=None,
     ):
-        qualifiers = self._decode_datetime_qualifiers(
-            encoded_len
-        )
-
+        qualifiers = self._decode_datetime_qualifiers(encoded_len)
         first_code = qualifiers["first_code"]
         last_code = qualifiers["last_code"]
+
+        if type_name == "INTERVAL":
+            interval_metadata = interval_metadata or {}
+            satype = INTERVAL.from_catalog(
+                first_code=first_code,
+                last_code=last_code,
+                storage_length=qualifiers["length"],
+                odbc_column_size=interval_metadata.get("column_size"),
+                odbc_decimal_digits=interval_metadata.get("decimal_digits"),
+            )
+            setattr(satype, "_informix_qualifiers", qualifiers)
+            setattr(satype, "_informix_odbc_metadata", interval_metadata)
+            return satype, autoincrement, nullable
 
         if 11 <= last_code <= 15:
             fraction_digits = last_code - 10
@@ -1811,20 +1991,11 @@ class IfxReflector(BaseReflector):
 
         # DATETIME HOUR TO ... represents a time without a date.
         if first_code == 6:
-            satype = IFXTime(
-                fraction_digits=fraction_digits,
-            )
+            satype = IFXTime(fraction_digits=fraction_digits)
         else:
-            satype = IFXDateTime(
-                fraction_digits=fraction_digits,
-            )
+            satype = IFXDateTime(fraction_digits=fraction_digits)
 
-        setattr(
-            satype,
-            "_informix_qualifiers",
-            qualifiers,
-        )
-
+        setattr(satype, "_informix_qualifiers", qualifiers)
         return satype, autoincrement, nullable
 
     def _ifx_type_args(self, base_code, encoded_len):
@@ -1843,6 +2014,7 @@ class IfxReflector(BaseReflector):
         extended_id=None,
         extended_type_name=None,
         extended_maxlen=None,
+        interval_metadata=None,
     ):
         coltype_int = int(coltype)
         nullable = not bool(coltype_int & 0x0100)
@@ -1877,6 +2049,7 @@ class IfxReflector(BaseReflector):
                 encoded_len,
                 autoincrement,
                 nullable,
+                interval_metadata=interval_metadata,
             )
 
         return self._ifx_type_result(
@@ -2011,6 +2184,10 @@ class IfxReflector(BaseReflector):
             WHERE LOWER(t.owner) = LOWER(?)
               AND t.tabtype = 'T'
               AND t.tabid >= 100
+              AND LOWER(t.tabname) NOT IN (
+                  'ifx_sqla_table_comments',
+                  'ifx_sqla_column_comments'
+              )
             ORDER BY t.tabname
         """
         rows = connection.exec_driver_sql(sql_text, (owner,)).fetchall()
@@ -2329,11 +2506,31 @@ class IfxReflector(BaseReflector):
 
         return constraints
 
+    @reflection.cache
     def get_table_comment(self, connection, table_name, schema=None, **kw):
-        _ = (connection, table_name, schema, kw)
-        # Informix table comments are not currently reflected by this
-        # dialect; return the stable SQLAlchemy structure explicitly.
-        return {"text": None}
+        table_name, schema, _synonym = self._resolve_reflection_target(
+            connection,
+            table_name,
+            schema,
+            kw,
+        )
+        table_row = self._require_table_row(
+            connection,
+            table_name,
+            schema=schema,
+            tabtypes=("T", "V"),
+        )
+        tabid = int(table_row[0])
+        physical_table_name = self._clean_str(table_row[1])
+        physical_owner = self._clean_str(table_row[2])
+        return {
+            "text": self._table_comment_for_tabid(
+                connection,
+                tabid,
+                physical_owner,
+                physical_table_name,
+            )
+        }
 
     @staticmethod
     def _positive_catalog_int(value):
@@ -2403,7 +2600,8 @@ class IfxReflector(BaseReflector):
                     f.evalpos,
                     f.exprtext,
                     f.dbspace,
-                    f.partition
+                    f.partition,
+                    f.flags
                 FROM sysfragments f
                 WHERE f.tabid = ?
                   AND f.fragtype = 'T'
@@ -2419,7 +2617,8 @@ class IfxReflector(BaseReflector):
                     f.evalpos,
                     f.exprtext,
                     f.dbspace,
-                    f.partition
+                    f.partition,
+                    f.flags
                 FROM sysfragments f
                 WHERE f.tabid = ?
                   AND f.fragtype = 'I'
@@ -2496,7 +2695,11 @@ class IfxReflector(BaseReflector):
                 sql_text,
                 tuple(parameters),
             ).fetchall()
-        except Exception as err:  # pragma: no cover - server-version fallback
+        except exc.DBAPIError as err:  # pragma: no cover - server-version fallback
+            logger.debug(
+                "SYSFRAGEXPRUDRDEP reflection failed; omitting UDR details",
+                exc_info=True,
+            )
             util.warn(
                 "Could not reflect SYSFRAGEXPRUDRDEP metadata; "
                 f"fragment expressions remain available without UDR details: {err}"
@@ -2567,6 +2770,7 @@ class IfxReflector(BaseReflector):
                     "exprtext": self._clean_str(row[4]),
                     "dbspace": self._clean_str(row[5]),
                     "partition": self.normalize_name(row[6]) if row[6] else None,
+                    "flags": int(row[7]) if len(row) > 7 and row[7] is not None else 0,
                 }
             )
 
@@ -2739,6 +2943,66 @@ class IfxReflector(BaseReflector):
 
         return None, None
 
+    def _reflect_partial_index(self, connection, tabid, *, index_name):
+        """Return a trusted predicate and dbspace for a native partial index.
+
+        Informix implements partial indexes as ``FRAGMENT BY EXPRESSION``
+        with one indexed fragment and one ``INDEX OFF`` fragment.  The dialect
+        emits the grammar-complete form ``REMAINDER IN <dbspace> INDEX OFF``
+        with deterministic partition names.  Older server/catalog variants can
+        instead expose ``INDEX OFF`` in the dbspace field, so reflection accepts
+        both shapes.
+        """
+        rows = self._fragment_rows(connection, tabid, index_name=index_name)
+        if not rows:
+            return None, None
+        strategy = (self._clean_str(rows[0][2]) or "").upper()
+        if strategy != "E":
+            return None, None
+
+        active = None
+        index_off = False
+        for row in rows:
+            evalpos = int(row[3]) if row[3] is not None else 0
+            if evalpos < 0:
+                continue
+            exprtext = (self._clean_str(row[4]) or "").strip()
+            dbspace = (self._clean_str(row[5]) or "").strip()
+            partition = (self._clean_str(row[6]) or "").strip()
+            normalized_expr = re.sub(r"\s+", " ", exprtext.upper())
+            normalized_space = re.sub(r"\s+", " ", dbspace.upper())
+            normalized_partition = partition.casefold()
+            dialect_generated_off_partition = normalized_partition.endswith(
+                "__ifx_off"
+            )
+            legacy_index_off = normalized_space == "INDEX OFF"
+            inline_index_off = normalized_expr.endswith(" INDEX OFF")
+            if normalized_expr.startswith("REMAINDER") and (
+                legacy_index_off
+                or inline_index_off
+                or dialect_generated_off_partition
+            ):
+                index_off = True
+                continue
+            if (
+                normalized_space != "INDEX OFF"
+                and not normalized_expr.startswith("REMAINDER")
+            ):
+                active = (exprtext, dbspace)
+
+        if not index_off or active is None or not active[0] or not active[1]:
+            return None, None
+        dependencies = self._fragment_udr_dependencies(
+            connection,
+            tabid,
+            index_name=index_name,
+        )
+        predicate = self._reflected_fragment_expression(
+            active[0],
+            dependencies.get(None, ()),
+        )
+        return predicate, active[1]
+
     def _reflect_fragmentation(self, connection, tabid, *, index_name=None):
         rows = self._fragment_rows(connection, tabid, index_name=index_name)
         if not rows:
@@ -2885,6 +3149,55 @@ class IfxReflector(BaseReflector):
             )
         return reflected
 
+    def _identity_sequence_metadata(
+        self,
+        connection,
+        table_name,
+        column_name,
+        schema=None,
+    ):
+        """Reflect a private Identity sequence into SQLAlchemy metadata."""
+        owner = self.denormalize_name(self._resolved_owner(schema))
+        sequence_name = identity_sequence_name(
+            table_name,
+            column_name,
+            schema,
+        )
+        row = connection.exec_driver_sql(
+            """
+            SELECT FIRST 1
+                s.start_val,
+                s.inc_val,
+                s.min_val,
+                s.max_val,
+                s.cycle,
+                s.cache,
+                s.order
+            FROM syssequences s
+            JOIN systables t
+              ON t.tabid = s.tabid
+            WHERE LOWER(t.tabname) = LOWER(?)
+              AND LOWER(t.owner) = LOWER(?)
+            """,
+            (sequence_name, owner),
+        ).first()
+
+        if row is None:
+            return None
+
+        cycle = self._clean_str(row[4])
+        order = self._clean_str(row[6]) if len(row) > 6 else None
+        return {
+            "always": False,
+            "start": int(row[0]),
+            "increment": int(row[1]),
+            "minvalue": int(row[2]),
+            "maxvalue": int(row[3]),
+            "cycle": str(cycle).strip().upper() in {"1", "T", "Y", "TRUE"},
+            "cache": int(row[5]) if row[5] is not None else None,
+            "order": str(order).strip().upper() in {"1", "T", "Y", "TRUE"},
+        }
+
     @reflection.cache
     def get_columns(self, connection, table_name, schema=None, **kw):
         table_name, schema, _synonym = self._resolve_reflection_target(
@@ -2900,6 +3213,19 @@ class IfxReflector(BaseReflector):
             tabtypes=("T", "V"),
         )
         tabid = int(table_row[0])
+        physical_table_name = self._clean_str(table_row[1])
+        physical_owner = self._clean_str(table_row[2])
+        column_comments = self._column_comments_for_tabid(
+            connection,
+            tabid,
+            physical_owner,
+            physical_table_name,
+        )
+        odbc_column_metadata = self._odbc_column_metadata(
+            connection,
+            physical_table_name,
+            physical_owner,
+        )
 
         sql_text = """
             SELECT
@@ -2929,6 +3255,7 @@ class IfxReflector(BaseReflector):
         extended_metadata_cache = {}
         for row in rows:
             colname = self._clean_str(row[0])
+            colno = int(row[1])
             coltype = int(row[2])
             base_code = coltype & 0x00FF
             collength = int(row[3]) if row[3] is not None else 0
@@ -2971,17 +3298,38 @@ class IfxReflector(BaseReflector):
                     extended_id=extended_id,
                     extended_type_name=extended_type_name,
                     extended_maxlen=extended_maxlen,
+                    interval_metadata=odbc_column_metadata.get(
+                        colname.casefold(),
+                    ),
                 )
 
-            sa_columns.append(
-                {
-                    "name": self.normalize_name(colname),
-                    "type": satype,
-                    "nullable": nullable,
-                    "default": self._decode_default(default_type, default_value, base_code),
-                    "autoincrement": autoincrement,
-                }
+            identity = self._identity_sequence_metadata(
+                connection,
+                physical_table_name,
+                colname,
+                schema=physical_owner,
             )
+            column_info = {
+                "name": self.normalize_name(colname),
+                "type": satype,
+                "nullable": nullable,
+                "default": self._decode_default(
+                    default_type,
+                    default_value,
+                    base_code,
+                ),
+                "autoincrement": bool(identity) or autoincrement,
+                "comment": (
+                    column_comments.get(colno, (None, None))[1]
+                    if column_comments.get(colno, (None, None))[0]
+                    in (None, colname)
+                    else None
+                ),
+            }
+            if identity is not None:
+                column_info["identity"] = identity
+
+            sa_columns.append(column_info)
 
         return sa_columns
 
@@ -3034,7 +3382,11 @@ class IfxReflector(BaseReflector):
             )
 
         return {
-            "name": self.normalize_name(constrname) if constrname else None,
+            "name": (
+                self._logical_reflected_name(constrname, schema=schema)
+                if constrname
+                else None
+            ),
             "constrained_columns": colnames,
         }
 
@@ -3388,10 +3740,20 @@ class IfxReflector(BaseReflector):
                 i.amid,
                 a.am_name,
                 i.collation,
-                i.tabid
+                i.tabid,
+                i.amparam,
+                i.nhashcols,
+                i.nbuckets,
+                i.indexattr,
+                o.state
             FROM sysindices i
             LEFT JOIN sysams a
               ON a.am_id = i.amid
+            LEFT JOIN sysobjstate o
+              ON o.objtype = 'I'
+             AND o.tabid = i.tabid
+             AND o.name = i.idxname
+             AND o.owner = i.owner
             WHERE i.tabid = ?
             ORDER BY i.idxname
         """
@@ -3480,16 +3842,7 @@ class IfxReflector(BaseReflector):
 
     @staticmethod
     def _single_or_tuple(values):
-        ordered = []
-        for value in values:
-            if value is not None and value not in ordered:
-                ordered.append(value)
-
-        if not ordered:
-            return None
-        if len(ordered) == 1:
-            return ordered[0]
-        return tuple(ordered)
+        return _helper_single_or_tuple(values)
 
     def _index_info_from_row(
         self,
@@ -3510,6 +3863,11 @@ class IfxReflector(BaseReflector):
         access_method = self._clean_str(row[5])
         _collation = self._clean_str(row[6])
         catalog_tabid = int(row[7]) if len(row) > 7 and row[7] is not None else tabid
+        amparam = self._clean_str(row[8]) if len(row) > 8 else None
+        nhashcols = int(row[9]) if len(row) > 9 and row[9] is not None else 0
+        nbuckets = int(row[10]) if len(row) > 10 and row[10] is not None else 0
+        indexattr = int(row[11]) if len(row) > 11 and row[11] is not None else 0
+        state_code = self._clean_str(row[12]) if len(row) > 12 else None
         if catalog_tabid != tabid:
             util.warn(
                 "SYSINDICES returned an unexpected table identifier for "
@@ -3566,9 +3924,16 @@ class IfxReflector(BaseReflector):
                 colname = colnames[0]
                 column_names.append(colname)
                 expression = self._quote_reflected_identifier(colname)
-                expressions.append(expression)
                 if component["descending"]:
                     column_sorting[colname] = ("desc",)
+                    # For a mixed functional/ordinary index SQLAlchemy must
+                    # consume ``expressions`` rather than only
+                    # ``column_names``.  Preserve the native descending key
+                    # directly in that expression as well as in the standard
+                    # ``column_sorting`` mapping, otherwise metadata
+                    # round-trips silently rebuild the key in ascending order.
+                    expression += " DESC"
+                expressions.append(expression)
                 continue
 
             has_function = True
@@ -3613,13 +3978,48 @@ class IfxReflector(BaseReflector):
         if column_sorting:
             idx_info["column_sorting"] = column_sorting
 
+        dialect_options = {}
         if has_function:
             idx_info["expressions"] = expressions
-            dialect_options = {
-                "informix_procedure": self._single_or_tuple(procedures),
-                "informix_access_method": access_method,
-                "informix_opclass": self._single_or_tuple(opclasses),
-            }
+            dialect_options.update(
+                {
+                    "informix_procedure": self._single_or_tuple(procedures),
+                    "informix_access_method": access_method,
+                    "informix_opclass": self._single_or_tuple(opclasses),
+                }
+            )
+        elif access_method and access_method.casefold() not in {"btree", "b-tree"}:
+            dialect_options["informix_using"] = access_method
+            reflected_opclasses = self._single_or_tuple(opclasses)
+            if reflected_opclasses is not None:
+                dialect_options["informix_opclass"] = reflected_opclasses
+
+        if nhashcols > 0:
+            hash_columns = [
+                name for name in column_names[:nhashcols] if name is not None
+            ]
+            if len(hash_columns) == nhashcols:
+                dialect_options["informix_hash_on"] = tuple(hash_columns)
+                if nbuckets > 0:
+                    dialect_options["informix_buckets"] = nbuckets
+
+        if indexattr & 0x00000002:
+            dialect_options["informix_compressed"] = True
+        if indexattr & 0x00000010:
+            dialect_options["informix_visible"] = False
+        if amparam and access_method and access_method.casefold() not in {"btree", "b-tree"}:
+            dialect_options["informix_amparam"] = _ReflectedAccessMethodParameters(amparam)
+
+        state_modes = {
+            "E": "ENABLED",
+            "D": "DISABLED",
+            "F": "FILTERING WITHOUT ERROR",
+            "G": "FILTERING WITH ERROR",
+        }
+        if state_code in state_modes:
+            dialect_options["informix_mode"] = state_modes[state_code]
+
+        if dialect_options:
             idx_info["dialect_options"] = {
                 key: value
                 for key, value in dialect_options.items()
@@ -3696,20 +4096,31 @@ class IfxReflector(BaseReflector):
                 schema=schema,
             )
             if idx_info is not None:
-                fragment_by, dbspace = self._reflect_fragmentation(
+                index_name = self._clean_str(row[0])
+                predicate, partial_dbspace = self._reflect_partial_index(
                     connection,
                     tabid,
-                    index_name=self._clean_str(row[0]),
+                    index_name=index_name,
                 )
-                if fragment_by is not None or dbspace is not None:
-                    dialect_options = idx_info.setdefault(
-                        "dialect_options",
-                        {},
+                if predicate is not None:
+                    dialect_options = idx_info.setdefault("dialect_options", {})
+                    dialect_options["informix_where"] = predicate
+                    dialect_options["informix_dbspace"] = partial_dbspace
+                else:
+                    fragment_by, dbspace = self._reflect_fragmentation(
+                        connection,
+                        tabid,
+                        index_name=index_name,
                     )
-                    if fragment_by is not None:
-                        dialect_options["informix_fragment_by"] = fragment_by
-                    if dbspace is not None:
-                        dialect_options["informix_dbspace"] = dbspace
+                    if fragment_by is not None or dbspace is not None:
+                        dialect_options = idx_info.setdefault(
+                            "dialect_options",
+                            {},
+                        )
+                        if fragment_by is not None:
+                            dialect_options["informix_fragment_by"] = fragment_by
+                        if dbspace is not None:
+                            dialect_options["informix_dbspace"] = dbspace
                 indexes.append(idx_info)
 
         return indexes
@@ -3765,7 +4176,11 @@ class IfxReflector(BaseReflector):
 
             unique_constraints.append(
                 {
-                    "name": self.normalize_name(constrname) if constrname else None,
+                    "name": (
+                        self._logical_reflected_name(constrname, schema=schema)
+                        if constrname
+                        else None
+                    ),
                     "column_names": colnames,
                 }
             )
@@ -3917,15 +4332,69 @@ class IfxReflector(BaseReflector):
         scope=ObjectScope.DEFAULT,
         **kw,
     ):
-        yield from self._multi_reflect(
+        names = self._table_names_for_multi(
             connection,
-            self.get_table_comment,
             schema=schema,
             filter_names=filter_names,
             kind=kind,
             scope=scope,
             **kw,
         )
+        if not names:
+            return
+
+        owner = self._resolved_owner(schema)
+        catalog_exists = self._comment_catalog_exists(
+            connection,
+            TABLE_COMMENT_CATALOG,
+        )
+        if catalog_exists:
+            rows = connection.exec_driver_sql(
+                f"""
+                SELECT t.tabname, c.comment_value
+                FROM systables t
+                LEFT OUTER JOIN {TABLE_COMMENT_CATALOG} c
+                  ON c.tabid = t.tabid
+                 AND c.object_owner = t.owner
+                 AND c.object_name = t.tabname
+                WHERE LOWER(t.owner) = LOWER(?)
+                  AND t.tabid >= 100
+                  AND t.tabtype IN ('T', 'V')
+                ORDER BY t.tabname
+                """,
+                (owner,),
+            ).fetchall()
+        else:
+            rows = connection.exec_driver_sql(
+                """
+                SELECT t.tabname
+                FROM systables t
+                WHERE LOWER(t.owner) = LOWER(?)
+                  AND t.tabid >= 100
+                  AND t.tabtype IN ('T', 'V')
+                ORDER BY t.tabname
+                """,
+                (owner,),
+            ).fetchall()
+
+        existing_comments = {}
+        for row in rows:
+            cleaned_name = self._clean_str(row[0])
+            reflected_name = self.normalize_name(cleaned_name)
+            stored_value = row[1] if catalog_exists else None
+            comment = self._decode_comment_value(stored_value)
+            existing_comments[str(cleaned_name)] = comment
+            existing_comments[str(reflected_name)] = comment
+
+        # SQLAlchemy requires non-existent names in filter_names to be omitted.
+        # _table_names_for_multi() deliberately avoids an extra catalog scan
+        # for the broad ANY/ANY filtered case, so this batch query is also the
+        # authoritative existence check for that combination.
+        for name in names:
+            key = str(name)
+            if key not in existing_comments:
+                continue
+            yield (schema, name), {"text": existing_comments[key]}
 
     def get_multi_table_options(
         self,

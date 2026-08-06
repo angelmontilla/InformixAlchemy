@@ -53,11 +53,13 @@ class _FakeConnection:
         default_isolation=None,
         getinfo_error=None,
         execute_error=None,
+        rollback_error=None,
     ):
         self.autocommit = False
         self.default_isolation = default_isolation
         self.getinfo_error = getinfo_error
         self.execute_error = execute_error
+        self.rollback_error = rollback_error
         self.set_attr_calls = []
         self.getinfo_calls = []
         self.rollback_calls = 0
@@ -83,6 +85,8 @@ class _FakeConnection:
 
     def rollback(self):
         self.rollback_calls += 1
+        if self.rollback_error is not None:
+            raise self.rollback_error
         self.active_transaction = False
 
     def close(self):
@@ -450,6 +454,37 @@ def test_do_ping_rolls_back_manual_commit_select_before_isolation_change():
     assert connection.cursors[-1].executed == [
         "SET ISOLATION TO CURSOR STABILITY"
     ]
+
+
+def test_do_ping_rolls_back_after_failed_select_and_reraises_error():
+    dialect = _dialect()
+    ping_error = RuntimeError("Informix ping SELECT failed")
+    connection = _FakeConnection(execute_error=ping_error)
+
+    with pytest.raises(RuntimeError) as raised:
+        dialect.do_ping(connection)
+
+    assert raised.value is ping_error
+    assert connection.rollback_calls == 1
+    assert len(connection.cursors) == 1
+    assert connection.cursors[0].closed is True
+
+
+def test_do_ping_preserves_select_error_when_rollback_also_fails():
+    dialect = _dialect()
+    ping_error = RuntimeError("Informix ping SELECT failed")
+    rollback_error = RuntimeError("Informix rollback failed")
+    connection = _FakeConnection(
+        execute_error=ping_error,
+        rollback_error=rollback_error,
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        dialect.do_ping(connection)
+
+    assert raised.value is ping_error
+    assert connection.rollback_calls == 1
+    assert connection.cursors[0].closed is True
 
 
 def test_do_ping_does_not_rollback_an_autocommit_connection():

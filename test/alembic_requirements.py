@@ -41,3 +41,26 @@ class Requirements(
         actions under the current contract.
         """
         return exclusions.closed()
+
+    @property
+    def fk_ondelete_restrict(self):
+        """Informix foreign keys expose CASCADE or the default delete rule.
+
+        ``SYSREFERENCES.delrule`` cannot distinguish an explicit RESTRICT
+        clause from the default rule, and the dialect intentionally accepts
+        only the portable Informix ``ON DELETE CASCADE`` extension.
+        """
+
+        return exclusions.closed()
+
+    @property
+    def fk_ondelete_noaction(self):
+        """Informix does not compile an explicit ON DELETE NO ACTION clause."""
+
+        return exclusions.closed()
+
+    @property
+    def fk_onupdate_restrict(self):
+        """Informix has no ON UPDATE referential-action syntax."""
+
+        return exclusions.closed()

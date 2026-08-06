@@ -24,7 +24,12 @@
 
 """
 import datetime
+import hashlib
+import math
 import re
+import threading
+from collections.abc import Mapping
+from decimal import Decimal
 from sqlalchemy import event, table
 from sqlalchemy import exc
 from sqlalchemy import schema as sa_schema
@@ -42,8 +47,48 @@ from sqlalchemy.engine import default
 
 from . import reflection as ifx_reflection
 from . import sqla_compat
+from ._compiler_helpers import (
+    contains_arithmetic_default as _contains_ifx_arithmetic_default,
+    normalize_boolean_default as _normalize_ifx_boolean_default,
+    strip_outer_parentheses as _strip_ifx_outer_parentheses,
+)
 from .document import BSON, JSON
+from .comments import (
+    COLUMN_COMMENT_CATALOG,
+    TABLE_COMMENT_CATALOG,
+    encode_comment,
+    ensure_comment_catalog,
+    is_comment_ddl,
+)
+from .identity import (
+    _drop_ifx_identity_sequences,
+    _prepare_ifx_identity_sequences,
+    _materialize_ifx_identity_sequence,
+    _materialize_ifx_identity_sequences_for_table,
+    identity_sequence_for_column,
+    install_identity_event_listeners,
+    iter_ifx_identity_sequences,
+    register_ifx_identity_sequence,
+    register_ifx_identity_sequences_for_table,
+)
+from .indexes import (
+    AlterIndexCluster,
+    SetIndexMode,
+    SetIndexVisibility,
+    _ReflectedAccessMethodParameters,
+)
 from .complex import DISTINCT, LIST, MULTISET, ROW, SET
+from .temporal import INTERVAL
+from .optimizer import (
+    INFORMIX_CONNECTION_CHARACTERISTICS,
+    INFORMIX_OPTIMIZER_DIRECTIVES,
+    default_session_option,
+    insert_optimizer_comment,
+    normalize_optimizer_directives,
+    normalize_session_option,
+    render_optimizer_comment,
+    session_option_sql,
+)
 
 from sqlalchemy.types import BLOB, CHAR, CLOB, DATE, DATETIME, INTEGER, \
     SMALLINT, BIGINT, DECIMAL, NUMERIC, REAL, TIME, TIMESTAMP, \
@@ -110,6 +155,8 @@ event.listen(
     _create_ifx_deferred_self_referential_fks,
     propagate=True,
 )
+
+install_identity_event_listeners()
 
 # as documented from:
 RESERVED_WORDS = {
@@ -445,6 +492,12 @@ def _get_ifx_autoincrement_type_name(column):
     if type_name in {"SERIAL", "SERIAL8", "BIGSERIAL"}:
         return type_name
 
+    # An explicit SQLAlchemy Identity contract is emulated by a private
+    # sequence.  It must remain an ordinary INTEGER/BIGINT column; converting
+    # it to SERIAL would discard start/increment/bounds/cache/cycle options.
+    if getattr(column, "identity", None) is not None:
+        return type_name
+
     table = getattr(column, "table", None)
     autoincrement_column = sqla_compat.get_table_autoincrement_column(table)
     if autoincrement_column is not column:
@@ -456,6 +509,44 @@ def _get_ifx_autoincrement_type_name(column):
         return "SERIAL"
 
     return type_name
+
+
+def _ifx_sequence_owner_literal(owner):
+    """Render an Informix authorization identifier for NEXTVAL/CURRVAL.
+
+    Informix DDL accepts ``owner.sequence`` while sequence value expressions
+    use the authorization-owner form expected by the dialect's ANSI schema
+    contract: ``'OWNER'.sequence.NEXTVAL``.  Unquoted SQLAlchemy schemas are
+    folded to uppercase; explicitly quoted names preserve their spelling.
+    """
+    if owner in (None, ""):
+        return None
+
+    quote_flag = getattr(owner, "quote", None)
+    rendered = str(owner)
+    if quote_flag is not True:
+        rendered = rendered.upper()
+    return "'" + rendered.replace("'", "''") + "'"
+
+
+_IFX_NO_SCHEMA_OVERRIDE = object()
+
+
+def _ifx_sequence_nextval_name(
+    preparer,
+    sequence,
+    schema_override=_IFX_NO_SCHEMA_OVERRIDE,
+):
+    schema = (
+        preparer.schema_for_object(sequence)
+        if schema_override is _IFX_NO_SCHEMA_OVERRIDE
+        else schema_override
+    )
+    sequence_name = preparer.quote(sequence.name)
+    owner = _ifx_sequence_owner_literal(schema)
+    if owner is None:
+        return sequence_name
+    return f"{owner}.{sequence_name}"
 
 
 def _get_ifx_lastrowid_query(column):
@@ -481,183 +572,6 @@ _IFX_ARITHMETIC_DEFAULT_OPERATORS = frozenset(
         operators.mod,
     }
 )
-
-_IFX_SIGNED_NUMERIC_DEFAULT_RE = re.compile(
-    r"^[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE][+-]?\d+)?$"
-)
-
-_IFX_QUOTED_STRING_DEFAULT_RE = re.compile(
-    r"^'(?:''|[^'])*'$",
-    re.DOTALL,
-)
-
-_IFX_ISO_TEMPORAL_DEFAULT_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}"
-    r"(?:[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?)?$"
-)
-
-
-def _strip_ifx_outer_parentheses(value):
-    """Remove balanced parentheses enclosing the complete default."""
-
-    text = str(value).strip()
-
-    while len(text) >= 2 and text[0] == "(" and text[-1] == ")":
-        depth = 0
-        in_string = False
-        encloses_whole_value = True
-        index = 0
-
-        while index < len(text):
-            character = text[index]
-
-            if in_string:
-                if character == "'":
-                    if index + 1 < len(text) and text[index + 1] == "'":
-                        index += 2
-                        continue
-
-                    in_string = False
-
-                index += 1
-                continue
-
-            if character == "'":
-                in_string = True
-
-            elif character == "(":
-                depth += 1
-
-            elif character == ")":
-                depth -= 1
-
-                if depth == 0 and index != len(text) - 1:
-                    encloses_whole_value = False
-                    break
-
-            index += 1
-
-        if (
-            not encloses_whole_value
-            or depth != 0
-            or in_string
-        ):
-            break
-
-        text = text[1:-1].strip()
-
-    return text
-
-
-def _is_ifx_scalar_default_literal(text):
-    """Return whether *text* is a supported non-arithmetic literal."""
-    return any(
-        pattern.fullmatch(text)
-        for pattern in (
-            _IFX_SIGNED_NUMERIC_DEFAULT_RE,
-            _IFX_QUOTED_STRING_DEFAULT_RE,
-            _IFX_ISO_TEMPORAL_DEFAULT_RE,
-        )
-    )
-
-
-def _mask_ifx_quoted_literals(text):
-    """Replace quoted SQL literal contents with spaces.
-
-    Keeping the original length allows operator positions to remain stable.
-    Doubled single quotes are treated as escaped quotes inside a literal.
-    """
-    characters = list(text)
-    in_string = False
-    index = 0
-
-    while index < len(characters):
-        character = characters[index]
-
-        if character != "'":
-            if in_string:
-                characters[index] = " "
-            index += 1
-            continue
-
-        characters[index] = " "
-
-        if in_string and index + 1 < len(characters):
-            if characters[index + 1] == "'":
-                characters[index + 1] = " "
-                index += 2
-                continue
-
-        in_string = not in_string
-        index += 1
-
-    return "".join(characters)
-
-
-def _nearest_ifx_non_space_character(text, start, step):
-    """Return the nearest non-space character or ``None``."""
-    index = start
-
-    while 0 <= index < len(text) and text[index].isspace():
-        index += step
-
-    if 0 <= index < len(text):
-        return text[index]
-
-    return None
-
-
-def _is_ifx_non_binary_sign(text, index):
-    """Return whether ``+`` or ``-`` is unary or part of an exponent."""
-    previous_character = _nearest_ifx_non_space_character(
-        text,
-        index - 1,
-        -1,
-    )
-    next_character = _nearest_ifx_non_space_character(
-        text,
-        index + 1,
-        1,
-    )
-
-    is_unary_sign = (
-        previous_character is None
-        or previous_character in "(,"
-    )
-    is_exponent_sign = (
-        previous_character in {"e", "E"}
-        and next_character is not None
-        and next_character.isdigit()
-    )
-
-    return is_unary_sign or is_exponent_sign
-
-
-def _contains_ifx_binary_arithmetic_operator(text):
-    """Return whether unquoted SQL contains a binary arithmetic operator."""
-    if any(operator in text for operator in "*/%"):
-        return True
-
-    for index, character in enumerate(text):
-        if (
-            character in "+-"
-            and not _is_ifx_non_binary_sign(text, index)
-        ):
-            return True
-
-    return False
-
-
-def _contains_ifx_arithmetic_default(default_sql):
-    """Return True for arithmetic operators outside quoted SQL literals."""
-    text = _strip_ifx_outer_parentheses(str(default_sql))
-
-    if not text or _is_ifx_scalar_default_literal(text):
-        return False
-
-    unquoted_text = _mask_ifx_quoted_literals(text)
-    return _contains_ifx_binary_arithmetic_operator(unquoted_text)
-
 
 def _validate_ifx_server_default(column, default_sql):
     """Reject arithmetic server defaults unsupported by Informix."""
@@ -766,28 +680,6 @@ def _ifx_current_default_for_column(type_compiler, column):
         return f"CURRENT {qualifier}"
 
     return "CURRENT"
-
-
-def _normalize_ifx_boolean_default(value):
-    """Return SQLAlchemy's canonical spelling for an Informix BOOLEAN default."""
-    candidate = _strip_ifx_outer_parentheses(value)
-
-    if (
-        len(candidate) >= 2
-        and candidate[0] == candidate[-1]
-        and candidate[0] in {"'", '"'}
-    ):
-        candidate = candidate[1:-1].strip()
-
-    normalized = candidate.casefold()
-
-    if normalized in {"t", "true", "1"}:
-        return "true"
-
-    if normalized in {"f", "false", "0"}:
-        return "false"
-
-    return None
 
 
 def _normalize_ifx_reflected_default(raw_default, reflected_type):
@@ -917,6 +809,7 @@ ischema_names = {
     'CLOB': CLOB,
     'DATE': DATE,
     'DATETIME': DATETIME,
+    'INTERVAL': INTERVAL,
     'SERIAL': SERIAL,
     'SERIAL8': SERIAL8,
     'BIGSERIAL': BIGSERIAL,
@@ -958,6 +851,7 @@ _IFX_TYPE_VISITOR_ALIASES = {
     "visit_DATE": "visit_date",
     "visit_TIME": "visit_time",
     "visit_DATETIME": "visit_datetime",
+    "visit_INTERVAL": "visit_INTERVAL",
     "visit_SMALLINT": "visit_smallint",
     "visit_INT": "visit_int",
     "visit_BIGINT": "visit_bigint",
@@ -1031,6 +925,10 @@ class IfxTypeCompiler(compiler.GenericTypeCompiler):
             "DATETIME YEAR TO "
             f"FRACTION({fraction_digits})"
         )
+
+    def visit_INTERVAL(self, type_, **kw):
+        _ = kw
+        return f"INTERVAL {type_.qualifier_sql()}"
 
     def visit_smallint(self, type_):
         return "SMALLINT"
@@ -1408,6 +1306,66 @@ class IfxCompiler(compiler.SQLCompiler):
 
         return " ".join(clauses)
 
+    def visit_table(
+        self,
+        table,
+        asfrom=False,
+        iscrud=False,
+        ashint=False,
+        fromhints=None,
+        use_schema=True,
+        from_linter=None,
+        ambiguous_table_name_map=None,
+        enclosing_alias=None,
+        **kwargs,
+    ):
+        """Alias owner-qualified tables to their local table name.
+
+        Informix accepts ``owner.table`` in FROM, but column references are
+        rendered as ``table.column``.  An explicit alias keeps those two forms
+        consistent and also disambiguates a default-owner table from a table
+        with the same name in another owner namespace.
+        """
+        rendered = super().visit_table(
+            table,
+            asfrom=asfrom,
+            iscrud=iscrud,
+            ashint=ashint,
+            fromhints=fromhints,
+            use_schema=use_schema,
+            from_linter=from_linter,
+            ambiguous_table_name_map=ambiguous_table_name_map,
+            enclosing_alias=enclosing_alias,
+            **kwargs,
+        )
+
+        if not (asfrom or ashint) or iscrud:
+            return rendered
+
+        # ``enclosing_alias`` is also propagated while compiling nested
+        # SELECTs/subqueries.  Suppress the implicit local-name alias only
+        # when this exact table is already the element of an explicit
+        # SQLAlchemy Alias.  Treating every non-None enclosing alias as a
+        # reason to skip it leaves owner-qualified same-named tables rendered
+        # as ``owner.table`` while their columns are rendered as
+        # ``table.column``, which Informix resolves against the wrong FROM
+        # element (or reports -217).
+        if (
+            enclosing_alias is not None
+            and getattr(enclosing_alias, "element", None) is table
+        ):
+            return rendered
+
+        effective_schema = self.preparer.schema_for_object(table)
+        if not (use_schema and effective_schema):
+            return rendered
+
+        alias_name = self.preparer.quote(table.name)
+        suffix = self.get_render_as_alias_suffix(alias_name)
+        if not rendered.endswith(suffix):
+            rendered += suffix
+        return rendered
+
     def visit_column(
         self,
         column,
@@ -1470,6 +1428,11 @@ class IfxCompiler(compiler.SQLCompiler):
         parameter sets and to tables that expose an autoincrement column.
         Other empty INSERT shapes keep SQLAlchemy's normal CompileError.
         """
+        # Materialize explicit Identity sequences before SQLAlchemy builds the
+        # CRUD parameter list.  Their Sequence defaults are then pre-executed
+        # and included in INSERT even when the user supplied no values.
+        _materialize_ifx_identity_sequences_for_table(insert_stmt.table)
+
         is_empty_parameter_set = (
             self.column_keys == []
             and not insert_stmt._values
@@ -1480,7 +1443,13 @@ class IfxCompiler(compiler.SQLCompiler):
         if is_empty_parameter_set:
             autoincrement_column = insert_stmt.table._autoincrement_column
 
-            if autoincrement_column is not None:
+            # Legacy implicit autoincrement remains SERIAL and uses zero to
+            # request the next value.  Explicit Identity columns have a
+            # pre-executed private Sequence default and must not be rewritten.
+            if (
+                autoincrement_column is not None
+                and getattr(autoincrement_column, "identity", None) is None
+            ):
                 insert_stmt = insert_stmt.values(
                     {autoincrement_column: 0}
                 )
@@ -1677,18 +1646,61 @@ class IfxCompiler(compiler.SQLCompiler):
             **kw,
         )
 
+    def _ifx_apply_compiled_optimizer_directives(
+        self, statement, rendered, keyword
+    ):
+        """Render directives during explicit/non-cached compilation.
+
+        SQLAlchemy statement execution options are intentionally absent from
+        the structural cache key.  Cached engine compilation therefore leaves
+        the SQL generic and :class:`IfxExecutionContext` injects the comment
+        immediately before execution.  Explicit ``statement.compile()`` calls
+        have no cache key and are rendered here so diagnostics and tests see
+        the exact Informix SQL.
+        """
+        if statement is not self.statement:
+            return rendered
+
+        directives = statement.get_execution_options().get(
+            INFORMIX_OPTIMIZER_DIRECTIVES
+        )
+        if not directives:
+            return rendered
+
+        # Validate even for cached compilation, so invalid directives fail at
+        # compile time rather than after a connection has been checked out.
+        normalize_optimizer_directives(directives)
+        if self.cache_key is not None:
+            return rendered
+
+        comment = render_optimizer_comment(directives, self)
+        self._ifx_optimizer_directives_rendered = True
+        return insert_optimizer_comment(rendered, keyword, comment)
+
+    def visit_select(self, select_stmt, **kw):
+        rendered = super().visit_select(select_stmt, **kw)
+        return self._ifx_apply_compiled_optimizer_directives(
+            select_stmt, rendered, "SELECT"
+        )
+
     def visit_update(self, update_stmt, visiting_cte=None, **kw):
-        return super().visit_update(
+        rendered = super().visit_update(
             self._ifx_rewrite_multitable_dml_as_exists(update_stmt),
             visiting_cte=visiting_cte,
             **kw,
         )
+        return self._ifx_apply_compiled_optimizer_directives(
+            update_stmt, rendered, "UPDATE"
+        )
 
     def visit_delete(self, delete_stmt, visiting_cte=None, **kw):
-        return super().visit_delete(
+        rendered = super().visit_delete(
             self._ifx_rewrite_multitable_dml_as_exists(delete_stmt),
             visiting_cte=visiting_cte,
             **kw,
+        )
+        return self._ifx_apply_compiled_optimizer_directives(
+            delete_stmt, rendered, "DELETE"
         )
 
     def visit_select_statement_grouping(self, grouping, **kw):
@@ -2301,7 +2313,18 @@ class IfxCompiler(compiler.SQLCompiler):
         return self.process(paged, asfrom=asfrom, **kwargs)
 
     def visit_sequence(self, sequence, **kw):
-        return "%s.NEXTVAL" % self.preparer.format_sequence(sequence)
+        schema = self.preparer.schema_for_object(sequence)
+        if str(schema or "").startswith("__[SCHEMA_"):
+            # Preserve SQLAlchemy's schema-translation token verbatim.  The
+            # Informix preparer wraps the translated owner after replacement.
+            return "%s.%s.NEXTVAL" % (
+                schema,
+                self.preparer.quote(sequence.name),
+            )
+        return "%s.NEXTVAL" % _ifx_sequence_nextval_name(
+            self.preparer,
+            sequence,
+        )
 
     def visit_function(self, func, add_to_result_map=None, **kwargs):
         if add_to_result_map is not None:
@@ -2578,9 +2601,173 @@ class IfxDDLCompiler(compiler.DDLCompiler):
 
     _WRITABLE_TABLE_LOCK_LEVELS = frozenset({"PAGE", "ROW"})
 
+    def _comment_catalog_name(self, identifier):
+        value = str(identifier)
+        quote = getattr(identifier, "quote", None)
+        if quote is True:
+            return value
+        if quote is False:
+            return value.lower()
+        if sqla_compat.identifier_requires_quotes(self.preparer, value):
+            return value
+        return value.lower()
+
+    def _comment_literal(self, value):
+        return self.sql_compiler.render_literal_value(
+            value,
+            sa_types.String(),
+        )
+
+    def _comment_owner_predicate(self, table, alias="t"):
+        schema = table.schema
+        if schema is None:
+            return f"LOWER({alias}.owner) = LOWER(USER)"
+
+        schema_value = str(schema)
+        schema_literal = self._comment_literal(schema_value)
+        quote = getattr(schema, "quote", None)
+        if quote is True:
+            return f"{alias}.owner = {schema_literal}"
+        if quote is False:
+            return f"LOWER({alias}.owner) = LOWER({schema_literal})"
+        if sqla_compat.identifier_requires_quotes(
+            self.preparer, schema_value
+        ):
+            return f"{alias}.owner = {schema_literal}"
+
+        return f"LOWER({alias}.owner) = LOWER({schema_literal})"
+
+    def _comment_table_predicates(self, table, alias="t"):
+        table_name = self._comment_catalog_name(table.name)
+        table_literal = self._comment_literal(table_name)
+        return (
+            f"{alias}.tabname = {table_literal} "
+            f"AND {self._comment_owner_predicate(table, alias)} "
+            f"AND {alias}.tabtype IN ('T', 'V')"
+        )
+
+    def _table_comment_source(self, table, encoded_comment):
+        encoded_literal = self._comment_literal(encoded_comment)
+        predicates = self._comment_table_predicates(table)
+        return (
+            "SELECT t.tabid, t.owner AS object_owner, "
+            "t.tabname AS object_name, "
+            f"{encoded_literal} AS comment_value "
+            "FROM systables t "
+            f"WHERE {predicates}"
+        )
+
+    def _column_comment_source(self, column, encoded_comment):
+        table = column.table
+        encoded_literal = self._comment_literal(encoded_comment)
+        column_name = self._comment_catalog_name(column.name)
+        column_literal = self._comment_literal(column_name)
+        predicates = self._comment_table_predicates(table)
+        return (
+            "SELECT c.tabid, c.colno, t.owner AS object_owner, "
+            "t.tabname AS object_name, c.colname AS column_name, "
+            f"{encoded_literal} AS comment_value "
+            "FROM systables t JOIN syscolumns c ON c.tabid = t.tabid "
+            f"WHERE {predicates} AND c.colname = {column_literal}"
+        )
+
+    def visit_set_table_comment(self, create, **kw):
+        _ = kw
+        encoded = encode_comment(create.element.comment)
+        source = self._table_comment_source(create.element, encoded)
+        return (
+            f"MERGE INTO {TABLE_COMMENT_CATALOG} AS target "
+            f"USING ({source}) AS source "
+            "ON target.tabid = source.tabid "
+            "WHEN MATCHED THEN UPDATE SET "
+            "target.object_owner = source.object_owner, "
+            "target.object_name = source.object_name, "
+            "target.comment_value = source.comment_value "
+            "WHEN NOT MATCHED THEN INSERT "
+            "(tabid, object_owner, object_name, comment_value) "
+            "VALUES (source.tabid, source.object_owner, "
+            "source.object_name, source.comment_value)"
+        )
+
+    def visit_drop_table_comment(self, drop, **kw):
+        _ = kw
+        predicates = self._comment_table_predicates(drop.element)
+        return (
+            f"DELETE FROM {TABLE_COMMENT_CATALOG} "
+            "WHERE tabid IN ("
+            "SELECT t.tabid FROM systables t "
+            f"WHERE {predicates})"
+        )
+
+    def visit_set_column_comment(self, create, **kw):
+        _ = kw
+        encoded = encode_comment(create.element.comment)
+        source = self._column_comment_source(create.element, encoded)
+        return (
+            f"MERGE INTO {COLUMN_COMMENT_CATALOG} AS target "
+            f"USING ({source}) AS source "
+            "ON target.tabid = source.tabid "
+            "AND target.colno = source.colno "
+            "WHEN MATCHED THEN UPDATE SET "
+            "target.object_owner = source.object_owner, "
+            "target.object_name = source.object_name, "
+            "target.column_name = source.column_name, "
+            "target.comment_value = source.comment_value "
+            "WHEN NOT MATCHED THEN INSERT "
+            "(tabid, colno, object_owner, object_name, "
+            "column_name, comment_value) "
+            "VALUES (source.tabid, source.colno, source.object_owner, "
+            "source.object_name, source.column_name, "
+            "source.comment_value)"
+        )
+
+    def visit_drop_column_comment(self, drop, **kw):
+        _ = kw
+        column = drop.element
+        predicates = self._comment_table_predicates(column.table)
+        column_name = self._comment_catalog_name(column.name)
+        column_literal = self._comment_literal(column_name)
+        return (
+            f"DELETE FROM {COLUMN_COMMENT_CATALOG} "
+            "WHERE EXISTS ("
+            "SELECT 1 FROM systables t "
+            "JOIN syscolumns c ON c.tabid = t.tabid "
+            f"WHERE {predicates} AND c.colname = {column_literal} "
+            f"AND {COLUMN_COMMENT_CATALOG}.tabid = c.tabid "
+            f"AND {COLUMN_COMMENT_CATALOG}.colno = c.colno)"
+        )
+
     def _format_fragment_identifier(self, value):
         """Quote one validated Informix fragment/dbspace identifier."""
         return self.preparer.quote(value)
+
+    def _partial_index_partition_names(self, index):
+        """Return deterministic partition names for a partial index.
+
+        Informix 14.10+ models a partial index as expression fragmentation
+        with one indexed partition and one ``INDEX OFF`` remainder partition.
+        When both partitions use the same dbspace, the native grammar requires
+        explicit partition names.  Keep the generated names deterministic so
+        reflection and Alembic round trips can recognise dialect-created
+        partial indexes, while respecting the server identifier limit.
+        """
+        base = str(self._physical_index_name(index))
+        enabled_suffix = "__ifx_on"
+        disabled_suffix = "__ifx_off"
+        max_suffix = max(len(enabled_suffix), len(disabled_suffix))
+        max_length = int(getattr(self.dialect, "max_identifier_length", 128) or 128)
+
+        if len(base) + max_suffix > max_length:
+            digest = hashlib.sha1(base.encode("utf-8")).hexdigest()[:10]
+            available = max_length - max_suffix - len(digest) - 1
+            if available < 1:
+                raise exc.CompileError(
+                    "Informix identifier length is too small for generated "
+                    "partial-index partition names"
+                )
+            base = f"{base[:available]}_{digest}"
+
+        return base + enabled_suffix, base + disabled_suffix
 
     def _fragment_expression_sql(
         self,
@@ -3446,6 +3633,11 @@ class IfxDDLCompiler(compiler.DDLCompiler):
         return default_sql
 
     def get_column_specification(self, column, **kw):
+        # Explicit SQLAlchemy Identity is emulated with a private Sequence.
+        # Materialize it during DDL compilation so later INSERT compilation
+        # sees the pre-executed default even when no MetaData event has fired.
+        _materialize_ifx_identity_sequence(column)
+
         col_spec = [self.preparer.format_column(column)]
 
         rendered_type = self.dialect.type_compiler.process(
@@ -3785,6 +3977,12 @@ class IfxDDLCompiler(compiler.DDLCompiler):
         return expression, descending
 
     def _validate_functional_index(self, index):
+        """Validate declared functional/generalized index expressions.
+
+        Informix accepts composite indexes that mix ordinary columns and
+        nonvariant UDR calls.  Arbitrary expressions and raw SQL remain
+        intentionally unsupported for newly declared indexes.
+        """
         options = self._informix_index_options(index)
         explicitly_functional = bool(options.get("functional"))
         reflected_procedure = options.get("procedure")
@@ -3792,159 +3990,490 @@ class IfxDDLCompiler(compiler.DDLCompiler):
         def is_plain_column_expression(expression):
             if isinstance(expression, sa_schema.Column):
                 return True
-            if isinstance(expression, sql_elements.UnaryExpression):
-                return (
-                    expression.modifier in (operators.asc_op, operators.desc_op)
-                    and isinstance(expression.element, sa_schema.Column)
-                )
-            return False
+            return (
+                isinstance(expression, sql_elements.UnaryExpression)
+                and expression.modifier in (operators.asc_op, operators.desc_op)
+                and isinstance(expression.element, sa_schema.Column)
+            )
 
         has_non_column_expression = any(
             not is_plain_column_expression(expression)
             for expression in index.expressions
         )
-
         if not explicitly_functional and not reflected_procedure:
             if has_non_column_expression:
                 raise exc.CompileError(
                     "Informix expression indexes must opt in with "
-                    "informix_functional=True. Only a nonvariant UDR call "
-                    "over columns of the indexed table is supported."
+                    "informix_functional=True. Only nonvariant UDR calls "
+                    "over indexed-table columns are supported."
                 )
             return
 
-        # Reflected functional indexes are represented by TextClause entries
-        # plus catalog procedure metadata. They were already validated by the
-        # server when created, so mixed and multi-key indexes can be emitted
-        # again without widening the contract for newly declared indexes.
         if reflected_procedure:
-            has_reflected_expression = False
-            for expression in index.expressions:
-                if isinstance(expression, sql_elements.TextClause):
-                    has_reflected_expression = True
-                    continue
-                if not is_plain_column_expression(expression):
-                    raise exc.CompileError(
-                        "Reflected Informix functional indexes may contain "
-                        "only table columns and reflected SQL text"
-                    )
-            if not has_reflected_expression:
+            if not any(
+                isinstance(expression, sql_elements.TextClause)
+                for expression in index.expressions
+            ):
                 raise exc.CompileError(
-                    "informix_procedure metadata requires at least one "
-                    "reflected functional expression"
+                    "informix_procedure metadata requires reflected SQL text"
                 )
             return
 
-        if len(index.expressions) != 1:
-            raise exc.CompileError(
-                "The initial Informix functional-index implementation "
-                "supports exactly one function key"
+        found_function = False
+        for expression in index.expressions:
+            if is_plain_column_expression(expression):
+                continue
+            function, _descending = self._unwrap_functional_index_expression(
+                expression
             )
+            found_function = True
+            arguments = list(function.clauses)
+            if not arguments:
+                raise exc.CompileError(
+                    "Informix functional indexes require at least one column argument"
+                )
 
-        expression = index.expressions[0]
-        function, _descending = self._unwrap_functional_index_expression(
-            expression
-        )
+            function_name = str(getattr(function, "name", "")).casefold()
+            access_method = str(
+                options.get("using") or options.get("access_method") or ""
+            ).casefold()
+            if function_name == "bson_get":
+                if access_method != "bson":
+                    raise exc.CompileError(
+                        "Informix BSON_GET indexes require informix_using='BSON' or informix_access_method='BSON'"
+                    )
+                if len(arguments) not in (2, 3):
+                    raise exc.CompileError(
+                        "Informix BSON_GET indexes require a field and optional renamed field"
+                    )
+                first_argument = arguments[0]
+                if isinstance(first_argument, sql_elements.Grouping):
+                    first_argument = first_argument.element
+                if not isinstance(first_argument, sa_schema.Column) or first_argument.table is not index.table:
+                    raise exc.CompileError(
+                        "Informix BSON_GET index first argument must be an indexed-table column"
+                    )
+                for argument in arguments[1:]:
+                    if isinstance(argument, sql_elements.Grouping):
+                        argument = argument.element
+                    if not (
+                        isinstance(argument, sql_elements.BindParameter)
+                        and isinstance(argument.value, str)
+                        and argument.value
+                    ):
+                        raise exc.CompileError(
+                            "Informix BSON_GET field names must be non-empty string literals"
+                        )
+                continue
 
-        arguments = list(function.clauses)
-        if not arguments:
-            raise exc.CompileError(
-                "Informix functional indexes require at least one column "
-                "argument"
-            )
-
-        function_name = str(getattr(function, "name", "")).casefold()
-        access_method = str(options.get("access_method") or "").casefold()
-        if function_name == "bson_get":
-            if access_method != "bson":
-                raise exc.CompileError(
-                    "Informix BSON_GET indexes require "
-                    "informix_access_method='BSON'"
-                )
-            first_argument = arguments[0]
-            if isinstance(first_argument, sql_elements.Grouping):
-                first_argument = first_argument.element
-            if not isinstance(first_argument, sa_schema.Column):
-                raise exc.CompileError(
-                    "Informix BSON_GET index first argument must be a "
-                    "direct BSON table column"
-                )
-            if first_argument.table is not index.table:
-                raise exc.CompileError(
-                    "The BSON_GET index column must belong to the indexed table"
-                )
-            if len(arguments) not in (2, 3):
-                raise exc.CompileError(
-                    "Informix BSON_GET indexes require a field and optional "
-                    "renamed field"
-                )
-            for argument in arguments[1:]:
+            for argument in arguments:
                 if isinstance(argument, sql_elements.Grouping):
                     argument = argument.element
-                if not (
-                    isinstance(argument, sql_elements.BindParameter)
-                    and isinstance(argument.value, str)
-                    and argument.value
-                ):
+                if not isinstance(argument, sa_schema.Column):
                     raise exc.CompileError(
-                        "Informix BSON_GET index field names must be "
-                        "non-empty string literals"
+                        "Informix functional-index arguments must be direct table columns"
                     )
-            return
+                if argument.table is not index.table:
+                    raise exc.CompileError(
+                        "Every functional-index argument must belong to the indexed table"
+                    )
 
-        for argument in arguments:
-            if isinstance(argument, sql_elements.Grouping):
-                argument = argument.element
+        if not found_function:
+            raise exc.CompileError(
+                "informix_functional=True requires a SQLAlchemy function call"
+            )
 
-            if not isinstance(argument, sa_schema.Column):
+    @staticmethod
+    def _index_option_identifier(value, option_name):
+        if not isinstance(value, str) or not value.strip():
+            raise exc.CompileError(f"informix_{option_name} must be a non-empty identifier")
+        parts = value.strip().split(".")
+        if len(parts) > 2 or any(
+            re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", part) is None
+            for part in parts
+        ):
+            raise exc.CompileError(f"informix_{option_name} must be a safe identifier")
+        return ".".join(parts)
+
+    def _index_access_method(self, options):
+        using = options.get("using")
+        legacy = options.get("access_method")
+        if using is not None and legacy is not None and str(using).casefold() != str(legacy).casefold():
+            raise exc.CompileError(
+                "informix_using and informix_access_method cannot disagree"
+            )
+        # ``access_method`` predates the public advanced-index API and is also
+        # populated by reflection.  Preserve its historic non-emitting role,
+        # except for the verified BSON access method.  New declarations use
+        # ``informix_using``.
+        value = using
+        reflected_parameters = isinstance(
+            options.get("amparam"),
+            _ReflectedAccessMethodParameters,
+        )
+        if value is None and legacy is not None and (
+            str(legacy).casefold() == "bson" or reflected_parameters
+        ):
+            value = legacy
+        if value is None:
+            return None
+        return self._index_option_identifier(value, "using")
+
+    @staticmethod
+    def _index_access_method_literal(value):
+        if isinstance(value, bool) or value is None:
+            raise exc.CompileError(
+                "informix_amparam values must be strings or finite numbers"
+            )
+        if isinstance(value, str):
+            return "'" + value.replace("'", "''") + "'"
+        if isinstance(value, int):
+            return str(value)
+        if isinstance(value, Decimal):
+            if not value.is_finite():
                 raise exc.CompileError(
-                    "Informix functional-index arguments must be direct "
-                    "table columns; literals and nested expressions are not "
-                    "supported"
+                    "informix_amparam numeric values must be finite"
                 )
-
-            if argument.table is not index.table:
+            return str(value)
+        if isinstance(value, float):
+            if not math.isfinite(value):
                 raise exc.CompileError(
-                    "Every Informix functional-index argument must belong "
-                    "to the indexed table"
+                    "informix_amparam numeric values must be finite"
                 )
+            return repr(value)
+        raise exc.CompileError(
+            "informix_amparam values must be strings or finite numbers"
+        )
+
+    def _index_access_method_parameters(self, options, access_method):
+        value = options.get("amparam")
+        if value is None:
+            return None
+        if access_method is None:
+            raise exc.CompileError(
+                "informix_amparam requires informix_using"
+            )
+
+        if isinstance(value, _ReflectedAccessMethodParameters):
+            rendered = value.strip()
+            if rendered.startswith("(") and rendered.endswith(")"):
+                rendered = rendered[1:-1].strip()
+            if not rendered:
+                raise exc.CompileError(
+                    "reflected Informix access-method parameters are empty"
+                )
+            return rendered
+
+        if not isinstance(value, Mapping) or not value:
+            raise exc.CompileError(
+                "informix_amparam must be a non-empty mapping; arbitrary SQL text is not accepted"
+            )
+
+        rendered = []
+        for key, item in value.items():
+            name = self._index_option_identifier(key, "amparam")
+            if "." in name:
+                raise exc.CompileError(
+                    "informix_amparam names must be unqualified identifiers"
+                )
+            rendered.append(
+                f"{name}={self._index_access_method_literal(item)}"
+            )
+        return ", ".join(rendered)
+
+    def _index_opclasses(self, index, options):
+        value = options.get("opclass")
+        if (
+            options.get("procedure")
+            and options.get("using") is None
+            and not isinstance(
+                options.get("amparam"),
+                _ReflectedAccessMethodParameters,
+            )
+        ):
+            # Reflected metadata is descriptive.  Do not broaden legacy
+            # round-trip DDL unless the new public ``informix_using`` API was
+            # selected explicitly or catalog-backed access-method parameters
+            # require an exact round trip.
+            value = None
+        if value is None:
+            return (None,) * len(index.expressions)
+        values = value if isinstance(value, (tuple, list)) else (value,) * len(index.expressions)
+        if len(values) != len(index.expressions):
+            raise exc.CompileError(
+                "informix_opclass sequence must match the number of index keys"
+            )
+        return tuple(
+            self._index_option_identifier(item, "opclass") if item is not None else None
+            for item in values
+        )
+
+    def _render_index_key(self, expression, opclass):
+        rendered = self.sql_compiler.process(
+            expression,
+            include_table=False,
+            literal_binds=True,
+        )
+        if opclass is None:
+            return rendered
+        suffix = ""
+        upper = rendered.upper()
+        for candidate in (" DESC", " ASC"):
+            if upper.endswith(candidate):
+                rendered, suffix = rendered[:-len(candidate)], rendered[-len(candidate):]
+                break
+        rendered_opclass = ".".join(opclass.split("."))
+        return f"{rendered} {rendered_opclass}{suffix}"
+
+    def _validate_index_predicate(self, index, predicate):
+        if predicate is None:
+            return None
+        from .fragmentation import _ReflectedFragmentExpression
+        if isinstance(predicate, _ReflectedFragmentExpression):
+            return predicate.sql
+        if not isinstance(predicate, sql_elements.ClauseElement) or isinstance(predicate, sql_elements.TextClause):
+            raise exc.CompileError(
+                "informix_where must be a structured SQLAlchemy expression"
+            )
+        for element in sql_visitors.iterate(predicate):
+            if isinstance(element, sa_schema.Column) and element.table is not index.table:
+                raise exc.CompileError(
+                    "informix_where columns must belong to the indexed table"
+                )
+        return self.sql_compiler.process(
+            predicate,
+            include_table=False,
+            literal_binds=True,
+        )
+
+    def _hash_on_clause(self, index, options):
+        raw = options.get("hash_on")
+        buckets = options.get("buckets")
+        if raw is None:
+            if buckets is not None:
+                raise exc.CompileError("informix_buckets requires informix_hash_on")
+            return None
+        if not isinstance(raw, (tuple, list)) or not raw:
+            raise exc.CompileError("informix_hash_on must be a non-empty column sequence")
+        if not isinstance(buckets, int) or isinstance(buckets, bool) or buckets < 2:
+            raise exc.CompileError("informix_buckets must be an integer greater than one")
+
+        index_columns = []
+        for expression in index.expressions:
+            element = expression.element if isinstance(expression, sql_elements.UnaryExpression) else expression
+            if not isinstance(element, sa_schema.Column):
+                raise exc.CompileError(
+                    "forest-of-trees indexes require ordinary column keys"
+                )
+            index_columns.append(element)
+
+        columns = []
+        for item in raw:
+            if isinstance(item, str):
+                if item not in index.table.c:
+                    raise exc.CompileError(f"informix_hash_on column {item!r} is not in the indexed table")
+                column = index.table.c[item]
+            elif isinstance(item, sa_schema.Column) and item.table is index.table:
+                column = item
+            else:
+                raise exc.CompileError(
+                    "informix_hash_on accepts indexed-table Column objects or names"
+                )
+            columns.append(column)
+        if index_columns[: len(columns)] != columns:
+            raise exc.CompileError(
+                "informix_hash_on must be a prefix of the index key columns"
+            )
+        names = ", ".join(self.preparer.quote(column.name) for column in columns)
+        return f"HASH ON ({names}) WITH {buckets} BUCKETS"
+
+    def _validate_advanced_index_options(self, index, options):
+        for name in ("online", "compressed"):
+            value = options.get(name)
+            if value not in (None, True, False):
+                raise exc.CompileError(f"informix_{name} must be a boolean")
+
+        fillfactor = options.get("fillfactor")
+        if fillfactor is not None and (
+            not isinstance(fillfactor, int)
+            or isinstance(fillfactor, bool)
+            or not 1 <= fillfactor <= 100
+        ):
+            raise exc.CompileError("informix_fillfactor must be between 1 and 100")
+
+        mode = options.get("mode")
+        if mode is not None:
+            if not isinstance(mode, str):
+                raise exc.CompileError("informix_mode must be a string")
+            mode = " ".join(mode.strip().upper().split())
+            valid = {"ENABLED", "DISABLED", "FILTERING", "FILTERING WITH ERROR", "FILTERING WITHOUT ERROR"}
+            if mode not in valid:
+                raise exc.CompileError("invalid informix_mode")
+            if mode.startswith("FILTERING") and not index.unique:
+                raise exc.CompileError("FILTERING is valid only for unique indexes")
+
+        visible = options.get("visible")
+        if visible not in (None, True, False):
+            raise exc.CompileError("informix_visible must be a boolean or None")
+
+        access_method = self._index_access_method(options)
+        hash_clause = self._hash_on_clause(index, options)
+        if hash_clause:
+            if fillfactor is not None:
+                raise exc.CompileError("FILLFACTOR is not valid for forest-of-trees indexes")
+            if options.get("fragment_by") is not None or options.get("dbspace") is not None:
+                raise exc.CompileError("forest-of-trees indexes cannot specify detached storage")
+            if options.get("where") is not None:
+                raise exc.CompileError("forest-of-trees indexes cannot be partial")
+            if options.get("compressed"):
+                raise exc.CompileError("forest-of-trees indexes cannot be COMPRESSED")
+        if options.get("compressed") and access_method and access_method.casefold() != "btree":
+            raise exc.CompileError("COMPRESSED is valid only for B-tree indexes")
+
+        # Although the published CREATE INDEX syntax diagrams list ONLINE and
+        # COMPRESSED as adjacent optional clauses, Informix 15.0.1 rejects the
+        # combination with SQLCODE -201 in either textual order.  Treat them
+        # as mutually exclusive so the dialect never emits SQL that the native
+        # parser cannot execute.  Applications that need both properties must
+        # create the index ONLINE first and run an explicit administrative
+        # index-compression operation afterwards.
+        if options.get("online") and options.get("compressed"):
+            raise exc.CompileError(
+                "Informix does not support ONLINE and COMPRESSED in the same "
+                "CREATE INDEX statement; create the index ONLINE and compress "
+                "it in a separate administrative operation"
+            )
+
+        if options.get("online"):
+            if options.get("functional") or options.get("procedure"):
+                raise exc.CompileError(
+                    "Informix CREATE INDEX ONLINE does not support functional indexes"
+                )
+            if access_method and access_method.casefold() in {"rtree", "r-tree"}:
+                raise exc.CompileError(
+                    "Informix CREATE INDEX ONLINE does not support R-tree indexes"
+                )
+            from .fragmentation import RangeIntervalFragmentation
+
+            if isinstance(options.get("fragment_by"), RangeIntervalFragmentation):
+                raise exc.CompileError(
+                    "Informix CREATE INDEX ONLINE does not support interval-fragmented indexes"
+                )
+            table_options = index.table.dialect_options["informix"]
+            if isinstance(
+                table_options.get("fragment_by"),
+                RangeIntervalFragmentation,
+            ):
+                raise exc.CompileError(
+                    "Informix CREATE INDEX ONLINE does not support indexes on interval-fragmented tables"
+                )
+        return access_method, hash_clause
 
     def visit_create_index(
         self, create, include_schema=False, include_table_schema=True, **kw
     ):
-        self._validate_functional_index(create.element)
+        index = create.element
+        self._validate_functional_index(index)
+        self._verify_index_table(index)
+        options = self._informix_index_options(index)
+        access_method, hash_clause = self._validate_advanced_index_options(index, options)
+        access_method_parameters = self._index_access_method_parameters(
+            options, access_method
+        )
+        opclasses = self._index_opclasses(index, options)
 
-        sql = super(IfxDDLCompiler, self).visit_create_index(
-            create,
-            include_schema=include_schema,
-            include_table_schema=include_table_schema,
-            **kw
+        text = "CREATE "
+        if index.unique:
+            text += "UNIQUE "
+        text += "INDEX "
+        if create.if_not_exists:
+            text += "IF NOT EXISTS "
+        text += self._prepared_index_name(index, include_schema=include_schema)
+        text += " ON " + self.preparer.format_table(index.table, use_schema=include_table_schema)
+        keys = ", ".join(
+            self._render_index_key(expression, opclass)
+            for expression, opclass in zip(index.expressions, opclasses)
         )
-        index_options = create.element.dialect_options["informix"]
-        access_method = index_options.get("access_method")
-        # ``access_method`` is also reflection metadata for ordinary
-        # functional indexes (for example ``btree``).  Preserve the existing
-        # emitted DDL for those indexes and add ``USING BSON`` only for the
-        # native Informix BSON field-index form verified by the JSON/BSON
-        # implementation.
-        if access_method and str(access_method).casefold() == "bson":
-            if (
-                not isinstance(access_method, str)
-                or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", access_method.strip())
-            ):
+        text += f" ({keys})"
+
+        if access_method:
+            text += " USING " + access_method
+            if access_method_parameters:
+                text += " (" + access_method_parameters + ")"
+        fillfactor = options.get("fillfactor")
+        if fillfactor is not None:
+            text += f" FILLFACTOR {fillfactor}"
+
+        predicate = self._validate_index_predicate(index, options.get("where"))
+        if predicate is not None:
+            if options.get("fragment_by") is not None:
                 raise exc.CompileError(
-                    "informix_access_method must be a safe non-empty identifier"
+                    "informix_where and informix_fragment_by are mutually exclusive"
                 )
-            sql += " USING " + access_method.strip()
-        storage_clauses = self._fragment_storage_clauses(
-            create.element,
-            index_options,
-        )
-        if storage_clauses:
-            sql += " " + " ".join(storage_clauses)
-        if self._is_unique_constraint_as_index(create.element):
-            sql += ' EXCLUDE NULL KEYS'
-        return sql
+            dbspace = options.get("dbspace")
+            if dbspace is None:
+                raise exc.CompileError(
+                    "informix_where requires informix_dbspace for the indexed fragment"
+                )
+            from .fragmentation import _identifier
+            _identifier(dbspace, "dbspace")
+            indexed_partition, excluded_partition = (
+                self._partial_index_partition_names(index)
+            )
+            text += (
+                " FRAGMENT BY EXPRESSION "
+                f"PARTITION {self._format_fragment_identifier(indexed_partition)} "
+                f"({predicate}) IN {self._format_fragment_identifier(dbspace)}, "
+                f"PARTITION {self._format_fragment_identifier(excluded_partition)} "
+                f"REMAINDER IN {self._format_fragment_identifier(dbspace)} INDEX OFF"
+            )
+        else:
+            storage = self._fragment_storage_clauses(index, options)
+            if storage:
+                text += " " + " ".join(storage)
+
+        mode = options.get("mode")
+        if mode:
+            text += " " + " ".join(mode.strip().upper().split())
+        if hash_clause:
+            text += " " + hash_clause
+        if self._is_unique_constraint_as_index(index):
+            text += " EXCLUDE NULL KEYS"
+
+        # ONLINE and COMPRESSED are validated as mutually exclusive above.
+        # Keep each clause in its documented position for statements that use
+        # only one of them.
+        if options.get("online"):
+            text += " ONLINE"
+        if options.get("compressed"):
+            text += " COMPRESSED"
+        if options.get("visible") is False:
+            text += " INVISIBLE"
+        elif options.get("visible") is True:
+            text += " VISIBLE"
+        return text
+
+    def _format_index_ddl_target(self, index_or_name):
+        if isinstance(index_or_name, sa_schema.Index):
+            return self._prepared_index_name(index_or_name, include_schema=True)
+        return self.preparer.quote(index_or_name)
+
+    def visit_set_index_mode(self, ddl, **kw):
+        _ = kw
+        return f"SET INDEXES {self._format_index_ddl_target(ddl.index)} {ddl.mode}"
+
+    def visit_set_index_visibility(self, ddl, **kw):
+        _ = kw
+        mode = "VISIBLE" if ddl.visible else "INVISIBLE"
+        return f"SET INDEXES {self._format_index_ddl_target(ddl.index)} {mode}"
+
+    def visit_alter_index_cluster(self, ddl, **kw):
+        _ = kw
+        if not ddl.clustered:
+            raise exc.CompileError(
+                "Informix ALTER INDEX only exposes TO CLUSTER; clearing clustering requires rebuilding the index"
+            )
+        return f"ALTER INDEX {self._format_index_ddl_target(ddl.index)} TO CLUSTER"
 
     def visit_add_constraint(self, create, **kw):
         if self._should_use_nullable_unique_index(create.element):
@@ -3965,10 +4494,94 @@ class IfxIdentifierPreparer(compiler.IdentifierPreparer):
     reserved_words = RESERVED_WORDS
     illegal_initial_characters = set("0123456789_$")
 
+    _ifx_translated_sequence_re = re.compile(
+        r'(?P<owner>"(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*)'
+        r'\.(?P<sequence>"(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*)'
+        r'\.NEXTVAL'
+    )
+
+    def _render_schema_translates(self, statement, schema_translate_map):
+        rendered = super()._render_schema_translates(
+            statement,
+            schema_translate_map,
+        )
+
+        def owner_qualified_sequence(match):
+            owner = match.group("owner")
+            if owner.startswith('"') and owner.endswith('"'):
+                owner_text = owner[1:-1].replace('""', '"')
+            else:
+                owner_text = owner.upper()
+            owner_literal = "'" + owner_text.replace("'", "''") + "'"
+            return (
+                owner_literal
+                + "."
+                + match.group("sequence")
+                + ".NEXTVAL"
+            )
+
+        return self._ifx_translated_sequence_re.sub(
+            owner_qualified_sequence,
+            rendered,
+        )
+
 
 class IfxExecutionContext(default.DefaultExecutionContext):
+    def _ifx_prepare_comment_catalog(self):
+        compiled = getattr(self, "compiled", None)
+        statement = getattr(compiled, "statement", None)
+        if is_comment_ddl(statement):
+            ensure_comment_catalog(self.cursor)
+
+    def _ifx_apply_runtime_optimizer_directives(self):
+        directives = self.execution_options.get(
+            INFORMIX_OPTIMIZER_DIRECTIVES
+        )
+        if not directives:
+            return
+
+        compiled = getattr(self, "compiled", None)
+        if compiled is None:
+            raise exc.ArgumentError(
+                "informix_optimizer_directives require a SQLAlchemy SELECT, "
+                "UPDATE, or DELETE construct"
+            )
+        if getattr(compiled, "_ifx_optimizer_directives_rendered", False):
+            return
+
+        clause = getattr(compiled, "statement", None)
+        if getattr(clause, "is_select", False):
+            keyword = "SELECT"
+        elif getattr(clause, "is_update", False):
+            keyword = "UPDATE"
+        elif getattr(clause, "is_delete", False):
+            keyword = "DELETE"
+        else:
+            raise exc.ArgumentError(
+                "Informix inline optimizer directives are supported only for "
+                "SELECT, UPDATE, and DELETE"
+            )
+
+        comment = render_optimizer_comment(directives, compiled)
+        self.statement = insert_optimizer_comment(
+            self.statement, keyword, comment
+        )
+
+    def pre_exec(self):
+        self._ifx_prepare_comment_catalog()
+        self._ifx_apply_runtime_optimizer_directives()
+
     def fire_sequence(self, seq, type_):
-        sequence_name = self.identifier_preparer.format_sequence(seq)
+        schema = seq.schema
+        translate_map = self.execution_options.get("schema_translate_map") or {}
+        if schema in translate_map:
+            schema = translate_map[schema]
+
+        sequence_name = _ifx_sequence_nextval_name(
+            self.identifier_preparer,
+            seq,
+            schema_override=schema,
+        )
         return self._execute_scalar(
             "SELECT FIRST 1 "
             + sequence_name
@@ -4010,6 +4623,9 @@ class _SelectLastRowIDMixin(object):
         return bool(sqla_compat.get_statement_returning(statement))
 
     def pre_exec(self):
+        super_pre_exec = getattr(super(), "pre_exec", None)
+        if super_pre_exec is not None:
+            super_pre_exec()
         self._lastrowid = None
         self._select_lastrowid = False
         self._lastrowid_query = None
@@ -4062,6 +4678,12 @@ class _SelectLastRowIDMixin(object):
 class IfxDialect(default.DefaultDialect):
     div_is_floordiv = False
 
+    connection_characteristics = (
+        default.DefaultDialect.connection_characteristics.union(
+            INFORMIX_CONNECTION_CHARACTERISTICS
+        )
+    )
+
     name = 'informix'
     max_identifier_length = 128
     encoding = 'utf-8'
@@ -4087,10 +4709,20 @@ class IfxDialect(default.DefaultDialect):
             {
                 "functional": False,
                 "procedure": None,
+                "where": None,
+                "online": False,
+                "fillfactor": None,
+                "dbspace": None,
+                "using": None,
                 "access_method": None,
                 "opclass": None,
                 "fragment_by": None,
-                "dbspace": None,
+                "hash_on": None,
+                "buckets": None,
+                "compressed": None,
+                "mode": None,
+                "visible": None,
+                "amparam": None,
             },
         ),
     ]
@@ -4100,6 +4732,9 @@ class IfxDialect(default.DefaultDialect):
     supports_unicode_statements = False
     supports_unicode_binds = False
     returns_unicode_strings = False
+    supports_comments = True
+    inline_comments = False
+    supports_constraint_comments = False
     postfetch_lastrowid = True
     supports_sane_rowcount = True
     supports_sane_multi_rowcount = True
@@ -4111,9 +4746,9 @@ class IfxDialect(default.DefaultDialect):
     supports_multivalues_insert = False
     use_insertmanyvalues = False
     use_insertmanyvalues_wo_returning = False
-    supports_identity_columns = False
+    supports_identity_columns = True
     supports_schemas = False
-    preexecute_sequences = False
+    preexecute_sequences = True
     supports_alter = True
     supports_sequences = True
     sequences_optional = True
@@ -4151,6 +4786,49 @@ class IfxDialect(default.DefaultDialect):
         self._bson_encoder = bson_encoder
         self._bson_decoder = bson_decoder
         self._reflector = self._reflector_cls(self)
+        self._informix_session_state = {}
+        self._informix_session_state_lock = threading.RLock()
+
+    def _remember_informix_session_option(
+        self, dbapi_connection, name, value
+    ):
+        with self._informix_session_state_lock:
+            state = self._informix_session_state.setdefault(
+                id(dbapi_connection), {}
+            )
+            state[name] = value
+
+    def _forget_informix_session_options(self, dbapi_connection):
+        with self._informix_session_state_lock:
+            self._informix_session_state.pop(id(dbapi_connection), None)
+
+    def get_informix_session_option(self, dbapi_connection, name):
+        with self._informix_session_state_lock:
+            return self._informix_session_state.get(
+                id(dbapi_connection), {}
+            ).get(name, default_session_option(name))
+
+    def set_informix_session_option(
+        self, dbapi_connection, name, value
+    ):
+        normalized = normalize_session_option(name, value)
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute(session_option_sql(name, normalized))
+        finally:
+            cursor.close()
+        self._remember_informix_session_option(
+            dbapi_connection, name, normalized
+        )
+
+    def reset_informix_session_option(self, dbapi_connection, name):
+        self.set_informix_session_option(
+            dbapi_connection, name, default_session_option(name)
+        )
+
+    def do_close(self, dbapi_connection):
+        self._forget_informix_session_options(dbapi_connection)
+        super().do_close(dbapi_connection)
 
     def _detect_database_mode(self, connection):
         """Return the current database name and its ANSI-mode flag."""

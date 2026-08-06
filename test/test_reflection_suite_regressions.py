@@ -473,3 +473,83 @@ def test_foreign_key_reflection_reports_ondelete_cascade(monkeypatch):
     ]
     assert connection.params == (7,)
     assert "r.delrule" in connection.statement
+
+
+def test_primary_key_reflection_hides_legacy_owner_prefix(monkeypatch):
+    reflector = IfxReflector(_Dialect())
+    monkeypatch.setattr(
+        reflector,
+        "_require_table_row",
+        lambda *args, **kw: (42, "email_addresses", "test_schema", "T"),
+    )
+    monkeypatch.setattr(
+        reflector,
+        "_get_index_columns",
+        lambda *args, **kw: (["address_id"], {}),
+    )
+    connection = _Connection(
+        ("test_schema__email_ad_pk", "TEST_SCHEMA", "email_ad_pk_idx")
+    )
+
+    reflected = reflector.get_pk_constraint(
+        connection,
+        "email_addresses",
+        schema="test_schema",
+    )
+
+    assert reflected == {
+        "name": "email_ad_pk",
+        "constrained_columns": ["address_id"],
+    }
+
+
+def test_unique_reflection_sorts_by_logical_names_after_legacy_unprefix(
+    monkeypatch,
+):
+    reflector = IfxReflector(_Dialect())
+    monkeypatch.setattr(
+        reflector,
+        "_require_table_row",
+        lambda *args, **kw: (84, "dingalings", "test_schema", "T"),
+    )
+
+    columns = {
+        "idx_data": (["data"], {}),
+        "idx_multiple": (["address_id", "dingaling_id"], {}),
+    }
+    monkeypatch.setattr(
+        reflector,
+        "_get_index_columns",
+        lambda connection, tabid, idxname, owner=None: columns[idxname],
+    )
+    connection = _RowsConnection(
+        [
+            (
+                "test_schema__zz_dingalings_multiple",
+                "TEST_SCHEMA",
+                "idx_multiple",
+            ),
+            (
+                "test_schema__dingalings_data_key",
+                "TEST_SCHEMA",
+                "idx_data",
+            ),
+        ]
+    )
+
+    reflected = reflector.get_unique_constraints(
+        connection,
+        "dingalings",
+        schema="test_schema",
+    )
+
+    assert reflected == [
+        {
+            "name": "dingalings_data_key",
+            "column_names": ["data"],
+        },
+        {
+            "name": "zz_dingalings_multiple",
+            "column_names": ["address_id", "dingaling_id"],
+        },
+    ]

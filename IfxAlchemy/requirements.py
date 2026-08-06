@@ -47,6 +47,75 @@ def _supports_isolated_owner_namespaces(config) -> bool:
 class Requirements(SuiteRequirements):
 
     @property
+    def savepoints(self):
+        """Informix supports SQLAlchemy nested transactions via savepoints."""
+        return exclusions.open()
+
+    @property
+    def autocommit(self):
+        """The pyodbc backend exposes AUTOCOMMIT as an isolation level."""
+        return exclusions.open()
+
+    @property
+    def foreign_key_constraint_name_reflection(self):
+        """Constraint names are reflected from the Informix catalogs."""
+        return exclusions.open()
+
+    @property
+    def emulated_lastrowid(self):
+        """Generated serial values are queried through DBINFO after INSERT."""
+        return exclusions.open()
+
+    @property
+    def nullsordering(self):
+        """Informix supports explicit NULLS FIRST and NULLS LAST ordering."""
+        return exclusions.open()
+
+    @property
+    def datetime_interval(self):
+        """Generic sqlalchemy.Interval remains intentionally unsupported.
+
+        Use IfxAlchemy.INTERVAL, which preserves Informix's two interval
+        families, qualifier range and both precision dimensions.
+        """
+        return exclusions.closed()
+
+    @property
+    def datetime_literals(self):
+        """Generic date/time literal rendering is not a certified contract."""
+        return exclusions.closed()
+
+    @property
+    def json_type(self):
+        """Native JSON/BSON do not yet implement SQLAlchemy's generic contract."""
+        return exclusions.closed()
+
+    @property
+    def regexp_match(self):
+        """No portable regexp match operator is implemented."""
+        return exclusions.closed()
+
+    @property
+    def regexp_replace(self):
+        """No portable regexp replacement operator is implemented."""
+        return exclusions.closed()
+
+    @property
+    def tuple_in(self):
+        """Row-value tuple IN is not advertised without matrix certification."""
+        return exclusions.closed()
+
+    @property
+    def fetch_percent(self):
+        """FETCH PERCENT is explicitly rejected by the compiler."""
+        return exclusions.closed()
+
+    @property
+    def fetch_ties(self):
+        """FETCH WITH TIES is explicitly rejected by the compiler."""
+        return exclusions.closed()
+
+    @property
     def isolation_level(self):
         """The pyodbc backend supports SQLAlchemy isolation-level APIs.
 
@@ -263,6 +332,34 @@ class Requirements(SuiteRequirements):
         """Basic table reflection is part of the supported contract."""
 
         return exclusions.open()
+
+    @property
+    def comment_reflection(self):
+        """Reflect table and column comments through the dialect catalog.
+
+        Informix has no native persistent COMMENT ON metadata in SYSTABLES or
+        SYSCOLUMNS. The dialect installs two ordinary sidecar tables lazily
+        when comment DDL is first used and exposes them through SQLAlchemy's
+        standard inspection APIs.
+        """
+
+        return exclusions.open()
+
+    @property
+    def comment_reflection_full_unicode(self):
+        """Comments preserve the full Unicode range independently of locale.
+
+        Values are stored as UTF-8 hexadecimal ASCII in the sidecar catalog,
+        so emoji and non-Latin text do not depend on DB_LOCALE.
+        """
+
+        return exclusions.open()
+
+    @property
+    def temp_table_comment_reflection(self):
+        """Connection-local temporary table comments remain unsupported."""
+
+        return exclusions.closed()
 
     @property
     def foreign_key_constraint_reflection(self):

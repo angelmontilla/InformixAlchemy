@@ -45,25 +45,25 @@ jobs:
           - python-version: "3.10"
             sqlalchemy: "SQLAlchemy>=2.1.0b2,<2.2"
             pip-pre: "--pre"
-            experimental: false
+            experimental: true
             label: "SQLAlchemy 2.1.x"
 
           - python-version: "3.11"
             sqlalchemy: "SQLAlchemy>=2.1.0b2,<2.2"
             pip-pre: "--pre"
-            experimental: false
+            experimental: true
             label: "SQLAlchemy 2.1.x"
 
           - python-version: "3.12"
             sqlalchemy: "SQLAlchemy>=2.1.0b2,<2.2"
             pip-pre: "--pre"
-            experimental: false
+            experimental: true
             label: "SQLAlchemy 2.1.x"
 
           - python-version: "3.13"
             sqlalchemy: "SQLAlchemy>=2.1.0b2,<2.2"
             pip-pre: "--pre"
-            experimental: false
+            experimental: true
             label: "SQLAlchemy 2.1.x"
 
     steps:
@@ -90,7 +90,8 @@ jobs:
             "pytest>=8,<10" \
             "alembic==1.18.5" \
             "pytest-cov>=5" \
-            "python-dotenv>=1.0"
+            "python-dotenv>=1.0" \
+            "ruff>=0.6"
 
       - name: Show dependency versions
         run: |
@@ -100,10 +101,16 @@ jobs:
           python -c "import pyodbc; print('pyodbc:', pyodbc.version)"
           python -m pytest --version
 
+      - name: Run static quality gate
+        run: python -m ruff check IfxAlchemy test tools
+
       - name: Run tests without Informix
         run: |
           python -m pytest \
             -m "not requires_informix and not legacy_ifxpy and not sqlalchemy_suite" \
+            --cov=IfxAlchemy \
+            --cov-report=term-missing \
+            --cov-fail-under=75 \
             -W error
 
       - name: Run SQLAlchemy contract gates
@@ -138,13 +145,13 @@ jobs:
           - python-version: "3.12"
             sqlalchemy: "SQLAlchemy>=2.1.0b2,<2.2"
             pip-pre: "--pre"
-            experimental: false
+            experimental: true
             label: "SQLAlchemy 2.1.x"
 
           - python-version: "3.13"
             sqlalchemy: "SQLAlchemy>=2.1.0b2,<2.2"
             pip-pre: "--pre"
-            experimental: false
+            experimental: true
             label: "SQLAlchemy 2.1.x"
 
     env:
@@ -185,7 +192,8 @@ jobs:
             "pytest>=8,<10" \
             "alembic==1.18.5" \
             "pytest-cov>=5" \
-            "python-dotenv>=1.0"
+            "python-dotenv>=1.0" \
+            "ruff>=0.6"
 
       - name: Show dependency versions
         if: ${{ env.INFORMIX_SQLALCHEMY_URL != '' }}
@@ -233,9 +241,19 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Build package
+      - name: Build and validate release artifacts
         run: |
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install "build>=1.2" "twine>=6"
           python -m build
-          python -m twine check dist/*
+          python -m tools.build_clean_archive dist/InformixAlchemy-source-clean.zip
+          python -m twine check dist/*.whl dist/*.tar.gz
+          python -m tools.check_secrets --release dist
+          python -m tools.verify_release_artifacts dist/*.whl dist/*.tar.gz
+
+      - name: Verify distribution contents
+        run: |
+          python -m pytest \
+            test/test_clean_distribution.py \
+            test/test_distribution_metadata.py \
+            test/test_compatibility_policy.py

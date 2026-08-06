@@ -1,6 +1,6 @@
 # IfxAlchemy
 
-**SQLAlchemy 2.x dialect for HCL Informix 14.10 or higher**, maintained on top of `pyodbc` and the IBM/HCL Informix ODBC Driver.
+A dialect of **SQLAlchemy 2.x for HCL Informix 14.10 or later**, built on top of `pyodbc` and the IBM/HCL Informix ODBC driver.
 
 The main backend is:
 
@@ -8,20 +8,61 @@ The main backend is:
 informix+pyodbc
 ```
 
-The historical module `IfxAlchemy.IfxPy` is preserved solely for source-code compatibility and is not part of the main support contract.
+The legacy module `IfxAlchemy.IfxPy` is retained solely for compatibility with legacy code and tests. It is not part of the main support contract.
 
-## Status and compatibility
+---
 
-| Component | Supported contract |
+## Table of Contents
+
+1. [Status and Compatibility](#status-and-compatibility)
+2. [Installation](#installation)
+3. [Connection](#connection)
+4. [Minimal Example](#minimal-example)
+5. [Dialect Architecture](#dialect-architecture)
+6. [Transactions, Isolation, and Session Controls](#transactions-isolation-and-session-controls)
+7. [SQL Compilation](#sql-compilation)
+8. [Data Types](#data-types)
+9. [Auto-Increment, `SERIAL`, and `Identity`](#auto-increment-serial-and-identity)
+10. [Table DDL, Constraints, and Sequences](#table-ddl-constraints-and-sequences)
+11. [Table and Column Comments](#table-and-column-comments)
+12. [Advanced Indexes](#advanced-indexes)
+13. [Fragmentation and Partitioning](#fragmentation-and-partitioning)
+14. [Synonyms](#synonyms)
+15. [`MERGE`](#merge)
+16. [JSON and BSON](#json-and-bson)
+17. [Complex Types](#complex-types)
+18. [Optimizer Directives](#optimizer-directives)
+19. [Reflection and Inspection](#reflection-and-inspection)
+20. [ANSI and Proprietary Databases](#ansi-and-proprietary-databases)
+21. [Integration with Alembic](#integration-with-alembic)
+22. [Test Environment with Two Databases](#test-environment-with-two-databases)
+23. [Running Tests](#running-tests)
+24. [Environment variables](#environment-variables)
+25. [Intentional limitations](#intentional-limitations)
+26. [Compatibility and development policy](#compatibility-and-development-policy)
+27. [License](#license)
+
+---
+
+## Status and Compatibility
+
+| Component | Supported Version |
 |---|---|
-| Python | 3.10, 3.11, 3.12 and 3.13 |
-| SQLAlchemy | `>=2.0.45,<2.2` |
-| Alembic | External suite included in the project |
-| DBAPI | `pyodbc>=5.0` |
+| Python | `>=3.10` |
+| SQLAlchemy | `>=2.0.45,<2.1` |
+| Alembic | Custom integration and external suite included |
+| Primary DBAPI | `pyodbc>=5.0` |
 | Driver | IBM/HCL Informix ODBC Driver |
-| Server | Informix 14.10+ |
-| Usual protocol | `onsoctcp` |
+| Server | HCL Informix 14.10+ |
+| Default Protocol | `onsoctcp` |
 | Dialect | `informix+pyodbc` |
+| Maximum Identifier Length | 128 characters |
+| DBAPI Paramstyle | `qmark` |
+| SQLAlchemy SQL statement cache | Enabled |
+
+The project focuses on SQLAlchemy 2.x. Internal differences between SQLAlchemy 2.0 and 2.1 are isolated in `IfxAlchemy/sqla_compat.py` to avoid scattered dependencies on private APIs.
+
+---
 
 ## Installation
 
@@ -31,82 +72,77 @@ From the repository:
 python -m pip install -e .
 ```
 
-For development and testing:
+Development dependencies:
 
 ```bash
 python -m pip install -r requirements-dev.txt
 ```
 
-To build distribution artifacts:
+Building the package:
 
 ```bash
 python -m build
 python -m twine check dist/*
 ```
 
-## Connection
+The package registers these SQLAlchemy entry points:
 
-### Full URL with user and password
+```text
+informix
+informix.pyodbc
+```
+
+Both resolve to:
+
+```text
+IfxAlchemy.pyodbc:IfxDialect_pyodbc
+```
+
+---
+
+## Conection
+
+### full URL
 
 ```python
 from sqlalchemy import create_engine
 
 engine = create_engine(
-    "informix+pyodbc://user:password@127.0.0.1/my_db"
+    "informix+pyodbc://informix:in4mix@127.0.0.1/mi_base"
     "?driver=IBM+INFORMIX+ODBC+DRIVER+(64-bit)"
     "&protocol=onsoctcp"
     "&server=informix"
     "&service=9088"
-    "&DELIMIDENT=Y"
+    "&DELIMIDENT=Y",
+    pool_pre_ping=True,
 )
 ```
 
-### ODBC DSN
+### DSN ODBC
 
 ```python
-from sqlalchemy import create_engine
-
 engine = create_engine(
-    "informix+pyodbc://user:password@/"
+    "informix+pyodbc://usuario:clave@/"
     "?dsn=ifx_dev"
     "&DELIMIDENT=Y"
 )
 ```
 
-### Trusted Context
-
-```python
-from sqlalchemy import create_engine
-
-engine = create_engine(
-    "informix+pyodbc://127.0.0.1/my_db"
-    "?driver=IBM+INFORMIX+ODBC+DRIVER+(64-bit)"
-    "&protocol=onsoctcp"
-    "&server=informix"
-    "&service=9088"
-    "&trusted_context=true"
-    "&DELIMIDENT=Y"
-)
-```
-
-`trusted_context=true` is converted to `TCTX=1`. `TCTX=1` is also accepted directly.
-
-### Literal ODBC string
+### literal ODBC string 
 
 ```python
 from urllib.parse import quote_plus
-
 from sqlalchemy import create_engine
 
 odbc_string = quote_plus(
     "DRIVER={IBM INFORMIX ODBC DRIVER};"
     "SERVER=informix;"
-    "DATABASE=my_db;"
+    "DATABASE=my_base;"
     "HOST=127.0.0.1;"
     "SERVICE=9088;"
     "PROTOCOL=onsoctcp;"
-    "UID=user;"
-    "PWD=password;"
+    "UID=informix;"
+    "PWD=in4mix;"
     "DELIMIDENT=Y;"
     "NeedODBCTypesOnly=1;"
 )
@@ -116,32 +152,122 @@ engine = create_engine(
 )
 ```
 
-When using `odbc_connect`, the string is delivered to the driver without modifications.
+When using odbc_connect, the dialect delivers the string to the driver without reconstructing its fields.
 
-## ODBC string construction
+### Trusted Context
 
-The dialect supports:
+```python
+engine = create_engine(
+    "informix+pyodbc://127.0.0.1/mi_base"
+    "?driver=IBM+INFORMIX+ODBC+DRIVER+(64-bit)"
+    "&protocol=onsoctcp"
+    "&server=informix"
+    "&service=9088"
+    "&trusted_context=true"
+    "&DELIMIDENT=Y"
+)
+```
 
-- `driver`, `host`, `service` or `port`, `server`, `database` and `protocol`.
-- `dsn` for administrator-configured connections.
-- `odbc_connect` for a complete ODBC string.
-- `TCTX=1` and its readable alias `trusted_context=true`.
-- Additional ODBC parameters case-insensitively.
-- Escaping of values requiring braces in the ODBC string.
-- `NeedODBCTypesOnly=1` by default in strings generated by the dialect.
+`trusted_context=true` is transformed into `TCTX=1`. `TCTX=1` can also be used directly.
 
-`NeedODBCTypesOnly=1` prevents ordinary types from being unnecessarily exposed through Informix-specific ODBC codes. As an additional defense, the dialect registers a converter for `SQL_INFX_BIGINT (-114)` and normalizes integers, decimal text and eight-byte binary representations to Python `int`.
+### Building the ODBC connection string
 
-## Transaction isolation with pyodbc
+The backend supports:
 
-The maintained `informix+pyodbc` backend implements SQLAlchemy's engine and
-connection isolation APIs with Informix's native, session-level
-`SET ISOLATION` statement.  The setting is restored when a pooled connection
-is returned.
+- `driver`;
+- `host`;
+- `service` or `port`;
+- `server`;
+- `database`;
+- `protocol`;
+- `dsn`;
+- `odbc_connect`;
+- `trusted_context=true` or `TCTX=1`;
+- additional ODBC parameters case-insensitively;
+- values protected with braces when the driver requires it.
 
-Using native SQL is intentional. The Informix ODBC attribute exposes only
-three generic isolation values and cannot preserve the server's distinction
-between `COMMITTED READ` and `CURSOR STABILITY`.
+The strings generated by the dialect include by default:
+
+```text
+NeedODBCTypesOnly=1
+```
+
+This reduces unnecessary exposure of Informix-specific ODBC codes. As an additional defense, the backend normalizes `SQL_INFX_BIGINT (-114)` from integers, decimal text, or eight-byte binary representations.
+
+---
+
+## Minimal example
+
+```python
+from sqlalchemy import Column, Integer, MetaData, String, Table, create_engine, select
+
+engine = create_engine("informix+pyodbc://...")
+metadata = MetaData()
+
+persona = Table(
+    "persona",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("nombre", String(80), nullable=False),
+)
+
+metadata.create_all(engine)
+
+with engine.begin() as connection:
+    result = connection.execute(
+        persona.insert().values(nombre="Ada")
+    )
+
+    identificador = result.inserted_primary_key[0]
+
+    fila = connection.execute(
+        select(persona).where(persona.c.id == identificador)
+    ).one()
+```
+
+An auto-incrementing integer primary key without an explicit `Identity` is compiled using the `SERIAL` family.
+
+---
+
+## Dialect architecture
+
+```text
+IfxAlchemy/
+├── __init__.py       # Public API and dialect registration
+├── base.py           # Base types, SQL/DDL compilers, and ExecutionContext
+├── pyodbc.py         # ODBC connection, DBAPI, setinputsizes, and conversions
+├── reflection.py     # Informix catalog reflection
+├── identity.py       # SQLAlchemy Identity emulation using sequences
+├── comments.py       # Auxiliary comments catalog
+├── document.py       # JSON, BSON, and BSON functions
+├── complex.py        # LIST, SET, MULTISET, ROW, and DISTINCT
+├── dml.py            # Typed MERGE
+├── ddl.py            # Synonyms, lock mode, and extents
+├── fragmentation.py  # Strategies and ALTER FRAGMENT
+├── indexes.py        # Advanced index operations
+├── optimizer.py      # Directives and session controls
+├── temporal.py       # Informix temporal precision
+├── alembic.py        # Alembic implementation
+├── requirements.py   # Capabilities declared to the official suite
+├── provision.py      # Owners and safe suite cleanup
+└── sqla_compat.py    # SQLAlchemy 2.0/2.1 compatibility
+```
+
+Design principles:
+
+1. The main API uses SQLAlchemy objects, not arbitrary SQL fragments.
+2. Identifiers are validated and rendered using `IdentifierPreparer`.
+3. The capabilities declared in `requirements.py` represent tested behavior, not just theoretical server possibilities.
+4. Destructive operations of the official suite are limited to an expressly authorized, dedicated database.
+5. Reflection uses Informix catalogs and preserves owners, logical names, and dialect-specific metadata.
+
+---
+
+## Transactions, isolation, and session controls
+
+### Isolation levels
+
+The `informix+pyodbc` backend implements SQLAlchemy APIs using native `SET ISOLATION`.
 
 ```python
 engine = create_engine(
@@ -156,277 +282,1103 @@ with engine.connect() as connection:
     assert connection.get_isolation_level() == "REPEATABLE READ"
 ```
 
-Native Informix mappings are:
-
-| Requested level | Native statement |
+| Requested level | Native SQL |
 |---|---|
 | `DIRTY READ`, `UNCOMMITTED READ`, `UR`, `READ UNCOMMITTED` | `SET ISOLATION TO DIRTY READ` |
 | `COMMITTED READ`, `READ COMMITTED` | `SET ISOLATION TO COMMITTED READ` |
 | `CURSOR STABILITY`, `CS` | `SET ISOLATION TO CURSOR STABILITY` |
 | `REPEATABLE READ`, `RR`, `SERIALIZABLE` | `SET ISOLATION TO REPEATABLE READ` |
+| `READ STABILITY`, `RS` | Legacy compatibility; normalized to `REPEATABLE READ` |
 
-`READ STABILITY` and `RS` remain accepted for compatibility with the legacy
-IfxPy backend. Informix does not define a separate native READ STABILITY mode,
-so these spellings map conservatively to native `REPEATABLE READ`; they are
-not presented as a fifth Informix isolation level.
+`AUTOCOMMIT` is maintained via the SQLAlchemy pyodbc connector.
 
-`AUTOCOMMIT` remains available through the normal SQLAlchemy pyodbc connector.
-`Connection.get_isolation_level()` reports the last successfully applied
-non-autocommit level. The ODBC `SQL_DEFAULT_TXN_ISOLATION` information value
-is used only to discover the connection's initial default.
+The dialect remembers the last non-autocommit level applied and restores the state when a connection returns to the pool.
 
-Pool pre-ping is transaction-neutral: after its diagnostic `SELECT`, the
-dialect rolls back the driver transaction created in manual-commit mode. This
-prevents an invisible transaction from leaking into the checked-out
-connection.
+### Pool pre-ping
 
-Session controls such as `SET LOCK MODE`, `SET OPTIMIZATION`,
-`SET PDQPRIORITY` and `SET STATEMENT CACHE` are independent of transaction
-isolation and are not overloaded onto `isolation_level`.
+The `pre_ping` is neutral regarding transactions. After the diagnostic query, the dialect rolls back the implicit transaction that some drivers open in manual mode.
 
-## Minimal example
+### Savepoints
 
-```python
-from sqlalchemy import Column, Integer, MetaData, String, Table, create_engine, select
+Supported:
 
-engine = create_engine("informix+pyodbc://...")
-metadata = MetaData()
-
-person = Table(
-    "person",
-    metadata,
-    # An autoincrement integer PK compiles to SERIAL, SERIAL8 or BIGSERIAL.
-    Column("id", Integer, primary_key=True),
-    Column("name", String(80), nullable=False),
-)
-
-metadata.create_all(engine)
-
-with engine.begin() as connection:
-    result = connection.execute(
-        person.insert().values(name="Ada")
-    )
-    identifier = result.inserted_primary_key[0]
-
-    row = connection.execute(
-        select(person).where(person.c.id == identifier)
-    ).one()
+```text
+SAVEPOINT
+ROLLBACK TO SAVEPOINT
+RELEASE SAVEPOINT
 ```
 
-## Implemented capabilities
+### Informix session controls
 
-### DDL and metadata
-
-- `CREATE TABLE IF NOT EXISTS` and `DROP TABLE IF EXISTS`.
-- `CREATE INDEX IF NOT EXISTS` and `DROP INDEX IF EXISTS`.
-- Informix sequences with native `CREATE SEQUENCE IF NOT EXISTS` and `DROP SEQUENCE IF EXISTS`, plus `START WITH`, `INCREMENT BY`, `MINVALUE`, `MAXVALUE`, `CACHE` and `CYCLE`.
-- `Sequence.next_value()` compiled via `.NEXTVAL`.
-- Autoincrement integer primary keys translated to `SERIAL`, `SERIAL8` or `BIGSERIAL` according to type.
-- Retrieval of generated key via `DBINFO(...)` in a secondary cursor on the same connection.
-- Primary, unique, foreign and `CHECK` keys, including composite keys and constraint names.
-- Self-referencing foreign keys emitted with `ALTER TABLE` when necessary.
-- `ON DELETE CASCADE`.
-- Nullable unique constraints via `EXCLUDE NULL KEYS` indexes when appropriate.
-- Literal and temporal server defaults validated for Informix syntax.
-- Physical index and constraint names isolated by owner in ANSI databases, keeping the logical name when reflecting.
-- Native writable physical table options:
-  - `informix_lock_level` (`PAGE` or `ROW`)
-  - `informix_first_extent` (positive integer, in KB)
-  - `informix_next_extent` (positive integer, in KB)
-- Reflected physical metadata:
-  - `informix_page_size` is returned by inspection as a positive integer,
-    but it is read-only because Informix defines page size on the dbspace,
-    not in `CREATE TABLE`.
-
-Example:
+Exposed as `execution_options` independent of isolation:
 
 ```python
-from sqlalchemy import Column, Integer, MetaData, Table
+connection = connection.execution_options(
+    informix_optimization="FIRST_ROWS",
+    informix_pdqpriority=20,
+    informix_statement_cache=True,
+    informix_explain=True,
+)
+```
 
-metadata = MetaData()
+Available options:
 
+| Option | Values |
+|---|---|
+| `informix_optimization` | `FIRST_ROWS`, `ALL_ROWS` |
+| `informix_pdqpriority` | Integer from `-1` to `100` |
+| `informix_statement_cache` | `True`, `False` |
+| `informix_explain` | `True`, `False`, `ON`, `OFF`, `AVOID_EXECUTE` |
+
+The change is rejected if the connection is already within an incompatible transaction.
+
+---
+
+## SQL compilation
+
+### Pagination
+
+The compiler selects the strategy based on the expression:
+
+- `FIRST n` for simple limits;
+- `SKIP n FIRST m` for compatible integer offsets and limits;
+- rewriting with `ROW_NUMBER()` for complex expressions, `DISTINCT`, compounds, and cases that do not support the native path.
+
+The rewriting preserves:
+
+- `ORDER BY`;
+- `DISTINCT`;
+- labels;
+- calculated expressions;
+- `qmark` parameter order;
+- pagination over `UNION` and other compound queries.
+
+### CTE
+
+Supported:
+
+- Ordinary CTEs;
+- Recursive CTEs;
+- CTEs prior to `UPDATE` and `DELETE`;
+- `Values.cte()` emulated using typed `SELECT ... UNION ALL`.
+
+### Set operators
+
+- `UNION`;
+- `UNION ALL`;
+- `INTERSECT`;
+- `EXCEPT`.
+
+Ordered or limited branches are adapted via derived tables when Informix rejects generic parenthesization.
+
+### DML
+
+- `INSERT ... SELECT`;
+- empty inserts on `SERIAL` tables;
+- empty inserts with `executemany`;
+- multi-table `UPDATE` emulated using correlated `EXISTS`;
+- multi-table `DELETE` emulated using correlated `EXISTS`;
+- `rowcount` preservation;
+- generated key retrieval using `DBINFO('sqlca.sqlerrd1')`.
+
+### Booleans
+
+Informix receives native values `t`, `f`, and `NULL`.
+
+When SQLAlchemy projects a predicate as a column, the dialect transforms it into a `CASE` that returns a native `BOOLEAN`.
+
+Supported:
+
+- nullable boolean columns;
+- comparisons;
+- boolean defaults;
+- default reflection;
+- `IS TRUE` and `IS FALSE`;
+- predicate projection.
+
+### Bitwise operators
+
+- AND via `BITAND`;
+- OR via `BITOR`;
+- XOR via `BITXOR`;
+- NOT via `BITNOT`;
+- left and right shift.
+
+### Other adaptations
+
+- `IS DISTINCT FROM` and `IS NOT DISTINCT FROM`;
+- typed empty sets for `IN`;
+- label resolution in `ORDER BY` and `GROUP BY`;
+- complex expressions in `GROUP BY` using projected aliases;
+- `CAST` adapted to Informix types;
+- `AVG` and specific numeric conversions;
+- character length by octets when applicable;
+- tableless `SELECT` using `sysmaster:informix.sysdual`;
+- `FOR UPDATE` and `FOR SHARE` via `WITH RS USE AND KEEP ... LOCKS`;
+- stable aliases for namesake tables of different owners, including subqueries;
+- SQLAlchemy statement cache.
+
+---
+
+## Data types
+
+### Numeric and serials
+
+- `SMALLINT`;
+- `INTEGER`;
+- `BIGINT`;
+- `SERIAL`;
+- `SERIAL8`;
+- `BIGSERIAL`;
+- `REAL`;
+- `FLOAT`;
+- `DOUBLE`;
+- `DECIMAL`;
+- `NUMERIC`;
+- `MONEY` reflected as numeric type when a more specific class does not exist.
+
+### Native boolean
+
+`sqlalchemy.Boolean` is adapted to `IfxAlchemy.BOOLEAN`.
+
+```python
+from sqlalchemy import Boolean, Column
+
+Column("activo", Boolean, nullable=False, server_default="t")
+```
+
+The bind processor accepts strict boolean values and sends `t` or `f`. The result processor normalizes:
+
+- `bool`;
+- `0`/`1`;
+- ODBC bytes;
+- text `t`, `f`, `true`, `false`.
+
+### Characters
+
+- `CHAR`;
+- `VARCHAR`;
+- `LONG VARCHAR`;
+- `LVARCHAR`;
+- `NCHAR`;
+- `NVARCHAR`;
+- `GRAPHIC`;
+- `VARGRAPHIC`;
+- `LONG VARGRAPHIC`.
+
+`VARCHAR` requires length. For text without a practical limit, `Text`, `CLOB`, or the appropriate Informix type should be used.
+
+#### LVARCHAR
+
+```python
+from IfxAlchemy import LVARCHAR
+
+Column("payload", LVARCHAR(8192))
+```
+
+Characteristics:
+
+- validated maximum length: 32,739 bytes;
+- without explicit length, preserves the `LVARCHAR` syntax and the server applies its default value;
+- `setinputsizes` uses `SQL_VARCHAR`, not `SQL_LONGVARCHAR`, preventing the driver from converting it to `TEXT`;
+- reflection and autoload preserve the native type.
+
+#### NCHAR and NVARCHAR
+
+Compilation and reflection preserve native names. Full Unicode round-trip depends on `DB_LOCALE` and the driver; an `en_US.819` database cannot certify the same cases as a UTF-8 database.
+
+### Temporals
+
+- `DATE`;
+- `DATETIME YEAR TO FRACTION(n)`;
+- `TIME` represented via `DATETIME HOUR TO FRACTION(n)`;
+- `TIMESTAMP` adapted to the Informix temporal model.
+
+Supported precision:
+
+```text
+FRACTION(0) ... FRACTION(5)
+```
+
+Processors:
+
+- deterministically truncate Python's six-microsecond precision to the configured Informix precision;
+- normalize `str`, `bytes`, `datetime.time`, and `datetime.datetime`;
+- reject values with timezone because there is no equivalent representation in this contract.
+
+### LOB and binaries
+
+- `TEXT`;
+- `BYTE`;
+- `CLOB`;
+- `BLOB`;
+- `DBCLOB`;
+- `XML`.
+
+`TEXT` is a LOB and does not participate in all ordinary comparisons supported by `VARCHAR`/`LVARCHAR`.
+
+---
+
+## Autoincrement, `SERIAL`, and `Identity`
+
+The dialect differentiates two contracts.
+
+### Implicit autoincrement
+
+```python
+Column("id", Integer, primary_key=True)
+```
+
+Compiled as:
+
+- `SERIAL` for `Integer`;
+- `SERIAL8` or `BIGSERIAL` for large integer variants.
+
+The generated key is obtained with a secondary cursor over the same connection using `DBINFO('sqlca.sqlerrd1')`.
+
+### Explicit `Identity`
+
+```python
+from sqlalchemy import Identity
+
+Column(
+    "id",
+    Integer,
+    Identity(start=10, increment=5),
+    primary_key=True,
+)
+```
+
+Informix does not expose the entire SQLAlchemy `Identity` contract as a single column clause. The dialect normalizes it to:
+
+1. an ordinary `INTEGER` or `BIGINT` column;
+2. a private sequence with a deterministic name;
+3. a client `Column.default` based on `Sequence`;
+4. pre-execution of `NEXTVAL` before `INSERT`;
+5. sequence creation before the table;
+6. sequence dropping after dropping the table;
+7. option reflection from `SYSSEQUENCES`.
+
+Preserved options:
+
+- `start`;
+- `increment`;
+- `minvalue`;
+- `maxvalue`;
+- `cache`;
+- `cycle`;
+- `order` when provided by the catalog.
+
+Limits equal to or incompatible with `start` are normalized to the closest valid value required by Informix.
+
+The sequence name is human-readable for simple identifiers:
+
+```text
+orders_id_identity_seq
+```
+
+For special, delimited, mixed, or long names, a stable hash name is used:
+
+```text
+ifx_id_<digest>_identity_seq
+```
+
+This allows reconstructing the relationship during reflection without an auxiliary table.
+
+Limitation: `Identity.always` and `on_null` cannot be enforced as equivalent native clauses; generation relies on the private sequence and reflection publishes `always=False`.
+
+---
+
+## DDL for tables, constraints, and sequences
+
+### Idempotent DDL
+
+- `CREATE TABLE IF NOT EXISTS`;
+- `DROP TABLE IF EXISTS`;
+- `CREATE INDEX IF NOT EXISTS`;
+- `DROP INDEX IF EXISTS`;
+- `CREATE SEQUENCE IF NOT EXISTS`;
+- `DROP SEQUENCE IF EXISTS`.
+
+### Sequences
+
+Supported:
+
+- `START WITH`;
+- `INCREMENT BY`;
+- `MINVALUE`;
+- `MAXVALUE`;
+- `CACHE`;
+- `CYCLE`;
+- ANSI owners;
+- `Sequence.next_value()` via `.NEXTVAL`;
+- `schema_translate_map`;
+- sequence pre-execution.
+
+### Constraints
+
+- simple and composite primary keys;
+- unique constraints;
+- foreign keys;
+- table and column `CHECK`;
+- explicit names;
+- name reflection;
+- self-referential deferred foreign keys via `ALTER TABLE`;
+- `ON DELETE CASCADE`;
+- nullable uniques via `EXCLUDE NULL KEYS` indexes when appropriate.
+
+`ON UPDATE CASCADE` is not part of the contract.
+
+### Server defaults
+
+Validated and compiled:
+
+- numeric literals;
+- text literals;
+- dates and times;
+- boolean values;
+- temporal expressions supported by Informix.
+
+Arbitrary arithmetic expressions as defaults are deliberately closed.
+
+### Table physical options
+
+```python
 table = Table(
-    "event",
+    "movimientos",
     metadata,
     Column("id", Integer, primary_key=True),
     informix_lock_level="ROW",
-    informix_first_extent=64,
+    informix_first_extent=128,
     informix_next_extent=64,
 )
 ```
 
-The generated suffix is:
+Generates:
 
 ```sql
-EXTENT SIZE 64 NEXT SIZE 64 LOCK MODE ROW
+EXTENT SIZE 128 NEXT SIZE 64 LOCK MODE ROW
 ```
 
-Passing `informix_page_size` while creating a table raises `CompileError`.
-Select a dbspace with the required page size instead; reflection will expose
-the effective value reported by `SYSTABLES.pagesize`.
+Options:
 
-### SQL and compilation
+| Option | Values |
+|---|---|
+| `informix_lock_level` | `PAGE`, `ROW` |
+| `informix_first_extent` | positive integer in KB |
+| `informix_next_extent` | positive integer in KB |
+| `informix_dbspace` | structured dbspace |
+| `informix_compressed` | compression status supported by the DDL |
+| `informix_fragment_by` | typed fragmentation strategy |
+| `informix_resolve_synonyms` | explicit resolution in reflection/autoload |
 
-- `LIMIT n` and `FETCH FIRST n ROWS ONLY` without offset translated to `FIRST n`.
-- Pagination with `OFFSET` via structural rewrite with `ROW_NUMBER()`.
-- Preservation of `ORDER BY`, `DISTINCT`, labels and expressions during pagination.
-- Ordinary and recursive CTEs.
-- CTEs attached to `UPDATE` and `DELETE`, including parameter protection required by the driver.
-- `UNION`, `UNION ALL`, `INTERSECT` and `EXCEPT`.
-- Window functions.
-- `INSERT ... SELECT`.
-- Empty inserts resolved via the serial column when it exists.
-- Multi-table `UPDATE` and `DELETE` translated to correlated `EXISTS` predicates.
-- Boolean predicate projection via `CASE` when SQLAlchemy needs a scalar value.
-- Emulation of `IS DISTINCT FROM` and `IS NOT DISTINCT FROM`.
-- Typed empty-set `IN` expansion.
-- Label resolution in `ORDER BY` and `GROUP BY`.
-- `CAST`, `AVG`, character length by octets and arithmetic expressions adapted to Informix.
-- Table-less `SELECT` based on `sysmaster:informix.sysdual`.
-- `FOR UPDATE` and `FOR SHARE` locks via `WITH RS USE AND KEEP ... LOCKS`.
-- Savepoints (`SAVEPOINT`, `ROLLBACK TO SAVEPOINT` and `RELEASE SAVEPOINT`).
-- SQLAlchemy statement cache enabled.
+`informix_page_size` is read-only: Informix defines the page size in the dbspace, not directly in `CREATE TABLE`.
 
-### Data types
+### Physical alterations
 
-The compiler includes support for:
+```python
+from IfxAlchemy import ModifyTableExtents, SetTableLockMode
 
-- `SMALLINT`, `INTEGER`, `BIGINT`.
-- `SERIAL`, `SERIAL8`, `BIGSERIAL`.
-- `REAL`, `FLOAT`, `DOUBLE`.
-- `DECIMAL` and `NUMERIC`.
-- `CHAR`, `VARCHAR`, `LONG VARCHAR`.
-- `GRAPHIC`, `VARGRAPHIC`, `LONG VARGRAPHIC`.
-- `DATE`.
-- `DATETIME YEAR TO FRACTION(n)`.
-- Time of day as `DATETIME HOUR TO FRACTION(n)`.
-- `TEXT`, `BYTE`, `CLOB`, `BLOB`, `DBCLOB` and `XML`.
+connection.execute(SetTableLockMode(tabla, "ROW"))
+connection.execute(
+    ModifyTableExtents(
+        tabla,
+        first_extent=256,
+        next_extent=128,
+    )
+)
+```
 
-The internal temporal types `IFXTime` and `IFXDateTime`:
+---
 
-- support fractional precision from 0 to 5 digits;
-- deterministically truncate Python microsecond precision;
-- normalize results from `str`, `bytes`, `datetime.time` and `datetime.datetime`;
-- reject timezone-aware values, which have no equivalent representation in this contract.
+## Table and column comments
 
-Currently generic `Boolean` is stored as `SMALLINT`; enabling the native `BOOLEAN` type is on the roadmap.
+Informix 14.10/15.0 does not offer a persistent comment field in `SYSTABLES` or `SYSCOLUMNS` compatible with the standard SQLAlchemy API. The dialect implements this capability using two auxiliary tables:
 
-### Reflection and inspection
+```text
+ifx_sqla_table_comments
+ifx_sqla_column_comments
+```
+
+They are created lazily upon executing the first comment operation.
+
+### Supported API
+
+- comments declared in `Table`;
+- comments declared in `Column`;
+- `SetTableComment`;
+- `DropTableComment`;
+- `SetColumnComment`;
+- `DropColumnComment`;
+- `Inspector.get_table_comment()`;
+- comments within `Inspector.get_columns()`;
+- `Inspector.get_multi_table_comment()`;
+- online Alembic operations;
+- offline Alembic rendering with `--sql`.
+
+### Locale-independent Unicode
+
+Text is encoded as ASCII hexadecimal UTF-8 and stored in `LVARCHAR(28672)`. This allows preserving non-Latin text and emoji even when the test database uses `DB_LOCALE=en_US.819`.
+
+The effective limit is approximately 14,334 UTF-8 bytes per comment. The remaining margin avoids exceeding Informix's row limit when adding keys and metadata.
+
+### Security and reflection
+
+- auxiliary tables are hidden from `Inspector.get_table_names()`;
+- records are linked by `tabid` and `colno`;
+- owner and physical name are also preserved to detect stale metadata;
+- a non-existent object raises `NoSuchTableError` in individual reflection;
+- multiple reflection skips non-existent objects;
+- constraint and temporary table comments are not supported.
+
+---
+
+## Advanced indexes
+
+The dialect registers specific options in `Index`:
+
+```text
+informix_functional
+informix_procedure
+informix_where
+informix_online
+informix_fillfactor
+informix_dbspace
+informix_using
+informix_access_method
+informix_opclass
+informix_fragment_by
+informix_hash_on
+informix_buckets
+informix_compressed
+informix_mode
+informix_visible
+informix_amparam
+```
+
+### Capabilities
+
+- ordinary, unique, and composite indexes;
+- ascending/descending order per component;
+- functional indexes with explicit opt-in;
+- mixed column and function components;
+- partial indexes via expression fragmentation;
+- access methods and operator classes;
+- structured parameters of the access method;
+- BSON indexes;
+- forest-of-trees via hash and buckets;
+- dbspace;
+- fillfactor;
+- online creation when the native form allows it;
+- compression;
+- optimizer visibility;
+- index modes;
+- cluster/uncluster attribute;
+- reflection from `SYSINDICES`;
+- stable comparison in Alembic.
+
+### Administration DDL
+
+```python
+from IfxAlchemy import (
+    AlterIndexCluster,
+    DisableIndex,
+    EnableIndex,
+    SetIndexVisibility,
+)
+
+connection.execute(DisableIndex(indice))
+connection.execute(EnableIndex(indice))
+connection.execute(SetIndexVisibility(indice, visible=False))
+connection.execute(AlterIndexCluster(indice, clustered=True))
+```
+
+Incompatible combinations are rejected before executing SQL. Extensible parameters do not accept arbitrary unvalidated text.
+
+---
+
+## Fragmentation and partitioning
+
+Available models:
+
+- `RoundRobinFragmentation`;
+- `ExpressionFragmentation`;
+- `RangeFragmentation`;
+- `ListFragmentation`;
+- `RangeIntervalFragmentation`;
+- `AttachedIndexFragmentation`.
+
+Conceptual example:
+
+```python
+from IfxAlchemy import Fragment, RoundRobinFragmentation
+
+strategy = RoundRobinFragmentation(
+    fragments=(
+        Fragment(name="p1", dbspace="dbs1"),
+        Fragment(name="p2", dbspace="dbs2"),
+    )
+)
+
+Table(
+    "ventas",
+    metadata,
+    Column("id", Integer),
+    informix_fragment_by=strategy,
+)
+```
+
+### ALTER FRAGMENT operations
+
+- `InitFragmentation`;
+- `AddFragment`;
+- `DropFragment`;
+- `ModifyFragment`;
+- `AttachFragment`;
+- `DetachFragment`.
+
+Supported:
+
+- named fragments;
+- dbspaces;
+- structured expressions;
+- lists with `NULL` and remainder;
+- intervals and `INTERVAL STORE IN`;
+- `BEFORE`/`AFTER` when the native operation allows it;
+- `ONLINE` operations restricted to compatible forms;
+- index fragmentation;
+- immutable reflection and reconstruction of strategies.
+
+Subqueries or arbitrary `text()` are not accepted as a fragmentation expression.
+
+---
+
+## Synonyms
+
+Public constructors:
+
+```python
+from IfxAlchemy import (
+    CreateSynonym,
+    DropSynonym,
+    SynonymName,
+    SynonymTarget,
+)
+```
+
+Supported:
+
+- local table synonyms;
+- view synonyms;
+- local sequence synonyms;
+- public and private synonyms in non-ANSI databases;
+- remote synonyms via `database@server:owner.object`;
+- `IF NOT EXISTS` and `IF EXISTS`;
+- delimited identifiers;
+- public/private/local/remote metadata reflection;
+- local synonym chains;
+- cycle detection;
+- private synonym preference over a homonymous public one;
+- `Inspector.get_synonyms()`;
+- `Inspector.get_synonym_names()`;
+- `Inspector.has_synonym()`.
+
+Resolution for `Table(..., autoload_with=...)` is explicit:
+
+```python
+Table(
+    "alias_clientes",
+    metadata,
+    autoload_with=engine,
+    informix_resolve_synonyms=True,
+)
+```
+
+Remote synonyms are not autoloaded as if they were local tables. A specific reflection error is reported.
+
+---
+
+## MERGE
+
+Public API:
+
+```python
+from IfxAlchemy import merge
+```
+
+Example:
+
+```python
+statement = (
+    merge(destino, origen, destino.c.id == origen.c.id)
+    .when_matched_update(
+        values={"nombre": origen.c.nombre}
+    )
+    .when_not_matched_insert(
+        values={
+            "id": origen.c.id,
+            "nombre": origen.c.nombre,
+        }
+    )
+)
+
+with engine.begin() as connection:
+    result = connection.execute(statement)
+```
+
+Supported combinations:
+
+- matched `UPDATE`;
+- matched `DELETE`;
+- not-matched `INSERT`;
+- `UPDATE + INSERT`;
+- `DELETE + INSERT`.
+
+Supported sources:
+
+- table or view;
+- alias;
+- `SELECT`, adapted to named subquery;
+- named `Values`, compiled as typed `SELECT ... UNION ALL`.
+
+Protections:
+
+- does not accept derived target or `JOIN`;
+- does not accept textual SQL as source;
+- matched `UPDATE` and `DELETE` are mutually exclusive;
+- validates target columns;
+- preserves bound parameters;
+- prevents equal aliases between source and target;
+- preserves `rowcount`;
+- executes atomically as a single statement.
+
+The construct explicitly declares `inherit_cache=False` because its generative form and variable actions do not share a safe cache key.
+
+---
+
+## JSON and BSON
+
+Public types:
+
+```python
+from IfxAlchemy import JSON, BSON
+```
+
+### JSON
+
+```python
+Column("documento", JSON(none_as_null=True))
+```
+
+Characteristics:
+
+- native opaque `JSON` type;
+- configurable serializer and deserializer in `create_engine`;
+- bind via native cast;
+- deserialized Python result;
+- `none_as_null` compatible with SQLAlchemy;
+- pre-validation of document size and shape;
+- native reflection.
+
+Informix requires a JSON object as the top-level value. Not supported as a full document:
+
+- scalars;
+- top-level arrays;
+- JSON `null` as a full document.
+
+Arrays and nulls within an object are supported.
+
+Maximum validated size:
+
+```text
+32 KiB per document
+```
+
+### BSON
+
+```python
+Column("documento", BSON(transport="json"))
+```
+
+Transports:
+
+| Transport | Behavior |
+|---|---|
+| `json` | serializes JSON text and compiles `JSON -> BSON` casts |
+| `binary` | uses explicit codec and transports BSON bytes |
+
+The `json` mode is the default because different CSDK/ODBC versions expose BSON differently.
+
+### BSON functions
+
+```python
+from IfxAlchemy import bson_get, bson_size, bson_update, gen_bson
+```
+
+Also available via the BSON comparator:
+
+```python
+tabla.c.documento.get("cliente")
+tabla.c.documento.update({"estado": "cerrado"})
+tabla.c.documento.size()
+tabla.c.documento.as_json()
+```
+
+BSON field indexes are supported with the appropriate access method.
+
+### Codec configuration
+
+```python
+engine = create_engine(
+    "informix+pyodbc://...",
+    json_serializer=mi_serializer,
+    json_deserializer=mi_deserializer,
+    bson_encoder=mi_encoder,
+    bson_decoder=mi_decoder,
+)
+```
+
+---
+
+## Complex types
+
+Public types:
+
+- `LIST`;
+- `SET`;
+- `MULTISET`;
+- `ROW`;
+- `DISTINCT`;
+- `RowField`;
+- `RowValue`.
+
+### Collections
+
+```python
+from IfxAlchemy import LIST, SET, MULTISET
+
+Column("etiquetas", LIST(String(40)))
+Column("roles", SET(String(40)))
+Column("valores", MULTISET(Integer))
+```
+
+Semantics:
+
+- `LIST`: ordered, allows duplicates;
+- `SET`: unordered, removes duplicates;
+- `MULTISET`: unordered, preserves duplicates.
+
+The types are immutable, hashable, and safe for the SQLAlchemy cache.
+
+### ROW
+
+```python
+from IfxAlchemy import ROW, RowField
+
+address_type = ROW(
+    (
+        RowField("calle", String(120)),
+        RowField("codigo_postal", String(12)),
+    ),
+    name="address_t",
+    owner="informix",
+)
+```
+
+Supports anonymous and named ROWs, nested types, and positional or named access to the reflected value.
+
+### DISTINCT
+
+```python
+from IfxAlchemy import DISTINCT
+
+customer_code = DISTINCT(
+    "customer_code_t",
+    String(20),
+    owner="informix",
+)
+```
+
+### DDL for named types
+
+```python
+from IfxAlchemy import (
+    CreateDistinctType,
+    CreateRowType,
+    DropDistinctType,
+    DropRowType,
+)
+
+connection.execute(CreateRowType(address_type, if_not_exists=True))
+connection.execute(DropRowType(address_type, if_exists=True))
+```
+
+Reflection reconstructs ROW types, nested collections, and DISTINCT from extended type catalogs.
+
+---
+
+## Optimizer directives
+
+Typed directives:
+
+- `FirstRows`;
+- `AllRows`;
+- `JoinOrder`;
+- `UseIndex`;
+- `AvoidIndex`.
+
+Example:
+
+```python
+from IfxAlchemy import FirstRows, UseIndex
+
+statement = select(clientes).execution_options(
+    informix_optimizer_directives=[
+        FirstRows(),
+        UseIndex(clientes, "ix_clientes_nombre"),
+    ]
+)
+```
+
+The comment is placed immediately after the root DML keyword:
+
+```sql
+SELECT {+FIRST_ROWS, INDEX(clientes ix_clientes_nombre)} ...
+```
+
+Also works with `UPDATE`, `DELETE`, and statements preceded by CTE.
+
+Properties:
+
+- immutable and hashable objects;
+- stable cache keys;
+- preserved order;
+- duplicate rejection;
+- `FIRST_ROWS` and `ALL_ROWS` mutually exclusive;
+- validation that the index belongs to the table;
+- rejection of arbitrary text and SQL injection;
+- explicit aliases supported;
+- anonymous aliases rejected when they do not allow stable SQL.
+
+---
+
+## Reflection and inspection
 
 The `Inspector` supports:
 
-- detection of tables, views, sequences and temporary tables known to the connection;
-- owner/schema names in ANSI databases;
-- names of tables, views and sequences;
-- SQL definition of views;
-- columns, nullability, defaults, autoincrement and temporal types;
+- schemas/owners in ANSI databases;
+- tables;
+- views;
+- sequences;
+- synonyms;
+- user-defined types;
+- columns;
+- nullability;
+- defaults;
+- autoincrement;
+- `Identity` reflected from private sequences;
+- temporal types;
+- `BOOLEAN`;
+- `NCHAR`/`NVARCHAR`;
+- `LVARCHAR`;
+- JSON/BSON;
+- complex types;
 - primary keys;
 - outgoing and incoming foreign keys;
-- indexes, column order and sort direction;
+- `ON DELETE CASCADE`;
+- indexes;
+- index column order and direction;
+- functional indexes;
 - unique constraints;
 - `CHECK` constraints;
-- multiple reflection of columns, PK, FK, indexes, uniques, checks, comments and options;
-- storage options and table lock level;
-- normalization of quoted/unquoted names and preservation of upper/lower case.
+- comments;
+- table physical options;
+- lock level;
+- effective page size;
+- fragmentation;
+- advanced index metadata;
+- view definitions.
 
-The global enumeration of temporary tables and temporary views returns an empty list because Informix/ODBC does not offer, in this contract, a reliable enumeration of temporary objects local to another connection. `Inspector.has_table()` can verify a known temporary table using the same connection.
+### Multiple reflection
 
-### ANSI databases and owners
+The `get_multi_*` variants are implemented for:
 
-During `Dialect.initialize()`, the dialect queries the connected database and its ANSI indicator:
+- columns;
+- primary keys;
+- foreign keys;
+- indexes;
+- uniques;
+- checks;
+- comments;
+- table options.
 
-- in an ANSI database, `supports_schemas` is enabled and the owner is integrated into DDL and reflection;
-- in a non-ANSI database, the dialect preserves SQLAlchemy's schema-less behavior;
-- the default owner is obtained from the current session;
-- reflection filters respect quoted and unquoted names.
+Multiple reflection respects:
 
-## Deliberate limitations
+- `schema`;
+- `filter_names`;
+- `ObjectKind`;
+- `ObjectScope`;
+- tables and views;
+- omission of non-existent objects.
 
-- There is no `INSERT`, `UPDATE` or `DELETE ... RETURNING`.
-- `insertmanyvalues` and SQLAlchemy's generic multi-value `INSERT` are not used.
-- `Identity()` is not emitted as native DDL: autoincrement integer PKs are normalized to the `SERIAL` family.
-- There are no two-phase transactions.
-- `ON UPDATE CASCADE` is not part of the contract.
-- `NOWAIT`, `SKIP LOCKED`, `OF` and key-share modes of `FOR UPDATE` are not supported.
-- `VARCHAR` requires length; for unlimited text use `Text`, `CLOB` or the appropriate type.
-- Timezones are not represented in `DATETIME`.
-- Table comments are still reflected as `None`.
-- Materialized views and temporary views are not enumerated.
-- Isolated temporal or numeric parameters, without column context, may not provide the driver with sufficient ODBC information.
-- Native out parameters are not part of the maintained `pyodbc` backend.
+### Name normalization
 
-## Native capabilities pending exposure
+- preservation of delimited identifiers;
+- normalization of non-delimited names;
+- ANSI owners;
+- physical names prefixed by owner converted back to the logical name;
+- explicit aliases for namesake tables in different schemas;
+- `schema_translate_map` for tables and sequences.
 
-Informix 14.10 has capabilities that do not yet have a first-level abstraction in the dialect:
+### Temporals
 
-1. Native `BOOLEAN` in compilation, binds, results and reflection, instead of `SMALLINT`.
-2. Native `SKIP ... FIRST ...` pagination for simple integer offsets, keeping `ROW_NUMBER()` as fallback for complex expressions.
-3. `JSON`, `BSON`, `LVARCHAR`, `MONEY` and `INTERVAL` types with specific classes, operators, qualifiers and reflection round-trip.
-4. Complex types `ROW`, `LIST`, `SET` and `MULTISET` with Python processors and declarative DDL.
-5. A `MERGE` construct to combine `UPDATE`/`DELETE` with `INSERT`.
-6. Table and index fragmentation and partitioning, including `FRAGMENT/PARTITION BY`, `RANGE INTERVAL`, `PUT`, dbspace location and compression.
-7. Functional indexes, R-tree, forest-of-trees, operator classes and access methods.
-8. Synonyms for tables, views and sequences, including public/private synonyms and reflection.
-9. `CREATE TABLE ... AS SELECT` and `SELECT ... INTO TEMP/RAW/STANDARD` as declarative constructs.
-10. Optimizer directives integrated with SQLAlchemy's hint API.
-11. Enriched reflection of comments, fragments, compression, access methods and user-defined opaque types.
+`Inspector.has_table()` can check a known temporary table from the same connection. Global enumeration of temporals returns an empty list because the ODBC contract does not offer a reliable way to list local objects from another session.
 
-These capabilities are roadmap: they must not be announced as supported until compilation, execution, reflection and integration tests are incorporated.
+---
 
-## Testing
+## ANSI databases and owners
 
-### Unit and compilation tests
-
-These do not need an Informix server:
-
-```bash
-python -m pytest -m "not requires_informix and not legacy_ifxpy" -W error
-```
-
-### Project integration tests
-
-Define a test database URL:
+During `Dialect.initialize()` the dialect queries:
 
 ```text
-INFORMIX_SQLALCHEMY_URL=informix+pyodbc://...
+sysmaster:sysdatabases.is_ansi
 ```
 
-Then run:
+Behavior:
+
+- in an ANSI database, `supports_schemas=True` and the owner participates in DDL, aliasing, sequences, and reflection;
+- in a non-ANSI database, behavior without isolated namespaces is maintained;
+- the default owner is obtained from the session;
+- reflection filters respect quoted and unquoted names.
+
+Informix models schemas as owners/authorizations. Therefore, the dialect does not implement a generic `CREATE SCHEMA` as if it were an independent namespace. The suite creates test owners via `GRANT CONNECT` and `GRANT RESOURCE` only when the connection has been certified as ANSI.
+
+Physical names of constraints and indexes may incorporate an owner prefix to avoid collisions. Reflection removes this prefix and returns the logical name expected by SQLAlchemy and Alembic.
+
+---
+
+## Alembic integration
+
+Upon importing `IfxAlchemy`, the package automatically registers:
+
+```text
+IfxAlchemy.alembic:InformixImpl
+```
+
+The Alembic dependency is optional at runtime. The integration is only imported when Alembic is installed.
+
+Capabilities:
+
+- automatic selection of `InformixImpl`;
+- online table and column comments;
+- offline comments with `--sql` and unique creation of the auxiliary catalog;
+- functional index comparison;
+- access method comparison;
+- operator classes;
+- access method parameters;
+- forest-of-trees;
+- index fragmentation;
+- partial predicates;
+- dbspace;
+- compression;
+- visibility;
+- parenthesis normalization in expressions;
+- omission of differences for non-persistent options like `online` and certain effective fillfactors.
+
+Runner:
 
 ```bash
-python -m pytest -m requires_informix -W error
+python run_alembic_tests.py
+```
+
+---
+
+## Test environment with two databases
+
+The infrastructure uses two independent databases:
+
+| Database | Mode | Usage |
+|---|---|---|
+| `ifxalchemy_test` | non-ANSI, `WITH LOG` | own tests and ordinary integration |
+| `ifxalchemy_test_ansi` | ANSI, `WITH LOG MODE ANSI` | official SQLAlchemy and Alembic suite |
+
+### Provisioning
+
+The helper:
+
+1. connects via ODBC to `sysmaster`;
+2. queries `sysmaster:sysdatabases`;
+3. completely closes the ODBC engine;
+4. creates the missing database using DB-Access in server-only mode;
+5. reconnects;
+6. verifies `is_ansi` and logging.
+
+SQL used:
+
+```sql
+CREATE DATABASE ifxalchemy_test WITH LOG;
+CREATE DATABASE ifxalchemy_test_ansi WITH LOG MODE ANSI;
+```
+
+Existing databases are never deleted or automatically converted. An incorrect mode or a non-logging database causes an explicit error.
+
+### DB-Access inside Docker
+
+`docker exec` does not necessarily load the Informix profile. The provisioner locates DB-Access in this order:
+
+1. `IFXALCHEMY_DOCKER_DBACCESS`;
+2. `$INFORMIXDIR/bin/dbaccess`;
+3. `/opt/ibm/informix/bin/dbaccess`;
+4. `command -v dbaccess`.
+
+Recommended configuration:
+
+```dotenv
+IFXALCHEMY_DOCKER_DBACCESS=/opt/ibm/informix/bin/dbaccess
+```
+
+---
+
+## Test execution
+
+### Full project suite
+
+```bash
+python -m pytest
+```
+
+### Serverless tests only
+
+```bash
+python -m pytest \
+    -m "not requires_informix and not legacy_ifxpy"
+```
+
+### Informix integration
+
+```bash
+python -m pytest -m requires_informix
+```
+
+### Provisioning and certification of the two databases
+
+```bash
+python -m pytest test/test_official_ansi_database.py -v
 ```
 
 ### Official SQLAlchemy suite
-
-The suite is destructive and must target a dedicated database. Copy the local template:
-
-```bash
-cp .env.official-suites.example .env.official-suites
-```
-
-On Windows:
-
-```bat
-copy .env.official-suites.example .env.official-suites
-```
-
-Review the values and run:
 
 ```bash
 python run_tests.py
 ```
 
-The runner:
+You can filter the suite:
 
-- loads exclusively `.env.official-suites`;
-- requires explicit destructive authorization;
-- blocks forbidden databases;
-- verifies database identity via `DBINFO('dbname')`;
-- inventories residual objects before running the suite;
-- generates a JUnit report in `artifacts/`.
+```bash
+python run_tests.py -k "SameNamedSchemaTableTest" -vv
+```
 
-### External Alembic suite
+### Alembic suite
 
 ```bash
 python run_alembic_tests.py
@@ -438,38 +1390,165 @@ python run_alembic_tests.py
 python run_sql_expression_certification.py
 ```
 
-## Environment variables
+### Focused families
 
-| Variable | Use |
-|---|---|
-| `INFORMIX_SQLALCHEMY_URL` | Project integration tests |
-| `INFORMIX_SQLALCHEMY_SUITE_URL` | Dedicated database for the official suite |
-| `INFORMIX_SQLALCHEMY_SUITE_EXPECTED_DATABASE` | Exact name expected by the safety guard |
-| `INFORMIX_SQLALCHEMY_SUITE_ALLOW_DESTRUCTIVE` | Explicit authorization for destructive cleanup |
-| `INFORMIX_SQLALCHEMY_SUITE_JUNIT_XML` | Optional path for the JUnit report |
-
-Do not version `.env.informix` or `.env.official-suites`. Use only their `.example` templates as documentation.
-
-## Main structure
-
-```text
-IfxAlchemy/
-├── base.py          # dialect, SQL/DDL compilers and execution context
-├── pyodbc.py        # DBAPI, ODBC URL, connection and driver conversions
-├── reflection.py    # Informix catalog reflection
-├── temporal.py      # temporal types and fractional precision
-├── requirements.py  # capabilities declared to the SQLAlchemy suite
-├── provision.py     # safe provisioning and cleanup for the official suite
-└── sqla_compat.py   # isolation of differences between SQLAlchemy 2.0 and 2.1
+```bash
+python -m pytest test/test_comments.py test/test_comments_integration.py -v
+python -m pytest test/test_identity_columns.py -v
+python -m pytest test/test_json_bson.py -v
+python -m pytest test/test_complex_types.py -v
+python -m pytest test/test_fragmentation.py -v
+python -m pytest test/test_advanced_indexes.py -v
+python -m pytest test/test_merge.py -v
+python -m pytest test/test_optimizer_directives.py -v
 ```
 
-## Compatibility policy
+JUnit reports are written by default to `artifacts/` when the corresponding variables are configured.
 
-- The stable contract is limited to `informix+pyodbc`.
-- Differences between SQLAlchemy 2.0 and 2.1 must remain encapsulated in `sqla_compat.py`.
-- Every new capability needs compilation tests and, when it depends on the server, `requires_informix` tests.
-- Capabilities declared in `requirements.py` must correspond to real behavior, not to the server's theoretical capability.
-- The official suite must always run against an isolated, disposable database.
+---
+
+## Environment variables
+
+### Connections
+
+| Variable | Usage |
+|---|---|
+| `INFORMIX_SQLALCHEMY_URL` | legacy/general URL for own tests |
+| `INFORMIX_SQLALCHEMY_NON_ANSI_URL` | explicit URL for `ifxalchemy_test` |
+| `INFORMIX_SQLALCHEMY_ANSI_URL` | explicit URL for `ifxalchemy_test_ansi` |
+| `INFORMIX_SQLALCHEMY_SUITE_URL` | legacy seed for the official suite |
+
+Inherited variables are accepted as connection templates, but the database name is replaced by the correct profile to prevent an ANSI suite from accidentally ending up in the non-ANSI database.
+
+### Database names and creation
+
+| Variable | Default |
+|---|---|
+| `IFXALCHEMY_NON_ANSI_DATABASE` | `ifxalchemy_test` |
+| `IFXALCHEMY_ANSI_DATABASE` | `ifxalchemy_test_ansi` |
+| `IFXALCHEMY_CREATE_TEST_DATABASES_IF_MISSING` | `true` |
+| `IFXALCHEMY_ADMIN_DATABASE` | `sysmaster` |
+| `IFXALCHEMY_NON_ANSI_DATABASE_DBSPACE` | empty |
+| `IFXALCHEMY_ANSI_DATABASE_DBSPACE` | empty |
+
+### Docker and DB-Access
+
+| Variable | Default |
+|---|---|
+| `IFXALCHEMY_DOCKER_EXECUTABLE` | `docker` |
+| `IFXALCHEMY_DOCKER_CONTAINER` | `ifx` |
+| `IFXALCHEMY_DOCKER_USER` | `informix` |
+| `IFXALCHEMY_DOCKER_DBACCESS` | auto-detection |
+| `IFXALCHEMY_DOCKER_TIMEOUT` | `120` seconds |
+
+### Suite security
+
+| Variable | Usage |
+|---|---|
+| `ALLOW_OFFICIAL_SUITE_DESTRUCTIVE_TESTS` | authorizes destructive cleanup of objects in the ANSI database |
+| `OFFICIAL_SUITE_REQUIRE_EMPTY` | requires the ANSI database to be empty before starting |
+| `FORBIDDEN_DATABASE_NAMES` | databases that can never receive destructive cleanup |
+
+### Reports
+
+| Variable | Usage |
+|---|---|
+| `SQLALCHEMY_SUITE_JUNIT` | XML path for the SQLAlchemy suite |
+| `ALEMBIC_SUITE_JUNIT` | XML path for the Alembic suite |
+| `IFXALCHEMY_INCLUDE_OUTPARAMS` | includes legacy out parameter tests when the backend allows it |
+
+`.env.informix` and `.env.official-suites` should not be versioned. Use the `.example` files as templates.
+
+---
+
+## Deliberate limitations
+
+These capabilities are not part of the current contract or are conditioned:
+
+### DML
+
+- there is no `INSERT ... RETURNING`;
+- there is no `UPDATE ... RETURNING`;
+- there is no `DELETE ... RETURNING`;
+- `insertmanyvalues` is disabled;
+- the pyodbc backend does not offer native out parameters in the main contract.
+
+### Transactions and locks
+
+- no two-phase transactions;
+- `NOWAIT`, `SKIP LOCKED`, `OF`, or generic key-share are not supported;
+- `ON UPDATE CASCADE` is not supported.
+
+### Schemas and temporals
+
+- generic `CREATE SCHEMA` is not implemented; schemas are Informix owners;
+- global enumeration of temporary tables is not reliable;
+- temporary views are not enumerated;
+- materialized views are not supported in the current contract.
+
+### Types and binds
+
+- lengthless `VARCHAR` is closed;
+- timezones are not represented in `DATETIME`;
+- Informix retains at most five digits of temporal fraction;
+- isolated `DATE`, `TIME`, `DATETIME`, `DECIMAL`, or `NULL` parameters may lack sufficient ODBC context;
+- full Unicode depends on `DB_LOCALE`, except in the auxiliary comments catalog;
+- `DECIMAL(38,12)` and other cases above the server's practical limit may fail;
+- `TEXT` does not support all ordinary comparisons.
+
+### Indexes and expressions
+
+- generic creation of any SQLAlchemy expression as an index remains closed;
+- functional indexes require opt-in and validated forms;
+- constraint comments are not supported.
+
+### SQLAlchemy `Identity`
+
+- `always=True` and `on_null` cannot be enforced with exact native semantics;
+- the implementation uses private sequences and client pre-execution.
+
+### Official suite
+
+Suite `skipped` are not automatically errors. Each skipped capability should be opened only after:
+
+1. implementing production code;
+2. adding own test;
+3. validating against real Informix;
+4. opening a property in `requirements.py`;
+5. running the official family;
+6. running the full suite.
+
+Installed tests in `site-packages/sqlalchemy/testing/suite` must not be modified to hide failures.
+
+---
+
+## Compatibility and development policy
+
+1. The stable contract is `informix+pyodbc`.
+2. `IfxAlchemy.IfxPy` is legacy compatibility, not the main backend.
+3. Every new capability needs compilation tests and, when it depends on the server, `requires_informix` tests.
+4. User-supplied names and values must be processed via SQLAlchemy objects or structured validators.
+5. Arbitrary SQL strings are not accepted in typed APIs like fragmentation, synonyms, indexes, `MERGE`, or directives.
+6. `requirements.py` capabilities must correspond to tested real behavior.
+7. The official suite must be run on an isolated, disposable ANSI database.
+8. Before applying broad refactorings, a commit should be preserved or, at minimum, a copy of the tree and `git diff --binary`.
+9. Regressions must be fixed in the dialect, not by patching the official suite.
+10. SQLAlchemy compatibility changes should be concentrated in `sqla_compat.py` whenever possible.
+
+Recommended flow:
+
+```bash
+git status --short --branch
+git switch -c feature/nombre-capacidad
+python -m pytest -m "not requires_informix and not legacy_ifxpy"
+python -m pytest -m requires_informix
+python run_tests.py
+python run_alembic_tests.py
+git add .
+git commit -m "Implementa nombre-capacidad para Informix"
+```
+
+---
 
 ## License
 

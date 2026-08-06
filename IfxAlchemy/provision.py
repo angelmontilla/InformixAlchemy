@@ -32,6 +32,26 @@ def _quote_authorization_identifier(connection, name):
     )
 
 
+def _physical_test_owner(connection, owner):
+    """Return the owner spelling used by unquoted schema-qualified SQL.
+
+    Informix ANSI databases upshift explicit, unquoted owner names unless the
+    server was initialized with ``ANSIOWNER=1``. SQLAlchemy's official suite
+    emits ``test_schema.table`` as an unquoted owner reference, so the
+    corresponding authorization identifier must be uppercase in the normal
+    ANSI configuration. Non-ANSI databases retain the existing lowercase
+    contract.
+    """
+    if getattr(
+        connection.dialect,
+        "is_ansi_database",
+        False,
+    ):
+        return str(owner).upper()
+
+    return str(owner)
+
+
 def _qualified_identifier(connection, owner, name):
     quoted_owner = _quote_authorization_identifier(
         connection,
@@ -206,18 +226,23 @@ def _drop_catalog_object(connection, catalog_object) -> None:
 def _ensure_test_schema_owner(connection, owner):
     """Ensure that owner can own objects in the test database."""
 
+    physical_owner = _physical_test_owner(
+        connection,
+        owner,
+    )
+
     row = connection.exec_driver_sql(
         """
         SELECT FIRST 1 u.usertype
         FROM sysusers u
-        WHERE LOWER(u.username) = LOWER(?)
+        WHERE u.username = ?
         """,
-        (owner,),
+        (physical_owner,),
     ).first()
 
     quoted_owner = _quote_authorization_identifier(
         connection,
-        owner,
+        physical_owner,
     )
 
     if row is None:
@@ -259,6 +284,17 @@ def _informix_post_configure_engine(
 
     try:
         with engine.begin() as connection:
+            # Owner-qualified namespaces are a real schema feature only in
+            # ANSI databases. Provisioning these authorization identifiers in
+            # the non-ANSI integration database creates misleading state and
+            # can make tests depend on execution order.
+            if not getattr(
+                connection.dialect,
+                "is_ansi_database",
+                False,
+            ):
+                return
+
             for owner in _TEST_SCHEMA_OWNERS:
                 _ensure_test_schema_owner(
                     connection,

@@ -22,8 +22,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from urllib.parse import unquote
+import re
 import threading
+from collections.abc import Mapping
+from urllib.parse import unquote
 
 from sqlalchemy import types as sa_types
 from sqlalchemy import util
@@ -48,6 +50,299 @@ from .base import (
 
 SQL_INFX_BIGINT = -114
 INFX_BIGINT_BINARY_SIZE = 8
+
+
+# SQLSTATE class 08 is reserved for connection exceptions. SQLSTATE 01002
+# is the ODBC-standard "disconnect error" warning. pyodbc normally places
+# the SQLSTATE in ``error.args[0]``, but driver-manager and platform
+# combinations can embed it in a longer diagnostic string or expose it as
+# an exception attribute.
+_DISCONNECT_SQLSTATE_RE = re.compile(
+    r"(?<![A-Z0-9])(?:08[A-Z0-9]{3}|01002)(?![A-Z0-9])"
+)
+
+# Native Informix / Informix ODBC diagnostics that identify a failed or
+# unavailable physical connection even when the driver reports a generic
+# SQLSTATE such as HY000 or S1000. Keep this list deliberately narrow:
+# operational errors that leave the DBAPI connection usable must not
+# invalidate the pool.
+_DISCONNECT_NATIVE_ERROR_CODES = frozenset(
+    {
+        -908,  # Attempt to connect to database server failed.
+        -930,  # Cannot connect to database server.
+        -11020,  # Communication link failure.
+        -25580,  # System error occurred in a network function.
+        -25582,  # Network connection is broken.
+    }
+)
+_DISCONNECT_NATIVE_ERROR_RE = re.compile(
+    r"(?<!\d)(?:%s)(?!\d)"
+    % "|".join(
+        re.escape(str(code))
+        for code in sorted(
+            _DISCONNECT_NATIVE_ERROR_CODES,
+            key=lambda code: (-len(str(code)), code),
+        )
+    )
+)
+_DISCONNECT_NATIVE_CONTEXT_RE = re.compile(
+    r"\b(?:INFORMIX|SQLCODE|NATIVE(?: ERROR(?: CODE)?)?)\b"
+)
+
+# Explicit connection-loss messages used by Informix, pyodbc, unixODBC and
+# common operating-system socket layers. Avoid generic tokens such as
+# ``NETWORK`` or all timeout errors because those produce false pool
+# invalidations for recoverable statement/configuration failures.
+_DISCONNECT_MESSAGE_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"\b(?:DATABASE\s+)?CONNECTION "
+        r"(?:IS |HAS BEEN |WAS )?"
+        r"(?:CLOSED|LOST|BROKEN|RESET|ABORTED|TERMINATED)\b",
+        r"\bCONNECTION (?:IS )?(?:NO LONGER|NOT) "
+        r"(?:ACTIVE|OPEN|VALID|USABLE)\b",
+        r"\bATTEMPT TO USE (?:A )?CLOSED CONNECTION\b",
+        r"\bCANNOT (?:ROLLBACK|COMMIT|EXECUTE|OPERATE) "
+        r"(?:ON|USING) (?:A )?CLOSED CONNECTION\b",
+        r"\b(?:COMMUNICATION|CONNECTION) LINK FAILURE\b",
+        r"\bCOMMUNICATION FAILURE\b",
+        r"\bCONNECTION FAILURE\b",
+        r"\bNETWORK CONNECTION "
+        r"(?:IS |HAS BEEN |WAS )?"
+        r"(?:BROKEN|CLOSED|LOST|RESET|ABORTED|TERMINATED)\b",
+        r"\bGENERAL NETWORK ERROR\b",
+        r"\bSYSTEM ERROR OCCURRED IN (?:A )?NETWORK FUNCTION\b",
+        r"\b(?:DATABASE )?SERVER "
+        r"(?:IS |WAS )?(?:NOT AVAILABLE|UNAVAILABLE|DOWN|OFFLINE)\b",
+        r"\b(?:CANNOT|CAN'T|COULD NOT|FAILED TO) CONNECT TO "
+        r"(?:THE )?(?:DATABASE )?SERVER\b",
+        r"\bATTEMPT TO CONNECT TO "
+        r"(?:THE )?(?:DATABASE )?SERVER FAILED\b",
+        r"\bCONNECTION (?:WAS )?REFUSED\b",
+        r"\bBROKEN PIPE\b",
+        r"\bCONNECTION RESET BY PEER\b",
+        r"\bCONNECTION ABORTED BY (?:HOST|PEER|SOFTWARE)\b",
+        r"\bSOCKET "
+        r"(?:IS |HAS BEEN |WAS )?"
+        r"(?:CLOSED|RESET|NOT CONNECTED|DISCONNECTED)\b",
+        r"\bTCP(?:/IP)? CONNECTION "
+        r"(?:IS |HAS BEEN |WAS )?"
+        r"(?:BROKEN|CLOSED|RESET|ABORTED|TERMINATED)\b",
+        r"\bSERVER CLOSED THE CONNECTION\b",
+        r"\bREMOTE HOST "
+        r"(?:CLOSED|RESET|ABORTED) (?:THE )?CONNECTION\b",
+    )
+)
+
+_DIAGNOSTIC_ATTRIBUTE_NAMES = (
+    "sqlstate",
+    "sql_state",
+    "native_error",
+    "native_code",
+    "sqlcode",
+    "driver_error",
+    "message",
+)
+
+_EXCEPTION_LINK_ATTRIBUTE_NAMES = (
+    "orig",
+    "__cause__",
+    "__context__",
+)
+
+
+def _safe_getattr(value, attribute_name, default=None):
+    """Read a diagnostic attribute without trusting driver properties."""
+
+    try:
+        return getattr(value, attribute_name, default)
+    except Exception:
+        return default
+
+
+def _flatten_exception_values(value, seen=None):
+    """Yield scalar values from nested DBAPI diagnostic containers.
+
+    Driver wrappers occasionally place pyodbc diagnostics in nested tuples,
+    lists or mappings. Cycle detection keeps malformed wrapper payloads from
+    recursing forever.
+    """
+
+    if value is None:
+        return
+
+    if isinstance(
+        value,
+        (str, bytes, bytearray, memoryview, int, float),
+    ):
+        yield value
+        return
+
+    if seen is None:
+        seen = set()
+
+    value_id = id(value)
+    if value_id in seen:
+        return
+
+    if isinstance(value, Mapping):
+        seen.add(value_id)
+        for item in value.values():
+            yield from _flatten_exception_values(item, seen)
+        return
+
+    if isinstance(value, (tuple, list, set, frozenset)):
+        seen.add(value_id)
+        for item in value:
+            yield from _flatten_exception_values(item, seen)
+        return
+
+    yield value
+
+
+def _iter_exception_chain(error):
+    """Yield an exception and any wrapped DBAPI exceptions exactly once."""
+
+    pending = [error]
+    seen = set()
+
+    while pending:
+        current = pending.pop()
+        if not isinstance(current, BaseException):
+            continue
+
+        current_id = id(current)
+        if current_id in seen:
+            continue
+
+        seen.add(current_id)
+        yield current
+
+        for attribute_name in _EXCEPTION_LINK_ATTRIBUTE_NAMES:
+            linked = _safe_getattr(current, attribute_name)
+            if isinstance(linked, BaseException):
+                pending.append(linked)
+
+
+def _stringify_diagnostic_value(value):
+    """Return text for a diagnostic value without propagating driver bugs."""
+
+    if isinstance(value, memoryview):
+        value = value.tobytes()
+    elif isinstance(value, bytearray):
+        value = bytes(value)
+
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+
+    try:
+        return str(value)
+    except Exception:
+        return ""
+
+
+def _iter_diagnostic_values(error):
+    """Yield diagnostic values while avoiding SQLAlchemy wrapper SQL text."""
+
+    for current in _iter_exception_chain(error):
+        # SQLAlchemy-style wrapper exceptions expose the real DBAPI exception
+        # through ``orig`` and can include the SQL statement and parameter
+        # values in their own string/args. Those values are not diagnostics
+        # and can contain coincidental SQLSTATEs or Informix error numbers.
+        has_orig = isinstance(_safe_getattr(current, "orig"), BaseException)
+
+        if not has_orig:
+            yield from _flatten_exception_values(
+                _safe_getattr(current, "args", ())
+            )
+
+        for attribute_name in _DIAGNOSTIC_ATTRIBUTE_NAMES:
+            attribute_value = _safe_getattr(current, attribute_name)
+            if attribute_value is None or callable(attribute_value):
+                continue
+            yield from _flatten_exception_values(attribute_value)
+
+        if not has_orig:
+            # Some exception classes expose useful information only through
+            # ``__str__`` rather than through args or diagnostic attributes.
+            yield current
+
+
+def _disconnect_diagnostic_text(error):
+    """Return normalized diagnostics from an error and wrapped errors."""
+
+    return " ".join(
+        text
+        for value in _iter_diagnostic_values(error)
+        if (text := _stringify_diagnostic_value(value))
+    ).upper()
+
+
+def _has_disconnect_native_error(error):
+    """Detect selected native codes without matching arbitrary SQL values."""
+
+    native_code_texts = {
+        str(code) for code in _DISCONNECT_NATIVE_ERROR_CODES
+    }
+
+    for value in _iter_diagnostic_values(error):
+        if (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and value in _DISCONNECT_NATIVE_ERROR_CODES
+        ):
+            return True
+
+        text = _stringify_diagnostic_value(value).upper()
+        if not text or not _DISCONNECT_NATIVE_ERROR_RE.search(text):
+            continue
+
+        if text.strip() in native_code_texts:
+            return True
+
+        if _DISCONNECT_NATIVE_CONTEXT_RE.search(text):
+            return True
+
+    return False
+
+
+def _connection_is_closed(connection, cursor):
+    """Return True when a supplied DBAPI connection explicitly says closed."""
+
+    candidates = [connection]
+    cursor_connection = _safe_getattr(cursor, "connection")
+    if cursor_connection is not None:
+        candidates.append(cursor_connection)
+
+    seen = set()
+    while candidates:
+        candidate = candidates.pop()
+        if candidate is None:
+            continue
+
+        candidate_id = id(candidate)
+        if candidate_id in seen:
+            continue
+        seen.add(candidate_id)
+
+        closed = _safe_getattr(candidate, "closed")
+        if closed is True or (
+            isinstance(closed, int)
+            and not isinstance(closed, bool)
+            and closed != 0
+        ):
+            return True
+
+        for attribute_name in (
+            "dbapi_connection",
+            "driver_connection",
+            "connection",
+        ):
+            nested = _safe_getattr(candidate, attribute_name)
+            if nested is not None and nested is not candidate:
+                candidates.append(nested)
+
+    return False
 
 
 def _quote_odbc_value(value, force=False):
@@ -475,6 +770,37 @@ class IfxDialect_pyodbc(PyODBCConnector, IfxDialect):
     def import_dbapi(cls):
         return __import__("pyodbc")
 
+    def is_disconnect(self, error, connection, cursor):
+        """Identify pyodbc diagnostics that invalidate an Informix session.
+
+        SQLAlchemy uses this result to discard the failed physical connection
+        and, for pool pre-ping, to retry with a newly created connection.
+        Informix ODBC diagnostics vary by driver version, driver manager and
+        operating system, so classification is based on SQLSTATE class 08,
+        narrowly selected native connectivity errors, explicit connection
+        failure messages and an explicit DBAPI ``closed`` state. It is not
+        based on the broad DBAPI exception class.
+        """
+
+        if super().is_disconnect(error, connection, cursor):
+            return True
+
+        if _connection_is_closed(connection, cursor):
+            return True
+
+        text = _disconnect_diagnostic_text(error)
+
+        if _DISCONNECT_SQLSTATE_RE.search(text):
+            return True
+
+        if _has_disconnect_native_error(error):
+            return True
+
+        return any(
+            pattern.search(text)
+            for pattern in _DISCONNECT_MESSAGE_PATTERNS
+        )
+
     @staticmethod
     def _normalize_isolation_level(level):
         if level is None:
@@ -699,26 +1025,51 @@ class IfxDialect_pyodbc(PyODBCConnector, IfxDialect):
         A subsequent ``SQL_ATTR_TXN_ISOLATION`` change then fails with
         ``HY011 / -11119`` (attribute cannot be set now).
 
-        Roll back only after a successful ping and only in manual-commit
-        mode.  Pool pre-ping runs while the physical connection is checked
-        out and after the previous pool reset, so no user transaction can be
-        active at this point.
+        In manual-commit mode, attempt a rollback after every ping attempt,
+        including a failed SELECT.  A non-disconnect DBAPI error can leave the
+        physical connection open with a transaction started or contaminated.
+        Cursor-close and rollback failures must never replace the original
+        ping exception; they are propagated only when the ping itself
+        succeeded.
         """
 
-        cursor = dbapi_connection.cursor()
+        cursor = None
+        ping_failed = False
+        manual_commit = not getattr(
+            dbapi_connection,
+            "autocommit",
+            False,
+        )
 
         try:
+            cursor = dbapi_connection.cursor()
             cursor.execute(
                 "SELECT FIRST 1 tabname "
                 "FROM systables "
                 "ORDER BY tabname"
             )
             cursor.fetchone()
+        except BaseException:
+            ping_failed = True
+            raise
         finally:
-            cursor.close()
+            cleanup_error = None
 
-        if not getattr(dbapi_connection, "autocommit", False):
-            dbapi_connection.rollback()
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except BaseException as error:
+                    cleanup_error = error
+
+            if manual_commit:
+                try:
+                    dbapi_connection.rollback()
+                except BaseException as error:
+                    if cleanup_error is None:
+                        cleanup_error = error
+
+            if not ping_failed and cleanup_error is not None:
+                raise cleanup_error
 
         return True
 

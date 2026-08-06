@@ -1,0 +1,49 @@
+name: compatibility
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  offline:
+    name: Python ${{ matrix.python }} / SQLAlchemy ${{ matrix.sqlalchemy }}
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.sqlalchemy == 'next-preview' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.11', '3.12', '3.13', '3.14']
+        sqlalchemy: [minimum, current, next-preview]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install test tools
+        run: python -m pip install --upgrade pip pytest alembic python-dotenv pyodbc ruff
+      - name: Install minimum SQLAlchemy
+        if: matrix.sqlalchemy == 'minimum'
+        run: |
+          python -m pip install -c constraints/sqlalchemy-min.txt SQLAlchemy
+          python -m pip install --no-deps -e .
+      - name: Install current SQLAlchemy 2.0
+        if: matrix.sqlalchemy == 'current'
+        run: |
+          python -m pip install -c constraints/sqlalchemy-stable.txt SQLAlchemy
+          python -m pip install --no-deps -e .
+      - name: Install SQLAlchemy 2.1 preview probe
+        if: matrix.sqlalchemy == 'next-preview'
+        run: |
+          python -m pip install --pre -c constraints/sqlalchemy-next.txt SQLAlchemy
+          python -m pip install --no-deps -e .
+      - name: Show versions
+        run: python -c "import platform, sqlalchemy, IfxAlchemy; print(platform.python_version(), sqlalchemy.__version__, IfxAlchemy.__version__)"
+      - name: Run static quality gate
+        run: python -m ruff check IfxAlchemy test tools
+      - name: Run offline suite
+        run: python -m pytest
+      - name: Check source distribution hygiene
+        run: |
+          python -m tools.build_clean_archive /tmp/InformixAlchemy-source-clean.zip
+          python -m tools.check_secrets --release /tmp/InformixAlchemy-source-clean.zip

@@ -46,14 +46,18 @@ class _Connection:
         rows_by_owner=None,
         default_owner="informix",
         execute_error=None,
+        is_ansi_database=False,
+        usertypes=None,
     ):
         self.dialect = SimpleNamespace(
             default_schema_name=default_schema_name,
             identifier_preparer=_Preparer(),
+            is_ansi_database=is_ansi_database,
         )
         self.rows_by_owner = rows_by_owner or {}
         self.default_owner = default_owner
         self.execute_error = execute_error
+        self.usertypes = usertypes or {}
         self.calls = []
         self.statements = []
 
@@ -72,6 +76,19 @@ class _Connection:
                     (),
                 )
             )
+
+        if normalized.startswith("SELECT FIRST 1 U.USERTYPE"):
+            username = str(parameters[0])
+            usertype = self.usertypes.get(username)
+            return _Result(
+                first_row=(usertype,)
+                if usertype is not None
+                else None
+            )
+
+        if normalized.startswith("GRANT "):
+            self.statements.append(statement)
+            return _Result()
 
         if normalized.startswith("DROP "):
             if self.execute_error is not None:
@@ -317,3 +334,101 @@ def test_drop_catalog_object_rejects_unknown_catalog_type():
                 "tabid": 999,
             },
         )
+
+
+def test_physical_test_owner_upshifts_for_ansi_database():
+    connection = _Connection(
+        is_ansi_database=True,
+    )
+
+    assert provision._physical_test_owner(
+        connection,
+        "test_schema",
+    ) == "TEST_SCHEMA"
+
+
+def test_physical_test_owner_preserves_non_ansi_spelling():
+    connection = _Connection(
+        is_ansi_database=False,
+    )
+
+    assert provision._physical_test_owner(
+        connection,
+        "test_schema",
+    ) == "test_schema"
+
+
+def test_ensure_test_schema_owner_creates_uppercase_ansi_owner():
+    connection = _Connection(
+        is_ansi_database=True,
+    )
+
+    provision._ensure_test_schema_owner(
+        connection,
+        "test_schema",
+    )
+
+    assert any(
+        parameters == ("TEST_SCHEMA",)
+        for statement, parameters in connection.calls
+        if "SELECT FIRST 1 u.usertype" in statement
+    )
+    assert connection.statements == [
+        'GRANT CONNECT TO "TEST_SCHEMA"',
+        'GRANT RESOURCE TO "TEST_SCHEMA"',
+    ]
+
+
+def test_ensure_test_schema_owner_reuses_existing_ansi_owner():
+    connection = _Connection(
+        is_ansi_database=True,
+        usertypes={"TEST_SCHEMA": "R"},
+    )
+
+    provision._ensure_test_schema_owner(
+        connection,
+        "test_schema",
+    )
+
+    assert connection.statements == []
+
+
+def test_post_configure_engine_skips_owner_provisioning_for_non_ansi(monkeypatch):
+    connection = _Connection(is_ansi_database=False)
+    engine = _Engine(connection)
+    calls = []
+
+    monkeypatch.setattr(
+        provision,
+        "_ensure_test_schema_owner",
+        lambda conn, owner: calls.append((conn, owner)),
+    )
+
+    hook = provision._informix_post_configure_engine.fns["informix"]
+    hook(None, engine, None)
+
+    assert calls == []
+    assert not any(
+        "SELECT FIRST 1 U.USERTYPE" in " ".join(statement.split()).upper()
+        for statement, _ in connection.calls
+    )
+
+
+def test_post_configure_engine_provisions_owners_only_for_ansi(monkeypatch):
+    connection = _Connection(is_ansi_database=True)
+    engine = _Engine(connection)
+    calls = []
+
+    monkeypatch.setattr(
+        provision,
+        "_ensure_test_schema_owner",
+        lambda conn, owner: calls.append((conn, owner)),
+    )
+
+    hook = provision._informix_post_configure_engine.fns["informix"]
+    hook(None, engine, None)
+
+    assert calls == [
+        (connection, "test_schema"),
+        (connection, "test_schema_2"),
+    ]
