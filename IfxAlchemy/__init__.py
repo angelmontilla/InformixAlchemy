@@ -19,7 +19,12 @@
 
 from importlib.metadata import PackageNotFoundError, version as distribution_version
 from pathlib import Path
-import tomllib
+import sys
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 
 
 def _source_tree_version() -> str | None:

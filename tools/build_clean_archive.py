@@ -2,10 +2,15 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import tempfile
-import tomllib
 import zipfile
 from pathlib import Path
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 
 try:  # Support both ``python -m tools...`` and direct script execution.
     from .check_secrets import scan_release_tree
