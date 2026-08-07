@@ -41,7 +41,7 @@ def test_constraint_files_exist_and_match_supported_profiles():
 
     assert minimum == "SQLAlchemy==2.0.45"
     assert stable == "SQLAlchemy>=2.0.45,<2.1"
-    assert preview == "SQLAlchemy>=2.1,<2.2"
+    assert preview == "SQLAlchemy>=2.1.0b1,<2.2"
 
 
 def test_compatibility_matrix_contains_minimum_current_and_experimental_preview():
