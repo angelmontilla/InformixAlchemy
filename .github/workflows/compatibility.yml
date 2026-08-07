@@ -21,7 +21,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Install test tools
-        run: python -m pip install --upgrade pip pytest alembic python-dotenv pyodbc ruff
+        run: python -m pip install --upgrade pip pytest "alembic==1.18.5" python-dotenv pyodbc ruff
       - name: Install minimum SQLAlchemy
         if: matrix.sqlalchemy == 'minimum'
         run: |
